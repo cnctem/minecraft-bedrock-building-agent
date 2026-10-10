@@ -68,6 +68,7 @@ python3 bot.py --test         # 解析逻辑自测
 | `get_block(x, y, z, dimension?)` | 读坐标上的方块类型与状态（行为包脚本；基岩版无 `/data`） |
 | `backup_world()` | 把当前存档热备份成 `.7z`（`save hold` → 7z → `save resume`） |
 | `set_creative_mode(enabled, reason?)` | 切换创造模式（思考强度 max + 创造提示词 + 放宽上限） |
+| `ptc(calls, stop_on_error?)` | 批量工具调用：一次提交多条工具调用，串行执行后合并成一条结果（省往返与上下文） |
 
 能力注册表在 `capabilities.py`，可运行时 `register()` 扩展。
 
@@ -122,6 +123,9 @@ BDS 控制台 **不回显玩家聊天**，所以用行为包 `viktor_bridge` 订
 | `command_blocklist` | 禁止执行的指令 |
 | `command_result_timeout_sec` / `position_timeout_sec` / `inventory_timeout_sec` | 等待脚本/控制台回包的秒数 |
 | `normal_effort` / `creative_effort` | 普通/创造模式的思考强度（low / max） |
+| `parallel_tool_calls` | 是否告诉 API 允许一次返回多个工具调用（默认 true） |
+| `ptc_max_calls` / `ptc_stated_calls` | `ptc` 程序放行数（24）与对模型声明的口径（12）——留一倍余量 |
+| `creative_ptc_max_calls` / `creative_ptc_stated_calls` | 创造模式下的同一对数值（48 / 24） |
 | `creative_max_reply_tokens` / `creative_max_tool_rounds` / `creative_max_context_messages` / `creative_reply_max_chunks` | 创造模式放宽的各项上限 |
 | `backup_dir` | 备份输出目录（默认 `/home/jrj/mc_backup`，文件名 `世界名-YYYYmmdd-HHMMSS.7z`） |
 | `backup_hold_timeout_sec` / `backup_timeout_sec` | 等 `save hold` 完成 / 7z 打包的超时 |

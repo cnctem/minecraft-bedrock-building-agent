@@ -97,6 +97,143 @@ GET_ACTIVITY_SCHEMA = {
 }
 
 
+# ---------- PTC: 批量工具调用 ----------
+# 一次提交多个工具调用, 串行执行后合并成一条结果返回。
+# 为什么必须串行: ①游戏指令有先后顺序, 乱序执行会毁掉施工;
+# ②查询类工具共用同一条日志通道, 并行时两个 get_block 会互相抢到对方的回包而答错坐标。
+MAX_PTC_CALLS = 24          # 程序实际放行数(留一倍余量)
+STATED_PTC_CALLS = 12       # 提示词/报错向模型声明的数(口头限制)
+PTC_RESULT_LIMIT = 3000  # 合并结果的字符上限, 防止一条工具结果撑爆上下文
+
+
+def set_ptc_limits(max_calls: int | None = None, result_limit: int | None = None,
+                   stated_calls: int | None = None):
+    """由 bot 根据当前模式(普通/创造)调整批量上限。
+    max_calls 是程序放行数, stated_calls 是对模型声明的口径(描述与报错都用它),
+    两者留一倍差距: 模型偶尔超一点不会直接撞墙。"""
+    global MAX_PTC_CALLS, PTC_RESULT_LIMIT, STATED_PTC_CALLS
+    if max_calls:
+        MAX_PTC_CALLS = max(1, int(max_calls))
+    if result_limit:
+        PTC_RESULT_LIMIT = max(500, int(result_limit))
+    if stated_calls:
+        STATED_PTC_CALLS = max(1, int(stated_calls))
+        PTC_SCHEMA["function"]["description"] = PTC_DESC.format(n=STATED_PTC_CALLS)
+
+
+def set_ptc_limit(n: int):
+    set_ptc_limits(max_calls=n, stated_calls=n)
+
+
+# 模型有时会把数组项写成别的形状(少了 tool 键、或直接用 OpenAI 的 function 嵌套),
+# 这里做宽容解析, 避免因为一个键名就把整批卡住。
+def _ptc_name(item: dict) -> str:
+    for key in ("tool", "name", "tool_name", "function"):
+        v = item.get(key)
+        if isinstance(v, str) and v.strip():
+            return v.strip()
+        if isinstance(v, dict) and isinstance(v.get("name"), str):
+            return v["name"].strip()
+    return ""
+
+
+def _ptc_args(item: dict):
+    for key in ("arguments", "parameters", "args", "input"):
+        if key in item:
+            return item[key]
+    fn = item.get("function")
+    if isinstance(fn, dict) and "arguments" in fn:
+        return fn["arguments"]
+    return {}
+
+
+def ptc(calls, stop_on_error: bool = False) -> str:
+    if not isinstance(calls, list) or not calls:
+        return "错误: calls 需要是非空数组。"
+    if len(calls) > MAX_PTC_CALLS:
+        return (f"错误: 一次最多 {STATED_PTC_CALLS} 个调用, 收到 {len(calls)} 个。"
+                "请拆成几批提交。")
+    out = []
+    for i, item in enumerate(calls, 1):
+        if not isinstance(item, dict):
+            out.append(f"[{i}] 错误: 每一项需要是 {{tool, arguments}} 对象")
+            continue
+        name = _ptc_name(item)
+        if name == "ptc":
+            out.append(f"[{i}] 错误: 不允许嵌套 ptc")
+            continue
+        shown = ""
+        raw = _ptc_args(item)
+        if isinstance(raw, str):
+            args_json, shown = raw, raw
+        else:
+            try:
+                args_json = json.dumps(raw, ensure_ascii=False)
+                shown = args_json
+            except (TypeError, ValueError) as e:
+                out.append(f"[{i}] {name}: 错误: 参数无法序列化: {e}")
+                continue
+        if not name:
+            out.append(f"[{i}] 错误: 这一项缺少工具名(keys={sorted(item)}); "
+                       "每项必须是 {\"tool\": 名, \"arguments\": {...}}")
+            continue
+        if name not in _REGISTRY:
+            out.append(f"[{i}] {name}: 错误: 未知能力")
+            continue
+        result = execute(name, args_json)
+        out.append(f"[{i}] {name}({shown}) -> {result}")
+        if stop_on_error and ("[错误]" in result or "[警告]" in result
+                              or result.startswith("错误:")):
+            out.append(f"(失败, 已按 stop_on_error 跳过剩余 {len(calls) - i} 个调用)")
+            break
+    text = "\n".join(out)
+    if len(text) > PTC_RESULT_LIMIT:
+        text = text[:PTC_RESULT_LIMIT] + f"\n...(结果过长, 已截断到 {PTC_RESULT_LIMIT} 字符)"
+    return text
+
+
+PTC_DESC = (
+    "批量工具调用(Parallel Tool Calling): 一次提交多个工具调用, 按顺序全部执行, "
+    "结果合并成一条返回。适合把互不依赖的多步操作压成一次往返: 同时查几个玩家的坐标/物品栏, "
+    "或连着下十几条 fill/tp/setblock。比一个个调更省往返和上下文。"
+    "限制: 一次最多 {n} 个调用(超了会被拒绝, 请自己分批); 不允许嵌套 ptc; "
+    "若后一步要看前一步的结果才能决定, 仍应分开调用。"
+    "每项必须写成 {{\"tool\": \"工具名\", \"arguments\": {{...}}}}; 不要用 function 嵌套。"
+)
+
+PTC_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "ptc",
+        "description": PTC_DESC.format(n=STATED_PTC_CALLS),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "calls": {
+                    "type": "array",
+                    "description": "要执行的调用列表, 按数组顺序串行执行",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "tool": {"type": "string",
+                                     "description": "工具名, 如 run_server_command"},
+                            "arguments": {"type": "object",
+                                          "description": "该工具的参数对象"},
+                        },
+                        "required": ["tool", "arguments"],
+                    },
+                },
+                "stop_on_error": {
+                    "type": "boolean",
+                    "description": "遇到 [错误]/[警告] 就停手不执行剩余调用(默认 false)",
+                },
+            },
+            "required": ["calls"],
+        },
+    },
+}
+
+
 # ---------- 注册表 ----------
 
 UPDATE_MEMORY_SCHEMA = {
@@ -133,6 +270,8 @@ _REGISTRY = {
     "stay_silent": (STAY_SILENT_SCHEMA, lambda args: "已保持安静。"),
     "get_player_activity": (GET_ACTIVITY_SCHEMA,
                             lambda args: get_player_activity(args.get("minutes", 60))),
+    "ptc": (PTC_SCHEMA,
+            lambda args: ptc(args.get("calls") or [], bool(args.get("stop_on_error")))),
     # 未来新能力加在这里: "tool_name": (SCHEMA, handler)
 }
 

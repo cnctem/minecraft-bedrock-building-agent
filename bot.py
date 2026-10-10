@@ -218,7 +218,7 @@ SYSTEM_PROMPT = """你是维克托·米哈伊洛维奇·切布里科夫(Viktor C
 - 一般来说: 玩家喊你的名字、向你提问、请求帮助、话题明显与你相关时, 应该回应; 玩家之间与你无关的闲聊, 保持安静; 玩家向你告别后, 退下并保持安静, 直到再次被点名或明确请求。
 - 语气沉稳、可靠、略带老派管家的礼貌与幽默。用中文(玩家用其他语言时可跟随)。
 - 回复简短, 适合游戏内聊天栏阅读: 通常一两句话, 不超过 100 字, 不要用 markdown、列表或代码块(创造模式下可放宽, 见文末创造模式说明)。
-- 你的能力: 说话(send_chat_message)、保持安静(stay_silent)、长期记忆(update_memory)、查玩家进出(get_player_activity)、查服务器状态(get_server_status)、查玩家坐标(get_player_position)、查物品栏(get_player_inventory)、查手持物品(get_player_hand)、执行 MC 指令(run_server_command)、备份存档(backup_world)、切换创造模式(set_creative_mode)、读坐标方块(get_block)。
+- 你的能力: 说话(send_chat_message)、保持安静(stay_silent)、长期记忆(update_memory)、查玩家进出(get_player_activity)、查服务器状态(get_server_status)、查玩家坐标(get_player_position)、查物品栏(get_player_inventory)、查手持物品(get_player_hand)、执行 MC 指令(run_server_command)、备份存档(backup_world)、切换创造模式(set_creative_mode)、读坐标方块(get_block)、批量工具调用(ptc)。
 - 指令适用于传送、建造、查找等, 不带斜杠(如 "tp 玩家名 x y z"、"fill ..."、"locate structure village"); 输出会返回给你, 简要转述即可。玩家让你记过的坐标等信息在长期记忆里, 用得上就查。
 - 工具结果里带 [错误]/[警告] 的(例如 Syntax error、0 blocks filled、The block couldn't be placed、Too many blocks、Unknown command)说明这一步没成功, 必须如实告诉玩家哪一步失败、大致原因。只有工具明确报了成功(Block placed、N blocks filled)才能说完成——绝不允许在没看到成功回执时声称“已办妥/已完成”。
 - 玩家消息含糊、明显是语音转文字碎片(如“从”、“这两个做”、“二十号”)时, 先问清楚再动手; 尤其不要凭猜测执行会改动世界的指令(fill/setblock/clone 等)。
@@ -228,6 +228,8 @@ SYSTEM_PROMPT = """你是维克托·米哈伊洛维奇·切布里科夫(Viktor C
 - 玩家要求备份存档时用 backup_world。它会真实地把世界写盘并压缩一遍, 服务器会卡顿几十秒到一分钟: 调用前先 send_chat_message 告知“正在备份, 会卡一下, 请稍候”, 拿到结果后再把文件路径和大小告诉玩家。备份期间不要同时执行会改世界的指令。
 - 创造模式(set_creative_mode): 玩家要求大规模施工、复杂规划, 或明确说“开创造模式/认真做/好好想想”时开启, 并用 send_chat_message 告知玩家; 任务完成或回到闲聊后主动关闭以节省成本。切换仅限白名单/op。
 - 玩家问某个坐标上是什么方块(或“我脚下是什么方块”)时用 get_block; 基岩版没有 /data, 不要去试指令。注意玩家坐标的 y 是脚底高度, “脚下的方块”是 y-1。只能读已加载的区块(在线玩家附近), 工具报“区块未加载”就如实告知。
+- 一次要做多件互不依赖的事(同时查几个玩家、查几个坐标、连着下多条指令)时, 用 ptc 把多个工具调用打包成一次提交, 比一个个调省往返也省上下文; 但有先后依赖、要先看结果再决定下一步时, 仍要分开调用。
+- 玩家让你“检查/看看有没有问题”或修复某片区域时: 先用 ptc 把整片扫完, 把**所有**不合格的坐标列成完整清单(有几个写几个), 逐条修复, 修完再把整个区域复检一遍确认全部合格。不要只看自己补过的那几格就收工, 也不要凭印象漏掉已经读出来是异常的点。
 - 你有一份跨会话的长期记忆(见文末), 每次初始化都会注入给你。
 - 长期记忆是极低频的东西: 只有玩家明确说出"记住/记一下/写进记忆/忘掉/改一下记忆"这类话时, 才调用 update_memory; 其余任何情况都一个字不要动。绝不要主动提议记录, 也不要问"需要我记下这个坐标吗"之类的确认——玩家只是随口报坐标、报名字、报数值时, 直接当作当前对话的临时信息就好。
 - 聊天里出现的坐标、人名、数值等, 默认都只是**当前会话的临时上下文**: 把它们记在对话里直接使用(比如玩家随后让你 tp 或 fill 到刚才报过的点), 会话结束会随上下文一起落盘, 不进长期记忆。玩家连续报几个点再让你操作(如"把 A 到 B 之间填满我手上的方块")时, 直接调 run_server_command 执行, 不要反问、不要确认、不要提议记忆。
@@ -242,10 +244,14 @@ CREATIVE_PROMPT = """
 思考强度已提升到 max, 输出上限与工具轮次都大幅放宽。你的任务是协助玩家精细创造:
 大型建筑、复杂地形改造、指令装置、整体规划。
 
-工作方式:
+工作方式(探索 → 施工 → 复检 → 修复, 循环往复):
 - 先规划后施工: 先用 send_chat_message 向玩家讲清整体方案(分区、尺寸、材料、顺序), 再动手。
+- 积极探索: 动手前用 ptc 一次批量读清现场——区域四角、中心、地面高度、已有结构是靠什么方块。创造模式下 ptc 的单次批量上限和结果长度都放宽了, 该一次查几十个点就查几十个, 不要凭想象施工。
 - 精确施工: 坐标务必算准; 大范围操作先试一小块确认效果, 再铺开。
 - 成片操作: 优先 fill/clone 等批量指令, 避免逐块 setblock; 每批完成向玩家简报进度。
+- 施工后必复检: 每填完一批, 立刻用 ptc 批量抽检关键坐标(区域四角、中心、边界、以及刚好在范围外的一格), 确认真的已经是目标方块。“指令已执行”不等于“改对了”, 只看成功回执就报完成是不可以的。
+- 先列清单再动手: 扫描/抽检后, 把所有不合格的坐标完整写在一张清单里(有几条就是几条), 然后逐条对照修复。千万不要凭印象“应该就这两个”, 已经有读出来是异常的点被顺手漏掉的先例。
+- 发现问题主动修复: 复检发现还是旧方块、位置偏了、漏了一段、尺寸不对, 立刻再下指令修正; 修完把**整个区域再扫一遍**确认全部合格(而不是只看补过的那几格)。修好之前不要对玩家说“已完成”。反复修不好就如实说明卡在哪里、现状如何。
 - 允许更长的说明(方案、步骤、材料清单), 但仍用口语化中文、分段发送、不用 markdown。
 - 底线不变: 指令黑名单依然有效; “停止”仍会立即中止你; 工具返回 [错误]/[警告] 必须如实汇报。
 - 任务完成或话题回到闲聊时, 主动调用 set_creative_mode(false) 退出创造模式。"""
@@ -356,6 +362,9 @@ class Bot:
         capabilities.register("backup_world", BACKUP_SCHEMA, self._tool_backup_world)
         capabilities.register("set_creative_mode", SET_CREATIVE_SCHEMA, self._tool_set_creative)
         capabilities.register("get_block", GET_BLOCK_SCHEMA, self._tool_get_block)
+        capabilities.set_ptc_limits(cfg.get("ptc_max_calls", 24),
+                                    cfg.get("ptc_result_limit", 3000),
+                                    cfg.get("ptc_stated_calls", 12))
         self.current_batch: list[tuple[str, str]] = []  # 当前正在处理的请求者
         self.player_xuids: dict[str, str] = self._load_xuid_cache()
         self._seed_xuids_from_log()
@@ -521,6 +530,17 @@ class Bot:
                 return
             self.session.add_user(f"{name}: {content}")
             self._enqueue(name, content)  # 每条聊天都交给 Agent 判断是否接话
+
+    @staticmethod
+    def _ptc_speaks(tc: dict) -> bool:
+        """ptc 批量调用里若包含 send_chat_message, 也算本回合已发言。
+        否则会误判为“一直没说话”而重复播报。"""
+        try:
+            calls = json.loads(tc["function"].get("arguments") or "{}").get("calls") or []
+        except Exception:
+            return False
+        return any((c.get("tool") or c.get("name")) == "send_chat_message"
+                   for c in calls if isinstance(c, dict))
 
     def _tool_send_message(self, args: dict) -> str:
         self.bridge.say_as_viktor(args["text"], self.cfg["reply_chunk_len"],
@@ -963,6 +983,9 @@ class Bot:
                 "tool_rounds": self.cfg.get("creative_max_tool_rounds", 32),
                 "context": self.cfg.get("creative_max_context_messages", 300),
                 "temperature": self.cfg.get("creative_temperature"),  # 默认不传
+                "ptc_calls": self.cfg.get("creative_ptc_max_calls", 48),
+                "ptc_stated": self.cfg.get("creative_ptc_stated_calls", 24),
+                "ptc_result_limit": self.cfg.get("creative_ptc_result_limit", 6000),
             }
         return {
             "effort": self.cfg.get("normal_effort", "low"),
@@ -970,7 +993,15 @@ class Bot:
             "tool_rounds": self.cfg.get("max_tool_rounds", 8),
             "context": self.cfg["max_context_messages"],
             "temperature": self.cfg["temperature"],
+            "ptc_calls": self.cfg.get("ptc_max_calls", 24),
+            "ptc_stated": self.cfg.get("ptc_stated_calls", 12),
+            "ptc_result_limit": self.cfg.get("ptc_result_limit", 3000),
         }
+
+    def _apply_mode_limits(self, params: dict):
+        """把当前模式的 ptc 上限同步给能力层(创造模式可以一次抽检更多坐标)。"""
+        capabilities.set_ptc_limits(params["ptc_calls"], params["ptc_result_limit"],
+                                    params["ptc_stated"])
 
     def _reply_max_chunks(self) -> int:
         if self.creative_mode:
@@ -987,6 +1018,8 @@ class Bot:
         }
         if params.get("temperature") is not None:
             payload["temperature"] = params["temperature"]
+        if self.cfg.get("parallel_tool_calls"):
+            payload["parallel_tool_calls"] = True  # 鼓励一次返回多个工具调用
         return json.dumps(payload).encode()
 
     def _post(self, messages: list[dict], params: dict) -> dict:
@@ -1027,6 +1060,7 @@ class Bot:
         rounds = 0
         while True:
             params = self._mode_params()  # 每轮重读: 中途切创造模式下一轮生效
+            self._apply_mode_limits(params)
             if rounds >= params["tool_rounds"]:
                 break
             if self.abort.is_set():
@@ -1050,7 +1084,7 @@ class Bot:
                 else:
                     result = capabilities.execute(fname, tc["function"].get("arguments", "{}"))
                 log(f"[能力] {fname} -> {result}")
-                if fname == "send_chat_message":
+                if fname == "send_chat_message" or (fname == "ptc" and self._ptc_speaks(tc)):
                     spoke = True
                 tool_msg = {"role": "tool", "tool_call_id": tc["id"], "content": result}
                 self.session.messages.append(tool_msg)
@@ -1062,6 +1096,18 @@ class Bot:
                 self.cfg["reply_chunk_len"], self._reply_max_chunks())
             spoke = True
         return "(工具轮次用尽, 已告知玩家先停下核对)", spoke
+
+    def _finish_turn(self, reply: str, spoke: bool) -> bool:
+        """把本回合结果写回上下文。若模型把回复写在了正文里(玩家看不到),
+        就在这里兜底播报——宁可多发一句, 也不能让玩家对着一片沉默。"""
+        if reply.strip() and not spoke:
+            log(f"[注意] AI 未调用工具却在正文输出, 已兜底播报: {reply[:80]}")
+            self.bridge.say_as_viktor(reply, self.cfg["reply_chunk_len"],
+                                      self._reply_max_chunks())
+            spoke = True
+        self.session.add_assistant(reply or ("(已通过工具发言)" if spoke else "(保持沉默)"))
+        self.session.replied_count += 1
+        return spoke
 
     def _worker(self):
         while self.running:
@@ -1093,10 +1139,7 @@ class Bot:
                     log("[停止] 任务已按玩家要求中止")
                     self.session.add_assistant(reply)
                     continue  # 回执已由 _on_stop 发过, 不再重复播报
-                self.session.add_assistant(reply or ("(已通过工具发言)" if spoke else "(保持沉默)"))
-                self.session.replied_count += 1
-                if reply.strip() and not spoke:
-                    log(f"[注意] AI 未调用工具却在正文输出(未播报): {reply[:80]}")
+                self._finish_turn(reply, spoke)
 
     # ---------- 主循环 ----------
 
@@ -1356,6 +1399,48 @@ def self_test():
     assert wd.is_dir(), wd
     print("备份能力前置校验 OK:", wd)
 
+    # 能力测试: PTC 批量工具调用
+    capabilities.set_ptc_limit(3)
+    # 宽容解析: 少了 tool 键 / OpenAI function 嵌套 / args 别名 都要能认
+    r = capabilities.execute("ptc", json.dumps({"calls": [
+        {"function": {"name": "stay_silent", "arguments": {}}},
+        {"tool_name": "stay_silent", "args": {}},
+        {"arguments": {}},
+    ]}, ensure_ascii=False))
+    assert r.count("已保持安静") == 2, r
+    assert "缺少工具名" in r and "keys=" in r, r
+    r = capabilities.execute("ptc", json.dumps({"calls": [
+        {"tool": "stay_silent", "arguments": {}},
+        {"tool": "不存在", "arguments": {}},
+        {"tool": "ptc", "arguments": {"calls": []}},
+    ]}, ensure_ascii=False))
+    assert "已保持安静" in r and "未知能力" in r and "不允许嵌套" in r, r
+    assert "最多 3 个" in capabilities.execute(
+        "ptc", json.dumps({"calls": [{"tool": "stay_silent", "arguments": {}}] * 4})), "上限未生效"
+    # 口头 12 / 程序 24: 超一点能过, 超一倍才拒
+    capabilities.set_ptc_limits(24, 3000, 12)
+    _ok = json.dumps({"calls": [{"tool": "stay_silent", "arguments": {}}] * 24})
+    _no = json.dumps({"calls": [{"tool": "stay_silent", "arguments": {}}] * 25})
+    assert "已保持安静" in capabilities.execute("ptc", _ok), "程序放行 24 应通过"
+    assert "最多 12 个" in capabilities.execute("ptc", _no), "超限报错口径应是口头值 12"
+    capabilities._REGISTRY["_boom"] = (
+        {"type": "function", "function": {"name": "_boom", "parameters": {}}},
+        lambda a: "[错误] 炸了")
+    try:
+        r = capabilities.execute("ptc", json.dumps({"calls": [
+            {"tool": "_boom", "arguments": {}},
+            {"tool": "stay_silent", "arguments": {}}],
+            "stop_on_error": True}, ensure_ascii=False))
+        assert "跳过剩余" in r and "已保持安静" not in r, r
+    finally:
+        capabilities._REGISTRY.pop("_boom", None)
+        capabilities.set_ptc_limit(bot2.cfg.get("ptc_max_calls", 12))
+    # ptc 里夹带 send_chat_message 也要算作已发言(否则会重复播报)
+    assert Bot._ptc_speaks({"function": {"arguments": json.dumps(
+        {"calls": [{"tool": "send_chat_message", "arguments": {"text": "hi"}}]})}})
+    assert not Bot._ptc_speaks({"function": {"arguments": "{}"}})
+    print("PTC 自测 OK")
+
     # 能力测试: 创造模式(权限/参数切换/payload/思维链剥离/会话复位)
     assert "set_creative_mode" in [s["function"]["name"] for s in capabilities.tool_schemas()]
     bot2.current_batch = [("Stranger", "开创造模式")]
@@ -1364,6 +1449,16 @@ def self_test():
     bot2.current_batch = [("kirin9000S", "开创造模式")]
     r = bot2._tool_set_creative({"enabled": True, "reason": "测试"})
     assert "已进入创造模式" in r and bot2.creative_mode, r
+    # 创造模式下 ptc 上限也要放宽(探索/抽检要用)
+    bot2._apply_mode_limits(bot2._mode_params())
+    assert capabilities.MAX_PTC_CALLS == bot2.cfg["creative_ptc_max_calls"], capabilities.MAX_PTC_CALLS
+    assert capabilities.STATED_PTC_CALLS == bot2.cfg["creative_ptc_stated_calls"]
+    assert capabilities.MAX_PTC_CALLS == 2 * capabilities.STATED_PTC_CALLS, "程序限制应是口头的两倍"
+    assert capabilities.PTC_RESULT_LIMIT == bot2.cfg["creative_ptc_result_limit"]
+    bot2.creative_mode = False
+    bot2._apply_mode_limits(bot2._mode_params())
+    assert capabilities.MAX_PTC_CALLS == bot2.cfg["ptc_max_calls"], capabilities.MAX_PTC_CALLS
+    bot2.creative_mode = True
     cp = bot2._mode_params()
     assert cp["effort"] == "max" and cp["tool_rounds"] > 8 and cp["max_tokens"] > 1500, cp
     payload = json.loads(bot2._build_payload([], cp))
@@ -1393,12 +1488,32 @@ def self_test():
     tc_msgs = [m for m in bot2.session.messages if m.get("tool_calls")]
     assert tc_msgs and all("reasoning_content" not in m for m in tc_msgs), tc_msgs
 
+    # 兜底播报: 模型把回复写在正文(玩家看不到)时必须自动补发
+    said2 = []
+    orig_say2 = bot2.bridge.say_as_viktor
+    bot2.bridge.say_as_viktor = lambda text, *a, **k: said2.append(text)
+    if not bot2.session:
+        bot2.players.add("T")
+        bot2._start_session()
+    assert bot2._finish_turn("报告: 25 格全是石头", False)
+    assert said2 == ["报告: 25 格全是石头"], said2
+    assert bot2.session.messages[-1]["content"].startswith("报告")
+    said2.clear()
+    bot2._finish_turn("", True)  # 已通过工具发过言, 不该重复播报
+    assert said2 == [], said2
+    bot2.bridge.say_as_viktor = orig_say2
+    print("兜底播报自测 OK")
+
     # 会话结束自动复位 + 创造提示词注入
     bot2.creative_mode = True
     bot2._end_session()
     assert not bot2.creative_mode, "会话结束应自动退出创造模式"
     sp = system_prompt_with_memory(creative=True)
     assert "创造模式" in sp and "先规划后施工" in sp
+    assert "施工后必复检" in sp and "发现问题主动修复" in sp
+    # 创造模式结束后 ptc 上限应回落
+    bot2._apply_mode_limits(bot2._mode_params())
+    assert capabilities.MAX_PTC_CALLS == bot2.cfg["ptc_max_calls"]
     print("创造模式自测 OK")
 
     bot2.current_batch = [("kirin9000S", "list")]
