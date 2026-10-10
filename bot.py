@@ -334,10 +334,60 @@ class Session:
         中文大致 1 字符兑 1 token, 英文/JSON 密度更低, 因此该值偏大。"""
         return sum(len(json.dumps(m, ensure_ascii=False)) for m in msgs)
 
+    @staticmethod
+    def _sanitize(msgs: list[dict]) -> list[dict]:
+        """保证 assistant(tool_calls) 与紧随其后的 tool 响应严格成对。
+        配对破损(例如清空撞在工具往返中间)会让 DeepSeek 返回 400,
+        且之后每次请求都 400; 发送前必须先修好。"""
+        out: list[dict] = []
+        dropped = 0
+        i = 0
+        while i < len(msgs):
+            m = msgs[i]
+            role = m.get("role")
+            if role == "tool":  # 无主的 tool 响应
+                dropped += 1
+                i += 1
+                continue
+            calls = m.get("tool_calls") if role == "assistant" else None
+            if calls:
+                want = [c.get("id") for c in calls]
+                followers = []
+                j = i + 1
+                while j < len(msgs) and msgs[j].get("role") == "tool":
+                    followers.append(msgs[j])
+                    j += 1
+                have = {f.get("tool_call_id") for f in followers}
+                if all(t in have for t in want):
+                    out.append(m)
+                    kept = set()
+                    for f in followers:  # 只留 id 对得上的, 多余的(孤儿)丢弃
+                        fid = f.get("tool_call_id")
+                        if fid in want and fid not in kept:
+                            out.append(f)
+                            kept.add(fid)
+                        else:
+                            dropped += 1
+                    i = j
+                    continue
+                # 配对不全: 丢掉 tool_calls 只留正文, 后面那些无主响应一并丢弃
+                dropped += len(followers)
+                rest = {k: v for k, v in m.items() if k != "tool_calls"}
+                i = j
+                if (rest.get("content") or "").strip():
+                    out.append(rest)
+                continue
+            out.append(m)
+            i += 1
+        if dropped:
+            log(f"[上下文] 发送前修复了 {dropped} 条不成对的 tool 消息(否则 API 会 400)")
+        return out
+
     def build_request_messages(self, creative: bool = False) -> list[dict]:
         """直接拼出完整上下文, 不做任何裁剪。裁剪会破坏缓存前缀,
         且从 assistant(tool_calls)/tool 中间切开会产生孤立 tool 消息, 导致 API 400。"""
-        return [{"role": "system", "content": system_prompt_with_memory(creative)}] + self.messages
+        return [{"role": "system", "content": system_prompt_with_memory(creative)}] \
+            + self._sanitize(self.messages)
 
     def dump(self):
         SESSION_DIR.mkdir(parents=True, exist_ok=True)
@@ -382,6 +432,7 @@ class Bot:
         self.cv = threading.Condition()
         self.abort = threading.Event()   # 置位 = 要求中止当前 Agent 任务
         self.agent_busy = False          # 当前是否有任务在跑(供停止词判断)
+        self._clear_requested = False    # 清空请求延到安全点执行(见 _on_clear)
         self.creative_mode = False       # 创造模式: 深度思考+放宽上限, 会话结束自动复位
 
     # ---------- 会话管理 ----------
@@ -481,22 +532,33 @@ class Bot:
         self.bridge.say_as_viktor(msg, self.cfg["reply_chunk_len"], self.cfg["reply_max_chunks"])
 
     def _on_clear(self, name: str):
-        """玩家发来完全匹配的“清空”: 直接丢弃整个会话上下文, 任何玩家都可触发。
-        正在跑的任务一并中止——既然要重开, 就不该让被污染的活儿继续跑下去。"""
+        """玩家发来完全匹配的“清空”: 丢弃整个会话上下文, 任何玩家都可触发。
+        若此时正卡在工具往返中间(assistant(tool_calls) 已写入、tool 响应未回),
+        直接清会把两者拆散, 之后每次请求都被 API 判 400——所以交给 _worker
+        中止任务后在安全点再清。"""
         with self.cv:
             busy = self.agent_busy or bool(self.pending)
             self.pending.clear()
         if busy:
             self.abort.set()
+            self._clear_requested = True
+            log(f"[清空] {name} 要求清空: 正中止当前任务, 将在安全点清空")
+            self.bridge.say_as_viktor(
+                "我先停下当前任务, 随后清空上下文。",
+                self.cfg["reply_chunk_len"], self._reply_max_chunks())
+            return
+        n = self._do_clear()
+        log(f"[清空] {name} 要求清空上下文, 已丢弃 {n} 条消息")
+        self.bridge.say_as_viktor(
+            f"上下文已清空(丢弃 {n} 条消息), 我重新开始。",
+            self.cfg["reply_chunk_len"], self._reply_max_chunks())
+
+    def _do_clear(self) -> int:
         n = len(self.session.messages) if self.session else 0
         if self.session:
             self.session.messages.clear()
             self.session.replied_count = 0
-        log(f"[清空] {name} 要求清空上下文, 已丢弃 {n} 条消息"
-            + ("(并中止了运行中的任务)" if busy else ""))
-        self.bridge.say_as_viktor(
-            f"上下文已清空(丢弃 {n} 条消息), 我重新开始。",
-            self.cfg["reply_chunk_len"], self._reply_max_chunks())
+        return n
 
     # ---------- 日志解析 ----------
 
@@ -966,6 +1028,13 @@ class Bot:
         self.creative_mode = enabled
         log(f"[模式] {'进入' if enabled else '退出'}创造模式 (原因: {reason or '未说明'})")
         if enabled:
+            # 创造模式第一轮是 effort=max 的长思考, 玩家会干等几十秒没反馈。
+            # 这是程序行为, 不依赖模型自觉: 开关一翻就直接播报。
+            if self.cfg.get("notify_creative_mode", True):
+                self.bridge.say_as_viktor(
+                    self.cfg.get("creative_notice",
+                                 "创造模式已开启: 我在深度思考, 可能要等一会儿, 请稍候。"),
+                    self.cfg["reply_chunk_len"], self._reply_max_chunks())
             return ("已进入创造模式: 从下一次请求起思考强度 max, 并启用创造工作方式"
                     "(更长输出、更多工具轮次、更大上下文)。完成后记得 set_creative_mode(false) 退出。")
         return "已退出创造模式, 回到普通模式。"
@@ -1206,14 +1275,23 @@ class Bot:
                     reply, spoke = self.call_api()
                 except Exception as e:
                     log(f"[API 错误] {e}")
+                    self._run_pending_clear()  # 出错时也把待办清空补上
                     continue
                 finally:
                     self.agent_busy = False
                 if self.abort.is_set():
                     log("[停止] 任务已按玩家要求中止")
                     self.session.add_assistant(reply)
-                    continue  # 回执已由 _on_stop 发过, 不再重复播报
-                self._finish_turn(reply, spoke)
+                else:
+                    self._finish_turn(reply, spoke)
+                self._run_pending_clear()
+
+    def _run_pending_clear(self):
+        """任务已停(工具往返已闭合), 此时才能安全清空。"""
+        if not self._clear_requested:
+            return
+        self._clear_requested = False
+        log(f"[清空] 任务已停在安全点, 丢弃 {self._do_clear()} 条消息")
 
     # ---------- 主循环 ----------
 
@@ -1370,18 +1448,27 @@ def self_test():
     bot2.bridge.say_as_viktor = orig_say
     print("停止词自测 OK")
 
-    # 能力测试: “清空”任何玩家都能触发, 不进上下文, 并中止运行中的任务
+    # 能力测试: “清空”任何玩家都能触发; 忙碌时延后到安全点, 不拆散工具往返
     bot2.bridge.say_as_viktor = lambda text, *a, **k: sent.append(text)
     bot2.session.add_user("AAA: 先前的闲聊")
     bot2.agent_busy = True
     bot2.abort.clear()
+    bot2._clear_requested = False
     sent.clear()
     bot2.process_line("[2026-10-10 18:41:00:000 INFO] [Scripting] [VIKTOR-CHAT] 路人甲: 清空")
-    assert bot2.session.messages == [], "清空后上下文应为空"
-    assert sent and "清空" in sent[0], sent
-    assert bot2.abort.is_set(), "清空应一并中止运行中的任务"
+    assert bot2._clear_requested and bot2.abort.is_set(), "忙碌时应中止任务并延后清空"
+    assert bot2.session.messages, "忙碌时不能立即清(会拆散工具往返)"
+    assert sent and "随后清空" in sent[0], sent
+    bot2._run_pending_clear()
+    assert bot2.session.messages == [] and not bot2._clear_requested, "安全点应完成清空"
     bot2.agent_busy = False
     bot2.abort.clear()
+    # 空闲时立即清
+    bot2.session.add_user("AAA: 又聊了两句")
+    sent.clear()
+    bot2.process_line("[2026-10-10 18:41:02:000 INFO] [Scripting] [VIKTOR-CHAT] 路人甲: 清空")
+    assert bot2.session.messages == [], "空闲时应立即清空"
+    assert "已清空" in sent[0], sent
     bot2.process_line("[2026-10-10 18:41:05:000 INFO] [Scripting] [VIKTOR-CHAT] 路人甲: 清空一下")
     assert any(p == "路人甲" for p, _ in bot2.pending), "非完全匹配应走正常流程"
     bot2.pending.clear()
@@ -1583,14 +1670,23 @@ def self_test():
     assert not Bot._ptc_speaks({"function": {"arguments": "{}"}})
     print("PTC 自测 OK")
 
-    # 能力测试: 创造模式(权限/参数切换/payload/思维链剥离/会话复位)
+    # 能力测试: 创造模式(权限/等待提醒/参数切换/payload/思维链剥离/会话复位)
     assert "set_creative_mode" in [s["function"]["name"] for s in capabilities.tool_schemas()]
+    csaid = []
+    orig_say3 = bot2.bridge.say_as_viktor
+    bot2.bridge.say_as_viktor = lambda text, *a, **k: csaid.append(text)
     bot2.current_batch = [("Stranger", "开创造模式")]
     r = bot2._tool_set_creative({"enabled": True})
     assert "权限不足" in r and not bot2.creative_mode, r
+    assert csaid == [], "权限不足不应播报"
     bot2.current_batch = [("kirin9000S", "开创造模式")]
     r = bot2._tool_set_creative({"enabled": True, "reason": "测试"})
     assert "已进入创造模式" in r and bot2.creative_mode, r
+    # 创造模式第一轮是长思考, 必须由程序立刻提醒玩家等待(不依赖模型自觉)
+    assert csaid == [bot2.cfg["creative_notice"]], f"开启创造模式应立刻提醒玩家等待: {csaid}"
+    csaid.clear()
+    bot2._tool_set_creative({"enabled": True, "reason": "重复开启"})
+    assert csaid == [], "已处于开启状态时不应重复播报"
     # 创造模式下 ptc 上限也要放宽(探索/抽检要用)
     bot2._apply_mode_limits(bot2._mode_params())
     assert capabilities.MAX_PTC_CALLS == bot2.cfg["creative_ptc_max_calls"], capabilities.MAX_PTC_CALLS
@@ -1607,6 +1703,10 @@ def self_test():
     assert payload["effort"] == "max" and payload["model"] == "deepseek-flash", payload
     assert "temperature" not in payload, "创造模式不传采样参数"
     bot2.creative_mode = False
+    csaid.clear()
+    bot2._tool_set_creative({"enabled": False, "reason": "测试"})
+    assert csaid == [], "退出创造模式不需要播报"
+    bot2.bridge.say_as_viktor = orig_say3
     np_ = bot2._mode_params()
     assert np_["effort"] == "low", np_
     payload2 = json.loads(bot2._build_payload([], np_))
@@ -1666,6 +1766,29 @@ def self_test():
     # 已在重试额度之上时不得被压低
     assert max(393216, bot2.cfg["retry_max_reply_tokens"]) == 393216
     print("截断重试自测 OK", budgets)
+
+    # 配对破损自愈: 孤儿 tool 消息与缺配对 tool_calls 必须在发送前修好
+    s4 = Session(96)
+    s4.add_user("a")
+    s4.messages.append({"role": "assistant", "content": None, "tool_calls": [
+        {"id": "c1", "type": "function", "function": {"name": "f", "arguments": "{}"}}]})
+    s4.messages.append({"role": "tool", "tool_call_id": "c1", "content": "ok"})
+    s4.messages.append({"role": "tool", "tool_call_id": "ORPHAN", "content": "无主"})   # 孤儿
+    s4.messages.append({"role": "assistant", "content": None, "tool_calls": [
+        {"id": "c2", "type": "function", "function": {"name": "f", "arguments": "{}"}}]})  # 缺响应
+    s4.messages.append({"role": "tool", "tool_call_id": "c3", "content": "不匹配"})
+    s4.add_user("b")
+    clean = s4.build_request_messages()[1:]
+    assert not any(m.get("role") == "tool" and m.get("tool_call_id") in ("ORPHAN", "c3")
+                   for m in clean), clean
+    ids = [c["id"] for m in clean if m.get("tool_calls") for c in m["tool_calls"]]
+    assert ids == ["c1"], f"缺配对的 tool_calls 应被剥掉: {clean}"
+    for m in clean:
+        if m.get("role") == "assistant" and m.get("tool_calls"):
+            followers = [x.get("tool_call_id") for x in clean
+                         if x.get("role") == "tool"]
+            assert all(c["id"] in followers for c in m["tool_calls"]), clean
+    print("配对自愈自测 OK")
 
     # 会话结束自动复位 + 创造提示词注入
     bot2.creative_mode = True
