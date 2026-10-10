@@ -32,6 +32,8 @@ import capabilities
 BASE_DIR = Path(__file__).resolve().parent
 CONFIG_PATH = BASE_DIR / "config.json"
 LOG_DIR = BASE_DIR / "logs"
+LOG_PATH = LOG_DIR / "bot.log"  # 自测会指到临时文件, 避免假记录污染生产日志
+SERVER_LOG_PATH = LOG_DIR / "server.log"  # 同上: 自测写入的假回包行不能被线上读到
 SESSION_DIR = LOG_DIR / "sessions"
 
 # BDS 日志格式: [2026-10-10 14:15:11:690 INFO] <内容>
@@ -410,7 +412,7 @@ class Bot:
     def _seed_xuids_from_log(self):
         """启动时从已有日志回填 名字->xuid, 避免新玩家要等下次进服才有映射。"""
         try:
-            lines = (LOG_DIR / "server.log").read_text(encoding="utf-8", errors="replace").splitlines()
+            lines = (SERVER_LOG_PATH).read_text(encoding="utf-8", errors="replace").splitlines()
         except FileNotFoundError:
             return
         changed = False
@@ -573,7 +575,7 @@ class Bot:
 
     def _tool_get_position(self, args: dict) -> str:
         want = (args.get("player") or "").strip()
-        log_file = LOG_DIR / "server.log"
+        log_file = SERVER_LOG_PATH
         try:
             offset = log_file.stat().st_size
         except FileNotFoundError:
@@ -617,7 +619,7 @@ class Bot:
 
     def _query_inventory(self) -> tuple[dict[str, dict], bool]:
         """请求脚本上报物品栏。返回 ({玩家: {'slots': {槽: (物品,数量)}, 'selected': 槽}}, 有无人回应)。"""
-        log_file = LOG_DIR / "server.log"
+        log_file = SERVER_LOG_PATH
         try:
             offset = log_file.stat().st_size
         except FileNotFoundError:
@@ -728,7 +730,7 @@ class Bot:
         except (KeyError, TypeError, ValueError):
             return "需要整数坐标 x y z。"
         dim = (args.get("dimension") or "overworld").strip().lower()
-        log_file = LOG_DIR / "server.log"
+        log_file = SERVER_LOG_PATH
         try:
             offset = log_file.stat().st_size
         except FileNotFoundError:
@@ -753,6 +755,12 @@ class Bot:
                     return f"查不到方块: {body}"
                 parts = body.split(" ", 4)
                 if len(parts) < 5:
+                    return f"脚本回包异常: {body}"
+                # 必须核对坐标: 同一时段可能还有别处发出的方块查询, 不能认领别人的回包
+                try:
+                    if (int(parts[0]), int(parts[1]), int(parts[2])) != (x, y, z):
+                        continue
+                except ValueError:
                     return f"脚本回包异常: {body}"
                 bdim, block = parts[3], parts[4].replace("minecraft:", "", 1)
                 return f"坐标 ({x}, {y}, {z}) [{bdim}] 的方块是: {block}"
@@ -791,7 +799,7 @@ class Bot:
         blocklist = {c.lower() for c in self.cfg.get("command_blocklist", [])}
         if verb in blocklist:
             return f"指令 {verb} 在禁止列表中, 未执行。"
-        log_file = LOG_DIR / "server.log"
+        log_file = SERVER_LOG_PATH
         try:
             offset = log_file.stat().st_size
         except FileNotFoundError:
@@ -843,7 +851,7 @@ class Bot:
         """从 offset 开始轮询 server.log 等某个正则出现。返回 (是否命中, 新 offset)。"""
         rx = re.compile(pattern)
         deadline = time.time() + timeout
-        log_file = LOG_DIR / "server.log"
+        log_file = SERVER_LOG_PATH
         while time.time() < deadline:
             if self.abort.is_set():
                 return False, offset
@@ -878,7 +886,7 @@ class Bot:
         backup_dir.mkdir(parents=True, exist_ok=True)
         out = backup_dir / f"{world}-{datetime.now():%Y%m%d-%H%M%S}.7z"
         level = self.cfg.get("backup_compression_level", 5)
-        log_file = LOG_DIR / "server.log"
+        log_file = SERVER_LOG_PATH
         try:
             offset = log_file.stat().st_size
         except FileNotFoundError:
@@ -1061,7 +1069,7 @@ class Bot:
             payload["parallel_tool_calls"] = True  # 鼓励一次返回多个工具调用
         return json.dumps(payload).encode()
 
-    def _post(self, messages: list[dict], params: dict) -> dict:
+    def _post(self, messages: list[dict], params: dict) -> tuple[dict, str]:
         cfg = self.cfg
         req = urllib.request.Request(
             cfg["api_base"].rstrip("/") + "/chat/completions",
@@ -1080,11 +1088,15 @@ class Bot:
             body = e.read().decode("utf-8", "replace")[:400]
             raise RuntimeError(f"HTTP {e.code}: {body}") from None
         usage = data.get("usage", {})
-        log(f"[API] {cfg['model']}/effort={params['effort']} tokens: prompt={usage.get('prompt_tokens')} "
+        choice = data["choices"][0]
+        finish = choice.get("finish_reason") or ""
+        log(f"[API] {cfg['model']}/effort={params['effort']}/max={params['max_tokens']} "
+            f"tokens: prompt={usage.get('prompt_tokens')} "
             f"(缓存命中 {usage.get('prompt_cache_hit_tokens', '?')}) "
             f"completion={usage.get('completion_tokens')}"
-            f"(思考 {usage.get('completion_tokens_details', {}).get('reasoning_tokens', '?')})")
-        return data["choices"][0]["message"]
+            f"(思考 {usage.get('completion_tokens_details', {}).get('reasoning_tokens', '?')})"
+            f" finish={finish}")
+        return choice["message"], finish
 
     def call_api(self) -> tuple[str, bool]:
         """function calling 循环: AI 可调能力工具, 执行结果回传后再生成最终回复。
@@ -1097,21 +1109,44 @@ class Bot:
         messages = self.session.build_request_messages(creative=self.creative_mode)
         spoke = False
         rounds = 0
+        budget_retries = 0
         while True:
             params = self._mode_params()  # 每轮重读: 中途切创造模式下一轮生效
             self._apply_mode_limits(params)
+            if budget_retries:
+                # 上一轮被 max_tokens 截断: 抬高额度再来一次(不消耗工具轮次)。
+                # 用 max() 保证只抬高不降低。
+                params["max_tokens"] = max(params["max_tokens"],
+                                           self.cfg.get("retry_max_reply_tokens", 32768))
             if rounds >= params["tool_rounds"]:
                 break
             if self.abort.is_set():
                 return "(用户要求停止, 任务已中止)", spoke
-            msg = self._post(messages, params)
+            msg, finish = self._post(messages, params)
             # 思维链只进日志不进上下文: 省 token, 也避免跨轮次兼容问题
             thinking = msg.pop("reasoning_content", None)
             if thinking:
                 log(f"[思考] {str(thinking)[:300].replace(chr(10), ' ')}")
             calls = msg.get("tool_calls") or []
             if not calls:
-                return (msg.get("content") or ""), spoke
+                # finish=length: 思考 token 与正文/工具调用共用 max_tokens, 复杂规划
+                # 会把额度烧在思考上, 导致正文为空、工具调用为空——玩家看到沉默。
+                if finish == "length" and budget_retries < 1:
+                    budget_retries += 1
+                    log(f"[API] 输出被 max_tokens={params['max_tokens']} 截断, "
+                        f"抬高到 {max(params['max_tokens'], self.cfg.get('retry_max_reply_tokens', 32768))} 重试")
+                    continue
+                content = msg.get("content") or ""
+                if finish == "length":
+                    # 重试后仍被截断: 有正文就发正文(截断也好过全无), 一字未吐就说明情况
+                    if not content.strip():
+                        log("[API] 抬高额度后仍无正文, 告知玩家")
+                        self.bridge.say_as_viktor(
+                            "这件事我一遍想不完, 刚才没能给出答复。请拆小一点再说, "
+                            "或者让我开创造模式慢慢做。",
+                            self.cfg["reply_chunk_len"], self._reply_max_chunks())
+                        return "(输出被截断且无正文, 已告知玩家拆分需求)", True
+                return content, spoke
             rounds += 1
             log(f"[能力] AI 请求调用: {[c['function']['name'] for c in calls]}")
             self.session.messages.append(msg)
@@ -1183,7 +1218,7 @@ class Bot:
     # ---------- 主循环 ----------
 
     def tail_loop(self):
-        log_file = LOG_DIR / "server.log"
+        log_file = SERVER_LOG_PATH
         log_file.touch(exist_ok=True)
         self.offset = log_file.stat().st_size  # 只处理新内容
         self.bridge.sync_player_count()
@@ -1222,11 +1257,17 @@ class Bot:
 def log(msg: str):
     line = f"[{datetime.now():%Y-%m-%d %H:%M:%S}] {msg}"
     print(line, flush=True)
-    with open(LOG_DIR / "bot.log", "a", encoding="utf-8") as f:
+    with open(LOG_PATH, "a", encoding="utf-8") as f:
         f.write(line + "\n")
 
 
 def self_test():
+    global LOG_PATH, SERVER_LOG_PATH
+    # 自测全程写临时日志, 不污染 logs/bot.log(假记录会把真实故障排查看歪)
+    LOG_PATH = Path("/tmp/viktor-botlog-test.log")
+    LOG_PATH.write_text("", encoding="utf-8")
+    SERVER_LOG_PATH = Path("/tmp/viktor-bot-serverlog-test.log")
+    SERVER_LOG_PATH.write_text("", encoding="utf-8")
     bot = Bot(load_config())
     samples = [
         "[2026-10-10 14:20:00:000 INFO] Player connected: TestPlayer, xuid: 12345",
@@ -1390,18 +1431,36 @@ def self_test():
     bot2.current_batch = [("kirin9000S", "stop")]
     r = bot2._tool_run_command({"command": "/stop"})
     assert "禁止列表" in r, r
-    # 能力测试: 玩家坐标(行为包脚本通道)
-    r = bot2._tool_get_position({"player": "kirin9000S"})
-    assert "没有玩家在线" in r or "kirin9000S 的坐标" in r, r
-    print(r)
-    # 能力测试: 物品栏解析(抑制真实脚本响应, 注入假输出)
+    # 能力测试: 玩家坐标(行为包脚本通道; 抑制真实脚本响应, 注入假输出)
     import threading
     orig_send = bot2.bridge.send_command
     bot2.bridge.send_command = lambda cmd: None
 
+    def fake_pos():
+        time.sleep(0.6)
+        with open(SERVER_LOG_PATH, "a", encoding="utf-8") as f:
+            f.write("[2026-10-10 18:29:00:000 INFO] [Scripting] [VIKTOR-POS] "
+                    "kirin9000S 660.4 67 -268.3 minecraft:overworld\n")
+
+    threading.Thread(target=fake_pos, daemon=True).start()
+    r = bot2._tool_get_position({"player": "kirin9000S"})
+    assert "kirin9000S 的坐标" in r and "660.4" in r, r
+    print(r)
+
+    def fake_pos_empty():
+        time.sleep(0.6)
+        with open(SERVER_LOG_PATH, "a", encoding="utf-8") as f:
+            f.write("[2026-10-10 18:29:01:000 INFO] [Scripting] [VIKTOR-POS] (无玩家在线)\n")
+
+    threading.Thread(target=fake_pos_empty, daemon=True).start()
+    r = bot2._tool_get_position({"player": "Ghost"})
+    assert "没有玩家在线" in r, r
+    print(r)
+    # 能力测试: 物品栏解析(同上, 注入假输出)
+
     def fake_inv():
         time.sleep(0.6)
-        with open(LOG_DIR / "server.log", "a", encoding="utf-8") as f:
+        with open(SERVER_LOG_PATH, "a", encoding="utf-8") as f:
             f.write("[2026-10-10 18:30:00:000 INFO] [Scripting] [VIKTOR-INV] TestPlayer 0 diamond 3\n")
             f.write("[2026-10-10 18:30:00:000 INFO] [Scripting] [VIKTOR-INV] TestPlayer 5 iron_pickaxe 1\n")
             f.write("[2026-10-10 18:30:00:000 INFO] [Scripting] [VIKTOR-INV] TestPlayer DONE 5\n")
@@ -1413,7 +1472,7 @@ def self_test():
 
     def fake_inv2():
         time.sleep(0.6)
-        with open(LOG_DIR / "server.log", "a", encoding="utf-8") as f:
+        with open(SERVER_LOG_PATH, "a", encoding="utf-8") as f:
             f.write("[2026-10-10 18:30:01:000 INFO] [Scripting] [VIKTOR-INV] TestPlayer 0 diamond 3\n")
             f.write("[2026-10-10 18:30:01:000 INFO] [Scripting] [VIKTOR-INV] TestPlayer 5 iron_pickaxe 1\n")
             f.write("[2026-10-10 18:30:01:000 INFO] [Scripting] [VIKTOR-INV] TestPlayer DONE 5\n")
@@ -1426,7 +1485,7 @@ def self_test():
     # 能力测试: 读坐标方块(行为包脚本通道)
     def fake_block():
         time.sleep(0.6)
-        with open(LOG_DIR / "server.log", "a", encoding="utf-8") as f:
+        with open(SERVER_LOG_PATH, "a", encoding="utf-8") as f:
             f.write("[2026-10-10 18:31:00:000 INFO] [Scripting] [VIKTOR-BLOCK] "
                     "660 66 -269 minecraft:overworld minecraft:grass_block\n")
 
@@ -1437,13 +1496,28 @@ def self_test():
 
     def fake_block_err():
         time.sleep(0.6)
-        with open(LOG_DIR / "server.log", "a", encoding="utf-8") as f:
+        with open(SERVER_LOG_PATH, "a", encoding="utf-8") as f:
             f.write("[2026-10-10 18:31:01:000 INFO] [Scripting] [VIKTOR-BLOCK] "
                     "(区块未加载或超出世界高度: 73 73 1)\n")
 
     threading.Thread(target=fake_block_err, daemon=True).start()
     r = bot2._tool_get_block({"x": 73, "y": 73, "z": 1})
     assert "区块未加载" in r, r
+    print(r)
+
+    # 不回领别人的回包: 先写一行"别人查的坐标", 再写本次要的坐标
+    def fake_block_other():
+        time.sleep(0.5)
+        with open(SERVER_LOG_PATH, "a", encoding="utf-8") as f:
+            f.write("[2026-10-10 18:31:02:000 INFO] [Scripting] [VIKTOR-BLOCK] "
+                    "999 99 999 minecraft:overworld minecraft:bedrock\n")
+            time.sleep(0.4)
+            f.write("[2026-10-10 18:31:03:000 INFO] [Scripting] [VIKTOR-BLOCK] "
+                    "12 34 56 minecraft:overworld minecraft:obsidian\n")
+
+    threading.Thread(target=fake_block_other, daemon=True).start()
+    r = bot2._tool_get_block({"x": 12, "y": 34, "z": 56})
+    assert "obsidian" in r and "bedrock" not in r, r
     print(r)
     assert "需要整数坐标" in bot2._tool_get_block({"x": "a", "y": 1, "z": 2})
     bot2.bridge.send_command = orig_send
@@ -1549,7 +1623,7 @@ def self_test():
         {"role": "assistant", "content": "", "tool_calls": None},
     ])
     orig_post = bot2._post
-    bot2._post = lambda messages, params: next(canned)
+    bot2._post = lambda messages, params: (next(canned), "stop")
     bot2.abort.clear()
     bot2.call_api()
     bot2._post = orig_post
@@ -1571,6 +1645,27 @@ def self_test():
     assert said2 == [], said2
     bot2.bridge.say_as_viktor = orig_say2
     print("兜底播报自测 OK")
+
+    # 被 max_tokens 截断时要抬高额度重试(只抬高不降低), 而不是沉默
+    budgets = []
+
+    def fake_post_length(messages, params):
+        budgets.append(params["max_tokens"])
+        if len(budgets) == 1:
+            return {"role": "assistant", "content": "", "tool_calls": None}, "length"
+        return {"role": "assistant", "content": "想好了", "tool_calls": None}, "stop"
+
+    bot2.creative_mode = False
+    bot2._post = fake_post_length
+    bot2.abort.clear()
+    reply, spoke = bot2.call_api()
+    bot2._post = orig_post
+    assert budgets[0] == bot2.cfg["max_reply_tokens"], budgets
+    assert budgets[1] == bot2.cfg["retry_max_reply_tokens"], f"重试应抬高额度: {budgets}"
+    assert reply == "想好了", reply
+    # 已在重试额度之上时不得被压低
+    assert max(393216, bot2.cfg["retry_max_reply_tokens"]) == 393216
+    print("截断重试自测 OK", budgets)
 
     # 会话结束自动复位 + 创造提示词注入
     bot2.creative_mode = True
