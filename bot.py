@@ -310,6 +310,7 @@ class ScreenBridge:
         for chunk in chunks:
             payload = json.dumps(f"§e<维克托>§f {chunk}", ensure_ascii=False)
             self.send_command(f'tellraw @a {{"rawtext":[{{"text":{payload}}}]}}')
+            log(f"[发言] {chunk}")  # 记下真实发言, 便于事后排查
             time.sleep(0.4)
 
 
