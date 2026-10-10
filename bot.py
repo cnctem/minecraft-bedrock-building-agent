@@ -44,6 +44,7 @@ RE_JOIN = re.compile(r"^Player connected: ([^,]+), xuid: (\d+)")
 RE_POS = re.compile(r"\[VIKTOR-POS\] (\S+) (-?[\d.]+) (-?[\d.]+) (-?[\d.]+) (\S+)")
 RE_INV = re.compile(r"\[VIKTOR-INV\] (\S+) (\d+) (\S+) (\d+)")
 RE_INV_DONE = re.compile(r"\[VIKTOR-INV\] (\S+) DONE (-?\d+)")
+RE_BLOCK = re.compile(r"\[VIKTOR-BLOCK\] (.*)$")
 RE_LEAVE = re.compile(r"^Player disconnected: ([^,]+), xuid:")
 RE_LIST = re.compile(r"^There are (\d+)/(\d+) players online")
 
@@ -127,6 +128,32 @@ GET_HAND_SCHEMA = {
     },
 }
 
+GET_BLOCK_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "get_block",
+        "description": (
+            "读取指定坐标上的方块类型(附带方块状态如朝向/半砖)。"
+            "基岩版没有 /data get block(那是 Java 版), 必须用这个工具查方块。"
+            "只能查已加载的区块——坐标需在在线玩家附近或常加载区, 否则会报“区块未加载”。"
+            "注意: 玩家的 location.y 是脚底高度, “脚下的方块”是 y-1。"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "x": {"type": "integer", "description": "X 坐标"},
+                "y": {"type": "integer", "description": "Y 坐标(高度)"},
+                "z": {"type": "integer", "description": "Z 坐标"},
+                "dimension": {
+                    "type": "string",
+                    "description": "维度: overworld(默认)/nether/the_end",
+                },
+            },
+            "required": ["x", "y", "z"],
+        },
+    },
+}
+
 BACKUP_SCHEMA = {
     "type": "function",
     "function": {
@@ -191,7 +218,7 @@ SYSTEM_PROMPT = """你是维克托·米哈伊洛维奇·切布里科夫(Viktor C
 - 一般来说: 玩家喊你的名字、向你提问、请求帮助、话题明显与你相关时, 应该回应; 玩家之间与你无关的闲聊, 保持安静; 玩家向你告别后, 退下并保持安静, 直到再次被点名或明确请求。
 - 语气沉稳、可靠、略带老派管家的礼貌与幽默。用中文(玩家用其他语言时可跟随)。
 - 回复简短, 适合游戏内聊天栏阅读: 通常一两句话, 不超过 100 字, 不要用 markdown、列表或代码块(创造模式下可放宽, 见文末创造模式说明)。
-- 你的能力: 说话(send_chat_message)、保持安静(stay_silent)、长期记忆(update_memory)、查玩家进出(get_player_activity)、查服务器状态(get_server_status)、查玩家坐标(get_player_position)、查物品栏(get_player_inventory)、查手持物品(get_player_hand)、执行 MC 指令(run_server_command)、备份存档(backup_world)、切换创造模式(set_creative_mode)。
+- 你的能力: 说话(send_chat_message)、保持安静(stay_silent)、长期记忆(update_memory)、查玩家进出(get_player_activity)、查服务器状态(get_server_status)、查玩家坐标(get_player_position)、查物品栏(get_player_inventory)、查手持物品(get_player_hand)、执行 MC 指令(run_server_command)、备份存档(backup_world)、切换创造模式(set_creative_mode)、读坐标方块(get_block)。
 - 指令适用于传送、建造、查找等, 不带斜杠(如 "tp 玩家名 x y z"、"fill ..."、"locate structure village"); 输出会返回给你, 简要转述即可。玩家让你记过的坐标等信息在长期记忆里, 用得上就查。
 - 工具结果里带 [错误]/[警告] 的(例如 Syntax error、0 blocks filled、The block couldn't be placed、Too many blocks、Unknown command)说明这一步没成功, 必须如实告诉玩家哪一步失败、大致原因。只有工具明确报了成功(Block placed、N blocks filled)才能说完成——绝不允许在没看到成功回执时声称“已办妥/已完成”。
 - 玩家消息含糊、明显是语音转文字碎片(如“从”、“这两个做”、“二十号”)时, 先问清楚再动手; 尤其不要凭猜测执行会改动世界的指令(fill/setblock/clone 等)。
@@ -200,6 +227,7 @@ SYSTEM_PROMPT = """你是维克托·米哈伊洛维奇·切布里科夫(Viktor C
 - 指令仅限白名单玩家; 若工具返回权限不足, 礼貌拒绝即可, 不要试图绕过。
 - 玩家要求备份存档时用 backup_world。它会真实地把世界写盘并压缩一遍, 服务器会卡顿几十秒到一分钟: 调用前先 send_chat_message 告知“正在备份, 会卡一下, 请稍候”, 拿到结果后再把文件路径和大小告诉玩家。备份期间不要同时执行会改世界的指令。
 - 创造模式(set_creative_mode): 玩家要求大规模施工、复杂规划, 或明确说“开创造模式/认真做/好好想想”时开启, 并用 send_chat_message 告知玩家; 任务完成或回到闲聊后主动关闭以节省成本。切换仅限白名单/op。
+- 玩家问某个坐标上是什么方块(或“我脚下是什么方块”)时用 get_block; 基岩版没有 /data, 不要去试指令。注意玩家坐标的 y 是脚底高度, “脚下的方块”是 y-1。只能读已加载的区块(在线玩家附近), 工具报“区块未加载”就如实告知。
 - 你有一份跨会话的长期记忆(见文末), 每次初始化都会注入给你。
 - 长期记忆是极低频的东西: 只有玩家明确说出"记住/记一下/写进记忆/忘掉/改一下记忆"这类话时, 才调用 update_memory; 其余任何情况都一个字不要动。绝不要主动提议记录, 也不要问"需要我记下这个坐标吗"之类的确认——玩家只是随口报坐标、报名字、报数值时, 直接当作当前对话的临时信息就好。
 - 聊天里出现的坐标、人名、数值等, 默认都只是**当前会话的临时上下文**: 把它们记在对话里直接使用(比如玩家随后让你 tp 或 fill 到刚才报过的点), 会话结束会随上下文一起落盘, 不进长期记忆。玩家连续报几个点再让你操作(如"把 A 到 B 之间填满我手上的方块")时, 直接调 run_server_command 执行, 不要反问、不要确认、不要提议记忆。
@@ -327,6 +355,7 @@ class Bot:
         capabilities.register("get_player_hand", GET_HAND_SCHEMA, self._tool_get_hand)
         capabilities.register("backup_world", BACKUP_SCHEMA, self._tool_backup_world)
         capabilities.register("set_creative_mode", SET_CREATIVE_SCHEMA, self._tool_set_creative)
+        capabilities.register("get_block", GET_BLOCK_SCHEMA, self._tool_get_block)
         self.current_batch: list[tuple[str, str]] = []  # 当前正在处理的请求者
         self.player_xuids: dict[str, str] = self._load_xuid_cache()
         self._seed_xuids_from_log()
@@ -655,6 +684,44 @@ class Bot:
                 lines.append(f"{name} 空手")
         return "\n".join(lines)[:600]
 
+    def _tool_get_block(self, args: dict) -> str:
+        """读坐标方块。基岩版无 `data get block`, 靠行为包脚本 `scriptevent viktor:block` 上报。"""
+        try:
+            x, y, z = (int(args[k]) for k in ("x", "y", "z"))
+        except (KeyError, TypeError, ValueError):
+            return "需要整数坐标 x y z。"
+        dim = (args.get("dimension") or "overworld").strip().lower()
+        log_file = LOG_DIR / "server.log"
+        try:
+            offset = log_file.stat().st_size
+        except FileNotFoundError:
+            return "无法读取服务器日志, 查不到方块。"
+        self.bridge.send_command(f"scriptevent viktor:block {x} {y} {z} {dim}")
+        deadline = time.time() + self.cfg.get("block_timeout_sec", 5)
+        while time.time() < deadline:
+            if self.abort.is_set():
+                return "已中止。"
+            try:
+                with open(log_file, encoding="utf-8", errors="replace") as f:
+                    f.seek(offset)
+                    new = f.read()
+            except FileNotFoundError:
+                break
+            for line in new.splitlines():
+                m = RE_BLOCK.search(line)
+                if not m:
+                    continue
+                body = m.group(1).strip()
+                if body.startswith("("):  # 脚本的提示/错误行, 例如区块未加载
+                    return f"查不到方块: {body}"
+                parts = body.split(" ", 4)
+                if len(parts) < 5:
+                    return f"脚本回包异常: {body}"
+                bdim, block = parts[3], parts[4].replace("minecraft:", "", 1)
+                return f"坐标 ({x}, {y}, {z}) [{bdim}] 的方块是: {block}"
+            time.sleep(0.2)
+        return "行为包脚本没有回应, 查不到方块(可能脚本未加载, 或区块未加载)。"
+
     def _extract_command_output(self, text: str, cmd: str) -> list[str]:
         """从日志文本里抽出指令输出。ERROR/WARN 行必须保留并加标记——
         否则指令静默失败时模型看不到任何反馈, 会编造“已办妥”。"""
@@ -663,8 +730,9 @@ class Bot:
             m = RE_LINE.match(line)
             if m:
                 level, body = m.group(2), m.group(3)
-                if "[VIKTOR-CHAT]" in body:
-                    continue
+                if any(t in body for t in ("[VIKTOR-CHAT]", "[VIKTOR-POS]",
+                                          "[VIKTOR-INV]", "[VIKTOR-BLOCK]")):
+                    continue  # 桥接上报行不是指令输出
                 if level == "ERROR":
                     body = "[错误] " + body
                 elif level == "WARN":
@@ -1243,6 +1311,30 @@ def self_test():
     r = bot2._tool_get_inventory({"player": "TestPlayer"})
     assert "diamond x3" in r and "(手持)" in r, r
     print(r)
+
+    # 能力测试: 读坐标方块(行为包脚本通道)
+    def fake_block():
+        time.sleep(0.6)
+        with open(LOG_DIR / "server.log", "a", encoding="utf-8") as f:
+            f.write("[2026-10-10 18:31:00:000 INFO] [Scripting] [VIKTOR-BLOCK] "
+                    "660 66 -269 minecraft:overworld minecraft:grass_block\n")
+
+    threading.Thread(target=fake_block, daemon=True).start()
+    r = bot2._tool_get_block({"x": 660, "y": 66, "z": -269})
+    assert "grass_block" in r and "(660, 66, -269)" in r, r
+    print(r)
+
+    def fake_block_err():
+        time.sleep(0.6)
+        with open(LOG_DIR / "server.log", "a", encoding="utf-8") as f:
+            f.write("[2026-10-10 18:31:01:000 INFO] [Scripting] [VIKTOR-BLOCK] "
+                    "(区块未加载或超出世界高度: 73 73 1)\n")
+
+    threading.Thread(target=fake_block_err, daemon=True).start()
+    r = bot2._tool_get_block({"x": 73, "y": 73, "z": 1})
+    assert "区块未加载" in r, r
+    print(r)
+    assert "需要整数坐标" in bot2._tool_get_block({"x": "a", "y": 1, "z": 2})
     bot2.bridge.send_command = orig_send
 
     # 指令执行: 输出必须包含 ERROR/WARN 行, 否则模型看不到失败会编造成功

@@ -34,6 +34,7 @@
   "command_result_timeout_sec": 6,
   "position_timeout_sec": 4,
   "inventory_timeout_sec": 5,
+  "block_timeout_sec": 5,
   "mc_server_dir": "/home/jrj/minecraft-bedrock",
   "backup_dir": "/home/jrj/mc_backup",
   "backup_hold_timeout_sec": 60,

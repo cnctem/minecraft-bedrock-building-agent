@@ -65,6 +65,7 @@ python3 bot.py --test         # 解析逻辑自测
 | `get_player_position(player?)` | 在线玩家实时坐标（行为包脚本，无指令可查） |
 | `get_player_inventory(player?)` | 在线玩家物品栏（36 格） |
 | `get_player_hand(player?)` | 在线玩家手持物品 |
+| `get_block(x, y, z, dimension?)` | 读坐标上的方块类型与状态（行为包脚本；基岩版无 `/data`） |
 | `backup_world()` | 把当前存档热备份成 `.7z`（`save hold` → 7z → `save resume`） |
 | `set_creative_mode(enabled, reason?)` | 切换创造模式（思考强度 max + 创造提示词 + 放宽上限） |
 
@@ -77,6 +78,7 @@ BDS 控制台 **不回显玩家聊天**，所以用行为包 `viktor_bridge` 订
 - `world.beforeEvents.chatSend` → `[VIKTOR-CHAT] 玩家: 内容`
 - `scriptevent viktor:pos` → `[VIKTOR-POS] 玩家 x y z 维度`
 - `scriptevent viktor:inv` → `[VIKTOR-INV] 玩家 槽位 物品 数量`（末行 `DONE 手持槽位`）
+- `scriptevent viktor:block <x> <y> <z> [维度]` → `[VIKTOR-BLOCK] x y z 维度 方块ID [状态]`
 
 需要 `@minecraft/server` 的 **beta** 模块与 `level.dat` 里的实验开关。
 修改脚本后用控制台 `reload` 热重载，不必重启服务器。
