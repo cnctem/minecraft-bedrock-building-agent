@@ -1221,8 +1221,11 @@ class Bot:
             log(f"[能力] AI 请求调用: {[c['function']['name'] for c in calls]}")
             self.session.messages.append(msg)
             messages.append(msg)
+            silent = False
             for tc in calls:
                 fname = tc["function"]["name"]
+                if fname == "stay_silent":
+                    silent = True
                 if self.abort.is_set():
                     result = "(已中止)"
                 else:
@@ -1233,6 +1236,10 @@ class Bot:
                 tool_msg = {"role": "tool", "tool_call_id": tc["id"], "content": result}
                 self.session.messages.append(tool_msg)
                 messages.append(tool_msg)
+            # 已明确保持安静: 立即收尾, 不再追发一轮。否则模型会在正文里补一句
+            # 解释, 被 _finish_turn 当作“未调用工具的正文”兜底播报出去, 等于没闭嘴。
+            if silent and not spoke:
+                return "", False
         # 轮次用尽: 至少给玩家一个回执, 不能让他对着一片沉默的聊天框
         if not spoke:
             self.bridge.say_as_viktor(
@@ -1746,6 +1753,30 @@ def self_test():
     assert said2 == [], said2
     bot2.bridge.say_as_viktor = orig_say2
     print("兜底播报自测 OK")
+
+    # 保持安静: 调用 stay_silent 后立即收尾, 既不追发一轮, 也不兜底播报
+    said_s = []
+    orig_say_s = bot2.bridge.say_as_viktor
+    bot2.bridge.say_as_viktor = lambda text, *a, **k: said_s.append(text)
+    if not bot2.session:
+        bot2.players.add("T")
+        bot2._start_session()
+    canned_s = iter([
+        {"role": "assistant", "content": None,
+         "tool_calls": [{"id": "s1", "type": "function",
+                         "function": {"name": "stay_silent", "arguments": "{}"}}]},
+        {"role": "assistant", "content": "保持安静——这句不该被兜底播报", "tool_calls": None},
+    ])
+    orig_post_s = bot2._post
+    bot2._post = lambda messages, params: (next(canned_s), "stop")
+    bot2.abort.clear()
+    reply_s, spoke_s = bot2.call_api()
+    bot2._post = orig_post_s
+    assert (reply_s, spoke_s) == ("", False), (reply_s, spoke_s)
+    assert bot2._finish_turn(reply_s, spoke_s) is False
+    assert said_s == [], said_s
+    bot2.bridge.say_as_viktor = orig_say_s
+    print("保持安静不兜底自测 OK")
 
     # 被 max_tokens 截断时要抬高额度重试(只抬高不降低), 而不是沉默
     budgets = []
