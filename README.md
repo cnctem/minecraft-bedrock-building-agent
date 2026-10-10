@@ -116,7 +116,8 @@ BDS 控制台 **不回显玩家聊天**，所以用行为包 `viktor_bridge` 订
 |---|---|
 | `model` / `temperature` / `max_reply_tokens` / `api_timeout_sec` | DeepSeek 参数 |
 | `api_min_interval_sec` | 全局 API 最小间隔（保护缓存前缀顺序与限流） |
-| `max_context_messages` | 上下文兜底截断（触发会破坏缓存前缀，正常不会到） |
+| `max_context_messages` / `creative_max_context_messages` | 上下文按**消息条数**兜底截断的上限（现设 100 万 ≈ 取消；条数不等于 token） |
+| `context_window_tokens` / `context_safety_tokens` | 模型窗口（`deepseek-flash` 为 1M）与安全余量。输入预算 = 窗口 − 本轮输出上限 − 余量，从最新消息往回累加，超出就从 user 边界截断 |
 | `reply_chunk_len` / `reply_max_chunks` | 回复分片发送，防止过长 |
 | `mc_server_dir` | 服务器目录（读 `permissions.json`） |
 | `command_users` | 指令白名单（额外的，operator 自动放行） |
