@@ -54,6 +54,14 @@ RE_LIST = re.compile(r"^There are (\d+)/(\d+) players online")
 STOP_WORD = "停止"   # 控制面: 中止当前任务(不进上下文, 绕模型)
 CLEAR_WORD = "清空"  # 控制面: 清空会话上下文(任何玩家可触发, 不进上下文)
 
+# 运行模式(三态): 普通 / 创造(high) / 创造max
+MODE_NORMAL = "normal"
+MODE_CREATIVE = "creative"
+MODE_CREATIVE_MAX = "creative_max"
+CREATIVE_MODES = (MODE_CREATIVE, MODE_CREATIVE_MAX)
+MODE_LABELS = {MODE_NORMAL: "普通", MODE_CREATIVE: "创造", MODE_CREATIVE_MAX: "创造max"}
+CREATIVE_MAX_SCALE = 2  # 创造max 的输出/工具轮次/ptc/分段等限制相对创造再翻倍
+
 SEND_CHAT_SCHEMA = {
     "type": "function",
     "function": {
@@ -176,18 +184,24 @@ SET_CREATIVE_SCHEMA = {
     "function": {
         "name": "set_creative_mode",
         "description": (
-            "开启/关闭创造模式。创造模式下你的思考强度提升到 max, 并切换到面向精细创造的工作方式, "
-            "输出上限、工具调用轮次、上下文长度都显著放宽, 适合大规模施工和复杂规划; "
-            "但响应更慢、成本更高。仅在玩家明确要求或任务明显复杂时开启, "
-            "任务完成或回到闲聊后应主动关闭。会话结束自动复位。仅限白名单/op。"
+            "切换运行模式, 三选一: normal(普通, 思考强度 low); "
+            "creative(创造模式, 思考强度 high, 输出上限/工具轮次/上下文显著放宽, 面向精细创造, 适合大规模施工与复杂规划); "
+            "creative_max(创造模式 max, 在 creative 基础上升级思考强度到 max, 最慢最贵)。"
+            "玩家要求大规模施工/复杂规划, 或说“开创造模式/认真做/好好想想”时切到 creative; "
+            "仅当玩家明确要求“最好/最强/最大/max/不惜代价/尽情发挥”这类最高规格(针对成果质量或思考强度)时才用 creative_max。"
+            "任务完成或回到闲聊后应切回 normal 以节省成本。会话结束自动复位。仅限白名单/op。"
         ),
         "parameters": {
             "type": "object",
             "properties": {
-                "enabled": {"type": "boolean", "description": "true=开启, false=关闭"},
+                "mode": {
+                    "type": "string",
+                    "enum": [MODE_NORMAL, MODE_CREATIVE, MODE_CREATIVE_MAX],
+                    "description": "目标模式: normal / creative / creative_max",
+                },
                 "reason": {"type": "string", "description": "一句话说明为什么切换"},
             },
-            "required": ["enabled"],
+            "required": ["mode"],
         },
     },
 }
@@ -229,7 +243,7 @@ SYSTEM_PROMPT = """你是维克托·米哈伊洛维奇·切布里科夫(Viktor C
 - 方块 id 用基岩版名: Java 版名(如 gray_bed)会报 Syntax error。基岩版床统一是 bed(颜色靠数据值)。
 - 指令仅限白名单玩家; 若工具返回权限不足, 礼貌拒绝即可, 不要试图绕过。
 - 玩家要求备份存档时用 backup_world。它会真实地把世界写盘并压缩一遍, 服务器会卡顿几十秒到一分钟: 调用前先 send_chat_message 告知“正在备份, 会卡一下, 请稍候”, 拿到结果后再把文件路径和大小告诉玩家。备份期间不要同时执行会改世界的指令。
-- 创造模式(set_creative_mode): 玩家要求大规模施工、复杂规划, 或明确说“开创造模式/认真做/好好想想”时开启, 并用 send_chat_message 告知玩家; 任务完成或回到闲聊后主动关闭以节省成本。切换仅限白名单/op。
+- 模式切换(set_creative_mode)是三态: normal(普通, 思考强度 low) / creative(创造, 思考强度 high) / creative_max(创造, 思考强度 max, 最慢最贵)。玩家要求大规模施工、复杂规划, 或明确说“开创造模式/认真做/好好想想”时开到 creative; 仅当玩家明确要求“最好/最强/最大/max/不惜代价/尽情发挥”这类最高规格(针对成果质量或思考强度)时才开到 creative_max。切换时用 send_chat_message 告知玩家; 任务完成或回到闲聊后切回 normal 以节省成本。切换仅限白名单/op。
 - 玩家问某个坐标上是什么方块(或“我脚下是什么方块”)时用 get_block; 基岩版没有 /data, 不要去试指令。注意玩家坐标的 y 是脚底高度, “脚下的方块”是 y-1。只能读已加载的区块(在线玩家附近), 工具报“区块未加载”就如实告知。
 - 一次要做多件互不依赖的事(同时查几个玩家、查几个坐标、连着下多条指令)时, 用 ptc 把多个工具调用打包成一次提交, 比一个个调省往返也省上下文; 但有先后依赖、要先看结果再决定下一步时, 仍要分开调用。
 - 玩家让你“检查/看看有没有问题”或修复某片区域时: 先用 ptc 把整片扫完, 把**所有**不合格的坐标列成完整清单(有几个写几个), 逐条修复, 修完再把整个区域复检一遍确认全部合格。不要只看自己补过的那几格就收工, 也不要凭印象漏掉已经读出来是异常的点。
@@ -245,7 +259,7 @@ CREATIVE_PROMPT = """
 
 # 创造模式(当前已开启)
 
-思考强度已提升到 max, 输出上限与工具轮次都大幅放宽。你的任务是协助玩家精细创造:
+思考强度已提升(默认 high; 玩家明确要求“最好/最强/最大/max”这类最高规格时为 max, 此时输出上限、工具轮次、ptc 批量与分段上限再翻倍)。你的任务是协助玩家精细创造:
 大型建筑、复杂地形改造、指令装置、整体规划。
 
 工作方式(探索 → 施工 → 复检 → 修复, 循环往复):
@@ -258,7 +272,7 @@ CREATIVE_PROMPT = """
 - 发现问题主动修复: 复检发现还是旧方块、位置偏了、漏了一段、尺寸不对, 立刻再下指令修正; 修完把**整个区域再扫一遍**确认全部合格(而不是只看补过的那几格)。修好之前不要对玩家说“已完成”。反复修不好就如实说明卡在哪里、现状如何。
 - 允许更长的说明(方案、步骤、材料清单), 但仍用口语化中文、分段发送、不用 markdown。
 - 底线不变: 指令黑名单依然有效; “停止”仍会立即中止你; 工具返回 [错误]/[警告] 必须如实汇报。
-- 任务完成或话题回到闲聊时, 主动调用 set_creative_mode(false) 退出创造模式。"""
+- 任务完成或话题回到闲聊时, 主动调用 set_creative_mode 切回 normal 退出创造模式。"""
 
 
 def system_prompt_with_memory(creative: bool = False) -> str:
@@ -434,7 +448,12 @@ class Bot:
         self.abort = threading.Event()   # 置位 = 要求中止当前 Agent 任务
         self.agent_busy = False          # 当前是否有任务在跑(供停止词判断)
         self._clear_requested = False    # 清空请求延到安全点执行(见 _on_clear)
-        self.creative_mode = False       # 创造模式: 深度思考+放宽上限, 会话结束自动复位
+        self.mode = MODE_NORMAL          # 三态: normal / creative / creative_max, 会话结束自动复位
+
+    @property
+    def creative_mode(self) -> bool:
+        """是否处于创造模式(creative 或 creative_max)。"""
+        return self.mode in CREATIVE_MODES
 
     # ---------- 会话管理 ----------
 
@@ -446,7 +465,7 @@ class Bot:
     def _end_session(self):
         if self.creative_mode:
             log("[模式] 会话结束, 创造模式自动复位")
-            self.creative_mode = False
+            self.mode = MODE_NORMAL
         if self.session:
             self.session.dump()
             log(f"=== 会话 #{self.session.id} 结束 "
@@ -1022,22 +1041,28 @@ class Bot:
         denied = sorted(p for p in requesters if not self._is_command_allowed(p))
         if denied:
             return f"权限不足: {denied} 既不是指令白名单成员也不是服务器 operator, 请礼貌拒绝。"
-        enabled = bool(args.get("enabled"))
+        mode = (args.get("mode") or "").strip()
         reason = (args.get("reason") or "").strip()
-        if enabled == self.creative_mode:
-            return "创造模式已处于开启状态。" if enabled else "创造模式已处于关闭状态。"
-        self.creative_mode = enabled
-        log(f"[模式] {'进入' if enabled else '退出'}创造模式 (原因: {reason or '未说明'})")
-        if enabled:
-            # 创造模式第一轮是 effort=max 的长思考, 玩家会干等几十秒没反馈。
-            # 这是程序行为, 不依赖模型自觉: 开关一翻就直接播报。
-            if self.cfg.get("notify_creative_mode", True):
+        if mode not in (MODE_NORMAL, MODE_CREATIVE, MODE_CREATIVE_MAX):
+            return "mode 必须是 normal / creative / creative_max 之一。"
+        if mode == self.mode:
+            return f"当前已处于 {MODE_LABELS[mode]} 模式。"
+        was_creative = self.creative_mode
+        self.mode = mode
+        if mode in CREATIVE_MODES:
+            log(f"[模式] {'切换' if was_creative else '进入'}创造模式: {mode} "
+                f"(原因: {reason or '未说明'}; 思考强度 {self._mode_effort()})")
+            # 从普通进入创造: 第一轮是长思考, 玩家会干等几十秒没反馈。
+            # 这是程序行为, 不依赖模型自觉: 开关一翻就直接播报(升档不重复播报)。
+            if not was_creative and self.cfg.get("notify_creative_mode", True):
                 self.bridge.say_as_viktor(
                     self.cfg.get("creative_notice",
                                  "创造模式已开启: 我在深度思考, 可能要等一会儿, 请稍候。"),
                     self.cfg["reply_chunk_len"], self._reply_max_chunks())
-            return ("已进入创造模式: 从下一次请求起思考强度 max, 并启用创造工作方式"
-                    "(更长输出、更多工具轮次、更大上下文)。完成后记得 set_creative_mode(false) 退出。")
+            return (f"已进入{MODE_LABELS[mode]}模式: 从下一次请求起思考强度 {self._mode_effort()}, "
+                    "并启用创造工作方式(更长输出、更多工具轮次、更大上下文)。"
+                    "完成后记得用 set_creative_mode 切回 normal。")
+        log(f"[模式] 退出创造模式, 回到 {mode} (原因: {reason or '未说明'})")
         return "已退出创造模式, 回到普通模式。"
 
     def _tool_server_status(self, args: dict) -> str:
@@ -1068,18 +1093,28 @@ class Bot:
 
     # ---------- DeepSeek ----------
 
+    def _mode_effort(self) -> str:
+        """三态各自的思考强度: normal→low, creative→high, creative_max→max。"""
+        if self.mode == MODE_CREATIVE_MAX:
+            return self.cfg.get("creative_max_effort", "max")
+        if self.mode == MODE_CREATIVE:
+            return self.cfg.get("creative_effort", "high")
+        return self.cfg.get("normal_effort", "low")
+
     def _mode_params(self) -> dict:
-        """当前模式(普通/创造)的 API 参数。模型都是 deepseek-flash,
-        创造模式把思考强度提到 max 并放宽输出/工具轮次/上下文上限。"""
+        """当前模式的 API 参数。模型都是 deepseek-flash。
+        三态: normal(普通) / creative(创造, effort high) / creative_max(创造, effort max);
+        creative 两态都放宽输出/工具轮次/上下文上限。"""
         if self.creative_mode:
+            scale = CREATIVE_MAX_SCALE if self.mode == MODE_CREATIVE_MAX else 1
             return {
-                "effort": self.cfg.get("creative_effort", "max"),
-                "max_tokens": self.cfg.get("creative_max_reply_tokens", 16384),
-                "tool_rounds": self.cfg.get("creative_max_tool_rounds", 32),
+                "effort": self._mode_effort(),
+                "max_tokens": scale * self.cfg.get("creative_max_reply_tokens", 16384),
+                "tool_rounds": scale * self.cfg.get("creative_max_tool_rounds", 32),
                 "temperature": self.cfg.get("creative_temperature"),  # 默认不传
-                "ptc_calls": self.cfg.get("creative_ptc_max_calls", 48),
-                "ptc_stated": self.cfg.get("creative_ptc_stated_calls", 24),
-                "ptc_result_limit": self.cfg.get("creative_ptc_result_limit", 6000),
+                "ptc_calls": scale * self.cfg.get("creative_ptc_max_calls", 48),
+                "ptc_stated": scale * self.cfg.get("creative_ptc_stated_calls", 24),
+                "ptc_result_limit": scale * self.cfg.get("creative_ptc_result_limit", 6000),
             }
         return {
             "effort": self.cfg.get("normal_effort", "low"),
@@ -1122,7 +1157,8 @@ class Bot:
 
     def _reply_max_chunks(self) -> int:
         if self.creative_mode:
-            return self.cfg.get("creative_reply_max_chunks", 10)
+            base = self.cfg.get("creative_reply_max_chunks", 10)
+            return base * (CREATIVE_MAX_SCALE if self.mode == MODE_CREATIVE_MAX else 1)
         return self.cfg["reply_max_chunks"]
 
     def _build_payload(self, messages: list[dict], params: dict) -> bytes:
@@ -1684,35 +1720,48 @@ def self_test():
     orig_say3 = bot2.bridge.say_as_viktor
     bot2.bridge.say_as_viktor = lambda text, *a, **k: csaid.append(text)
     bot2.current_batch = [("Stranger", "开创造模式")]
-    r = bot2._tool_set_creative({"enabled": True})
+    r = bot2._tool_set_creative({"mode": MODE_CREATIVE})
     assert "权限不足" in r and not bot2.creative_mode, r
     assert csaid == [], "权限不足不应播报"
     bot2.current_batch = [("kirin9000S", "开创造模式")]
-    r = bot2._tool_set_creative({"enabled": True, "reason": "测试"})
+    r = bot2._tool_set_creative({"mode": MODE_CREATIVE, "reason": "测试"})
     assert "已进入创造模式" in r and bot2.creative_mode, r
     # 创造模式第一轮是长思考, 必须由程序立刻提醒玩家等待(不依赖模型自觉)
     assert csaid == [bot2.cfg["creative_notice"]], f"开启创造模式应立刻提醒玩家等待: {csaid}"
     csaid.clear()
-    bot2._tool_set_creative({"enabled": True, "reason": "重复开启"})
-    assert csaid == [], "已处于开启状态时不应重复播报"
+    # 重复切同一模式: 不重复播报
+    bot2._tool_set_creative({"mode": MODE_CREATIVE, "reason": "重复开启"})
+    assert csaid == [], "已处于该模式时不应重复播报"
     # 创造模式下 ptc 上限也要放宽(探索/抽检要用)
     bot2._apply_mode_limits(bot2._mode_params())
     assert capabilities.MAX_PTC_CALLS == bot2.cfg["creative_ptc_max_calls"], capabilities.MAX_PTC_CALLS
     assert capabilities.STATED_PTC_CALLS == bot2.cfg["creative_ptc_stated_calls"]
     assert capabilities.MAX_PTC_CALLS == 2 * capabilities.STATED_PTC_CALLS, "程序限制应是口头的两倍"
     assert capabilities.PTC_RESULT_LIMIT == bot2.cfg["creative_ptc_result_limit"]
-    bot2.creative_mode = False
+    # 三态: normal→low, creative→high, creative_max→max
+    bot2.mode = MODE_NORMAL
     bot2._apply_mode_limits(bot2._mode_params())
     assert capabilities.MAX_PTC_CALLS == bot2.cfg["ptc_max_calls"], capabilities.MAX_PTC_CALLS
-    bot2.creative_mode = True
+    bot2.mode = MODE_CREATIVE
     cp = bot2._mode_params()
-    assert cp["effort"] == "max" and cp["tool_rounds"] > 8 and cp["max_tokens"] > 1500, cp
+    assert cp["effort"] == "high" and cp["tool_rounds"] > 8 and cp["max_tokens"] > 1500, cp
     payload = json.loads(bot2._build_payload([], cp))
-    assert payload["effort"] == "max" and payload["model"] == "deepseek-flash", payload
+    assert payload["effort"] == "high" and payload["model"] == "deepseek-flash", payload
     assert "temperature" not in payload, "创造模式不传采样参数"
-    bot2.creative_mode = False
+    # 只有玩家明确要求最高规格(creative_max)才升到 max, 已开启时也应能升档
+    bot2.current_batch = [("kirin9000S", "给我做到最好")]
+    r = bot2._tool_set_creative({"mode": MODE_CREATIVE_MAX, "reason": "玩家要最好"})
+    assert bot2.mode == MODE_CREATIVE_MAX and bot2._mode_params()["effort"] == "max", (r, bot2.mode)
+    assert csaid == [], "升档到 max 不重复播报进入提醒"
+    # 创造max 的限制相对创造翻倍(工具轮次 64、输出/ ptc 翻倍、分段也翻倍)
+    cm = bot2._mode_params()
+    assert cm["tool_rounds"] == CREATIVE_MAX_SCALE * cp["tool_rounds"], (cp, cm)
+    assert cm["max_tokens"] == CREATIVE_MAX_SCALE * cp["max_tokens"], (cp, cm)
+    assert cm["ptc_calls"] == CREATIVE_MAX_SCALE * cp["ptc_calls"], (cp, cm)
+    assert bot2._reply_max_chunks() == CREATIVE_MAX_SCALE * bot2.cfg["creative_reply_max_chunks"]
+    bot2.mode = MODE_NORMAL
     csaid.clear()
-    bot2._tool_set_creative({"enabled": False, "reason": "测试"})
+    bot2._tool_set_creative({"mode": MODE_NORMAL, "reason": "测试"})
     assert csaid == [], "退出创造模式不需要播报"
     bot2.bridge.say_as_viktor = orig_say3
     np_ = bot2._mode_params()
@@ -1787,7 +1836,7 @@ def self_test():
             return {"role": "assistant", "content": "", "tool_calls": None}, "length"
         return {"role": "assistant", "content": "想好了", "tool_calls": None}, "stop"
 
-    bot2.creative_mode = False
+    bot2.mode = MODE_NORMAL
     bot2._post = fake_post_length
     bot2.abort.clear()
     reply, spoke = bot2.call_api()
@@ -1823,9 +1872,9 @@ def self_test():
     print("配对自愈自测 OK")
 
     # 会话结束自动复位 + 创造提示词注入
-    bot2.creative_mode = True
+    bot2.mode = MODE_CREATIVE_MAX
     bot2._end_session()
-    assert not bot2.creative_mode, "会话结束应自动退出创造模式"
+    assert bot2.mode == MODE_NORMAL, "会话结束应自动复位到普通模式"
     sp = system_prompt_with_memory(creative=True)
     assert "创造模式" in sp and "先规划后施工" in sp
     assert "施工后必复检" in sp and "发现问题主动修复" in sp

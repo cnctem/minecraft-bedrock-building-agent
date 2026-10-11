@@ -31,11 +31,15 @@ AI 人设：**维克托·米哈伊洛维奇·切布里科夫 (Viktor Chebrikov)*
 
 所有请求都走 `deepseek-flash`（DeepSeek-V4.1-Flash，支持 `effort` 思考强度档位 low/high/max）。
 
-- **普通模式**：`effort=low`，回复短、便宜、快，适合闲聊和简单指令。
-- **创造模式**：玩家在游戏里说"开创造模式/认真做"等，维克托调 `set_creative_mode(true)` 切换。
-  `effort=max`，并注入面向精细创造的额外提示词（先规划后施工、先试小块再铺开、成片 fill），
-  同时放宽输出 token、工具轮次、上下文条数、发言分段数。任务完成或会话结束自动复位。
-  仅限白名单/op。思维链（`reasoning_content`）只写入 `logs/bot.log`，不进会话上下文。
+- **normal（普通）**：`effort=low`，回复短、便宜、快，适合闲聊和简单指令。
+- **creative（创造）**：玩家说“开创造模式/认真做”等时切到。`effort=high`，注入面向精细创造的
+  额外提示词（先规划后施工、先试小块再铺开、成片 fill），并放宽输出 token、工具轮次、ptc 批量、
+  发言分段数。
+- **creative_max（创造max）**：仅当玩家明确要求“最好/最强/最大/max/不惜代价”这类最高规格时才切到。
+  `effort=max`，且上述各项上限在 creative 基础上再翻倍（工具轮次 32→64 等），最慢最贵。
+
+三种状态由 `set_creative_mode(mode)` 切换；任务完成或会话结束自动复位回 normal。仅限白名单/op。
+思维链（`reasoning_content`）只写入 `logs/bot.log`，不进会话上下文。
 
 ## 运行
 
@@ -67,7 +71,7 @@ python3 bot.py --test         # 解析逻辑自测
 | `get_player_hand(player?)` | 在线玩家手持物品 |
 | `get_block(x, y, z, dimension?)` | 读坐标上的方块类型与状态（行为包脚本；基岩版无 `/data`） |
 | `backup_world()` | 把当前存档热备份成 `.7z`（`save hold` → 7z → `save resume`） |
-| `set_creative_mode(enabled, reason?)` | 切换创造模式（思考强度 max + 创造提示词 + 放宽上限） |
+| `set_creative_mode(mode, reason?)` | 切换运行模式 normal / creative / creative_max（思考强度 low/high/max + 创造提示词/放宽上限，max 再翻倍） |
 | `ptc(calls, stop_on_error?)` | 批量工具调用：一次提交多条工具调用，串行执行后合并成一条结果（省往返与上下文） |
 
 能力注册表在 `capabilities.py`，可运行时 `register()` 扩展。
@@ -123,11 +127,11 @@ BDS 控制台 **不回显玩家聊天**，所以用行为包 `viktor_bridge` 订
 | `command_users` | 指令白名单（额外的，operator 自动放行） |
 | `command_blocklist` | 禁止执行的指令 |
 | `command_result_timeout_sec` / `position_timeout_sec` / `inventory_timeout_sec` | 等待脚本/控制台回包的秒数 |
-| `normal_effort` / `creative_effort` | 普通/创造模式的思考强度（low / max） |
+| `normal_effort` / `creative_effort` / `creative_max_effort` | 三态的思考强度（low / high / max） |
 | `parallel_tool_calls` | 是否告诉 API 允许一次返回多个工具调用（默认 true） |
 | `ptc_max_calls` / `ptc_stated_calls` | `ptc` 程序放行数（24）与对模型声明的口径（12）——留一倍余量 |
 | `creative_ptc_max_calls` / `creative_ptc_stated_calls` | 创造模式下的同一对数值（48 / 24） |
-| `creative_max_reply_tokens` / `creative_max_tool_rounds` / `creative_max_context_messages` / `creative_reply_max_chunks` | 创造模式放宽的各项上限 |
+| `creative_max_reply_tokens` / `creative_max_tool_rounds` / `creative_reply_max_chunks` | 创造模式放宽的各项上限；`creative_max` 下这些上限自动 ×2（工具轮次 32→64、ptc 48/24→96/48 等） |
 | `backup_dir` | 备份输出目录（默认 `/home/jrj/mc_backup`，文件名 `世界名-YYYYmmdd-HHMMSS.7z`） |
 | `backup_hold_timeout_sec` / `backup_timeout_sec` | 等 `save hold` 完成 / 7z 打包的超时 |
 | `backup_compression_level` | 7z 压缩级别（`-mx`，默认 5） |
