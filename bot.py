@@ -607,9 +607,9 @@ class Bot:
 
     def _reset_on_rejoin(self, name: str):
         """玩家数 0→1: 完整初始化会话(与“清空”同一套 _reset_session)。
-        初始化要为正在进行的任务让路: 不中止任务, 置 _clear_requested 延迟标志,
-        等任务到达安全点(工具往返闭合, _run_pending_clear)后再初始化。
-        玩家全部离开期间会话不结束, 任务可以跨离线期继续做。"""
+        若此时有任务在跑: 不初始化也不挂起初始化, 只发一条提示告知任务在进行,
+        并介绍可用的控制词(停止/强制停止/清空)。玩家全部离开期间会话不结束,
+        任务可以跨离线期继续做。"""
         if not self.session:
             self._start_session()
             return
@@ -617,12 +617,11 @@ class Bot:
             busy = self.agent_busy
             self.pending.clear()  # 离线期积压的消息随旧会话一起作废
         if busy:
-            self._clear_requested = True
-            log(f"[清空] {name} 进服(0→1): 有任务在进行, 等 bot 自然停下后初始化")
+            log(f"[清空] {name} 进服(0→1): 有任务在进行, 不初始化, 仅提示")
             self._say_later(
-                "欢迎回来。我手头还有任务在进行, 等它做完我就清空上下文重新开始。"
-                "想让我提前停就发「停止」(做完当前这一步再停)或「强制停止」(立即中止), "
-                "不想清空请发「不清空」。")
+                "欢迎回来。我手头还有任务在进行。"
+                "要我停就发「停止」(做完当前这一步再停)或「强制停止」(立即中止); "
+                "想清空上下文重来就发「清空」。")
             return
         n = self._reset_session()
         log(f"[清空] {name} 进服(0→1), 已完整初始化新会话(丢弃 {n} 条消息)")
@@ -1703,6 +1702,8 @@ def self_test():
     for s in samples:
         bot.process_line(s)
     # 新会话生命周期: 离服(→0)不结束会话; 下次 0→1 进服才完整初始化
+    # 覆盖播报, 避免自测真的往游戏里发 tellraw
+    bot.bridge.say_as_viktor = lambda text, *a, **k: None
     assert bot.session is not None, "离服后会话应保持"
     assert bot.players == set(), "离服后玩家列表应为空"
     assert bot.player_xuids.get("TestPlayer") == "12345", bot.player_xuids
@@ -1724,10 +1725,10 @@ def self_test():
     bot.process_line(
         "[2026-10-10 14:22:10:000 INFO] Player connected: TestPlayer, xuid: 12345")
     assert bot.session.id == sid2, "任务进行中, 0→1 不应立即初始化"
-    assert bot._clear_requested, "任务进行中, 0→1 应置延迟初始化标志"
+    assert not bot._clear_requested, "任务进行中, 0→1 不应挂起初始化"
     bot.agent_busy = False
     bot._run_pending_clear()
-    assert bot.session.id != sid2 and not bot._clear_requested, "安全点应执行延迟初始化"
+    assert bot.session.id == sid2, "无延迟初始化, 会话不应被重置"
     bot.process_line(
         "[2026-10-10 14:23:00:000 INFO] Player disconnected: TestPlayer, xuid: 12345, pfid: abc")
     assert bot.players == set(), "测试收尾: 玩家列表应为空"
