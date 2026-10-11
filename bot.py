@@ -54,7 +54,8 @@ RE_LIST = re.compile(r"^There are (\d+)/(\d+) players online")
 # 控制面硬编码词: 完全匹配时直接中止正在运行的 Agent 任务(不走模型, 类似 Ctrl-C)
 FORCE_STOP_WORD = "强制停止"  # 控制面: 立即中止当前任务(连工具内部等待也打断)
 SOFT_STOP_WORD = "停止"      # 控制面: 到安全点停止(当前步骤做完、工具往返闭合后停)
-REVOKE_WORD = "撤销"         # 控制面: 撤销还未生效的停止/清空指令
+NO_STOP_WORD = "不停止"       # 控制面: 撤销还未生效的停止/强制停止
+NO_CLEAR_WORD = "不清空"      # 控制面: 撤销还未生效的清空(延迟初始化)
 PIN_NAME = "viktor_pin"  # 常加载区域命名前缀(本任务临时用, 轮次结束移除)
 CLEAR_WORD = "清空"  # 控制面: 清空会话上下文(任何玩家可触发, 不进上下文)
 
@@ -618,11 +619,10 @@ class Bot:
         if busy:
             self._clear_requested = True
             log(f"[清空] {name} 进服(0→1): 有任务在进行, 等 bot 自然停下后初始化")
-            self.bridge.say_as_viktor(
+            self._say_later(
                 "欢迎回来。我手头还有任务在进行, 等它做完我就清空上下文重新开始。"
                 "想让我提前停就发「停止」(做完当前这一步再停)或「强制停止」(立即中止), "
-                "想撤销清空请发「撤销」。",
-                self.cfg["reply_chunk_len"], self._reply_max_chunks())
+                "不想清空请发「不清空」。")
             return
         n = self._reset_session()
         log(f"[清空] {name} 进服(0→1), 已完整初始化新会话(丢弃 {n} 条消息)")
@@ -642,7 +642,7 @@ class Bot:
         if busy:
             self.soft_abort.set()
             log(f"[停止] {name} 要求到安全点停止, 已置位标志")
-            msg = ("收到, 我把当前这一步做完就停。反悔请发「撤销」, "
+            msg = ("收到, 我把当前这一步做完就停。反悔请发「不停止」, "
                    "需要立即中止请发「强制停止」。")
         else:
             log(f"[停止] {name} 要求停止, 但当前没有运行中的任务")
@@ -664,26 +664,41 @@ class Bot:
             msg = "当前没有正在执行的任务。"
         self.bridge.say_as_viktor(msg, self.cfg["reply_chunk_len"], self.cfg["reply_max_chunks"])
 
-    def _on_revoke(self, name: str):
-        """玩家发来完全匹配的“撤销”: 撤销还未生效的停止/清空指令, 不经过模型。
-        已生效的(任务已中止、会话已初始化)无法撤销。"""
-        busy = self.agent_busy
+    def _say_later(self, text: str, delay: float = 5.0):
+        """延迟播报: 进服瞬间客户端尚未就绪, 立即 tellraw 会丢消息(实测)。"""
+        t = threading.Timer(delay, lambda: self.bridge.say_as_viktor(
+            text, self.cfg["reply_chunk_len"], self._reply_max_chunks()))
+        t.daemon = True
+        t.start()
+
+    def _on_no_stop(self, name: str):
+        """玩家发来完全匹配的“不停止”: 撤销还未生效的停止/强制停止, 不经过模型。
+        已生效的(任务已停下)无法撤销。"""
         revoked = []
-        if busy and self.soft_abort.is_set():
+        if self.agent_busy and self.soft_abort.is_set():
             self.soft_abort.clear()
             revoked.append("停止")
-        if busy and self.abort.is_set():
+        if self.agent_busy and self.abort.is_set():
             self.abort.clear()
             revoked.append("强制停止")
+        if revoked:
+            log(f"[不停止] {name} 撤销了尚未生效的{'、'.join(revoked)}")
+            msg = f"已撤销尚未生效的{'、'.join(revoked)}指令, 任务继续。"
+        else:
+            log(f"[不停止] {name} 要求不停止, 但没有尚未生效的停止指令")
+            msg = "当前没有尚未生效的停止指令。"
+        self.bridge.say_as_viktor(msg, self.cfg["reply_chunk_len"], self.cfg["reply_max_chunks"])
+
+    def _on_no_clear(self, name: str):
+        """玩家发来完全匹配的“不清空”: 撤销还未生效的清空(延迟初始化), 不经过模型。
+        已生效的(会话已初始化)无法撤销。"""
         if self._clear_requested:
             self._clear_requested = False
-            revoked.append("清空")
-        if revoked:
-            log(f"[撤销] {name} 撤销了尚未生效的: {'、'.join(revoked)}")
-            msg = f"已撤销尚未生效的{'、'.join(revoked)}指令, 一切照旧。"
+            log(f"[不清空] {name} 撤销了尚未生效的清空")
+            msg = "已撤销尚未生效的清空指令, 上下文保留。"
         else:
-            log(f"[撤销] {name} 要求撤销, 但没有尚未生效的停止/清空指令")
-            msg = "当前没有尚未生效的停止或清空指令。"
+            log(f"[不清空] {name} 要求不清空, 但没有尚未生效的清空指令")
+            msg = "当前没有尚未生效的清空指令。"
         self.bridge.say_as_viktor(msg, self.cfg["reply_chunk_len"], self.cfg["reply_max_chunks"])
 
     def _on_clear(self, name: str):
@@ -699,7 +714,7 @@ class Bot:
             self._clear_requested = True
             log(f"[清空] {name} 要求清空: 正中止当前任务, 将在安全点清空")
             self.bridge.say_as_viktor(
-                "我先停下当前任务, 随后清空上下文。反悔请发「撤销」。",
+                "我先停下当前任务, 随后清空上下文。反悔请发「不清空」。",
                 self.cfg["reply_chunk_len"], self._reply_max_chunks())
             return
         n = self._reset_session()
@@ -765,8 +780,11 @@ class Bot:
             if content.strip() == SOFT_STOP_WORD:
                 self._on_soft_stop(name)
                 return
-            if content.strip() == REVOKE_WORD:
-                self._on_revoke(name)
+            if content.strip() == NO_STOP_WORD:
+                self._on_no_stop(name)
+                return
+            if content.strip() == NO_CLEAR_WORD:
+                self._on_no_clear(name)
                 return
             if content.strip() == CLEAR_WORD:
                 self._on_clear(name)
@@ -1770,7 +1788,7 @@ def self_test():
         capabilities.MEMORY_PATH, capabilities.MEMORY_BACKUP_DIR = orig_path, orig_backup
         tmp.unlink(missing_ok=True)
 
-    # 能力测试: 控制词“强制停止”立即中止、“停止”到安全点停止、“撤销”反悔(不走模型)
+    # 能力测试: 控制词“强制停止”立即中止、“停止”到安全点停止、“不停止/不清空”反悔(不走模型)
     sent = []
     orig_say = bot2.bridge.say_as_viktor
     bot2.bridge.say_as_viktor = lambda text, *a, **k: sent.append(text)
@@ -1797,18 +1815,20 @@ def self_test():
     assert "做完就停" in sent[-1], sent
     reply, spoke = bot2.call_api()
     assert "安全点" in reply and not spoke, reply
-    # “撤销”: 撤销未生效的软停止, 任务照旧
-    bot2.process_line("[2026-10-10 18:40:07:000 INFO] [Scripting] [VIKTOR-CHAT] Stopper: 撤销")
-    assert not bot2.soft_abort.is_set(), "撤销应清除未生效的软停止"
+    # “不停止”: 撤销未生效的软停止, 任务继续
+    bot2.process_line("[2026-10-10 18:40:07:000 INFO] [Scripting] [VIKTOR-CHAT] Stopper: 不停止")
+    assert not bot2.soft_abort.is_set(), "不停止应清除未生效的软停止"
     assert "已撤销" in sent[-1] and "停止" in sent[-1], sent
-    # “撤销”延迟清空标志
+    # “不清空”: 撤销未生效的延迟清空
     bot2._clear_requested = True
-    bot2.process_line("[2026-10-10 18:40:08:000 INFO] [Scripting] [VIKTOR-CHAT] Stopper: 撤销")
-    assert not bot2._clear_requested, "撤销应清除未生效的清空"
-    assert "清空" in sent[-1], sent
+    bot2.process_line("[2026-10-10 18:40:08:000 INFO] [Scripting] [VIKTOR-CHAT] Stopper: 不清空")
+    assert not bot2._clear_requested, "不清空应清除未生效的清空"
+    assert "上下文保留" in sent[-1], sent
     # 没有未生效指令时
-    bot2.process_line("[2026-10-10 18:40:09:000 INFO] [Scripting] [VIKTOR-CHAT] Stopper: 撤销")
-    assert sent[-1] == "当前没有尚未生效的停止或清空指令。", sent
+    bot2.process_line("[2026-10-10 18:40:09:000 INFO] [Scripting] [VIKTOR-CHAT] Stopper: 不停止")
+    assert sent[-1] == "当前没有尚未生效的停止指令。", sent
+    bot2.process_line("[2026-10-10 18:40:09:500 INFO] [Scripting] [VIKTOR-CHAT] Stopper: 不清空")
+    assert sent[-1] == "当前没有尚未生效的清空指令。", sent
     bot2.agent_busy = False
     bot2.soft_abort.clear()
     bot2.process_line("[2026-10-10 18:40:10:000 INFO] [Scripting] [VIKTOR-CHAT] Stopper: 维克托, 停止")
