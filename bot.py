@@ -567,17 +567,18 @@ class Bot:
                 "我先停下当前任务, 随后清空上下文。",
                 self.cfg["reply_chunk_len"], self._reply_max_chunks())
             return
-        n = self._do_clear()
-        log(f"[清空] {name} 要求清空上下文, 已丢弃 {n} 条消息")
+        n = self._reset_session()
+        log(f"[清空] {name} 要求清空上下文, 已完整初始化新会话(丢弃 {n} 条消息)")
         self.bridge.say_as_viktor(
             f"上下文已清空(丢弃 {n} 条消息), 我重新开始。",
             self.cfg["reply_chunk_len"], self._reply_max_chunks())
 
-    def _do_clear(self) -> int:
+    def _reset_session(self) -> int:
+        """完整初始化: 结束当前会话(落盘、复位创造模式)并开启一个全新会话。
+        玩家发“清空”与“玩家数 0→1”走同一套初始化; 返回被丢弃的消息条数。"""
         n = len(self.session.messages) if self.session else 0
-        if self.session:
-            self.session.messages.clear()
-            self.session.replied_count = 0
+        self._end_session()
+        self._start_session()
         return n
 
     # ---------- 日志解析 ----------
@@ -1138,10 +1139,9 @@ class Bot:
         budget = self._input_token_budget()
         if used <= budget:
             return False
-        n = len(self.session.messages)
-        self.session.messages.clear()
-        self.session.replied_count = 0
-        log(f"[清空] 上下文约 {used} 估算 token 超过预算 {budget}, 已自动清空 {n} 条消息")
+        n = self._reset_session()
+        log(f"[清空] 上下文约 {used} 估算 token 超过预算 {budget}, "
+            f"已完整初始化新会话(丢弃 {n} 条消息)")
         if self.cfg.get("notify_context_clear", True):
             self.bridge.say_as_viktor("上下文太长, 我已清空重开。", self.cfg["reply_chunk_len"],
                                       self._reply_max_chunks())
@@ -1335,7 +1335,7 @@ class Bot:
         if not self._clear_requested:
             return
         self._clear_requested = False
-        log(f"[清空] 任务已停在安全点, 丢弃 {self._do_clear()} 条消息")
+        log(f"[清空] 任务已停在安全点, 已完整初始化新会话(丢弃 {self._reset_session()} 条消息)")
 
     # ---------- 主循环 ----------
 
@@ -1384,12 +1384,14 @@ def log(msg: str):
 
 
 def self_test():
-    global LOG_PATH, SERVER_LOG_PATH
+    global LOG_PATH, SERVER_LOG_PATH, SESSION_DIR
     # 自测全程写临时日志, 不污染 logs/bot.log(假记录会把真实故障排查看歪)
     LOG_PATH = Path("/tmp/viktor-botlog-test.log")
     LOG_PATH.write_text("", encoding="utf-8")
     SERVER_LOG_PATH = Path("/tmp/viktor-bot-serverlog-test.log")
     SERVER_LOG_PATH.write_text("", encoding="utf-8")
+    # 清空=完整初始化会落盘会话, 自测也指到临时目录
+    SESSION_DIR = Path("/tmp/viktor-sessions-test")
     bot = Bot(load_config())
     samples = [
         "[2026-10-10 14:20:00:000 INFO] Player connected: TestPlayer, xuid: 12345",
@@ -1492,9 +1494,11 @@ def self_test():
     bot2.bridge.say_as_viktor = orig_say
     print("停止词自测 OK")
 
-    # 能力测试: “清空”任何玩家都能触发; 忙碌时延后到安全点, 不拆散工具往返
+    # 能力测试: “清空”任何玩家都能触发; 忙碌时延后到安全点; 清空=与 0→1 相同的完整初始化
     bot2.bridge.say_as_viktor = lambda text, *a, **k: sent.append(text)
     bot2.session.add_user("AAA: 先前的闲聊")
+    bot2.mode = MODE_CREATIVE
+    old_sid = bot2.session.id
     bot2.agent_busy = True
     bot2.abort.clear()
     bot2._clear_requested = False
@@ -1505,22 +1509,29 @@ def self_test():
     assert sent and "随后清空" in sent[0], sent
     bot2._run_pending_clear()
     assert bot2.session.messages == [] and not bot2._clear_requested, "安全点应完成清空"
+    assert bot2.session.id != old_sid, "清空应开新会话(完整初始化)"
+    assert bot2.mode == MODE_NORMAL, "清空应复位到普通模式"
     bot2.agent_busy = False
     bot2.abort.clear()
     # 空闲时立即清
     bot2.session.add_user("AAA: 又聊了两句")
+    old_sid = bot2.session.id
     sent.clear()
     bot2.process_line("[2026-10-10 18:41:02:000 INFO] [Scripting] [VIKTOR-CHAT] 路人甲: 清空")
     assert bot2.session.messages == [], "空闲时应立即清空"
+    assert bot2.session.id != old_sid, "空闲清空也应开新会话"
     assert "已清空" in sent[0], sent
     bot2.process_line("[2026-10-10 18:41:05:000 INFO] [Scripting] [VIKTOR-CHAT] 路人甲: 清空一下")
     assert any(p == "路人甲" for p, _ in bot2.pending), "非完全匹配应走正常流程"
     bot2.pending.clear()
-    # 超预算自动清空(不截断, 纯程序判断)
+    # 超预算自动清空也复用完整初始化(不截断, 纯程序判断)
     bot2.cfg["context_window_tokens"] = 1000  # 预算降到 4096 下限
     bot2.session.add_user("B: " + "汉" * 20000)
+    bot2.mode = MODE_CREATIVE
+    old_sid = bot2.session.id
     assert Session._est_tokens(bot2.session.messages) > bot2._input_token_budget()
     assert bot2._maybe_clear_for_size() and bot2.session.messages == [], "超预算应整段清空"
+    assert bot2.session.id != old_sid and bot2.mode == MODE_NORMAL, "超长清空也应完整初始化"
     bot2.cfg["context_window_tokens"] = 1048576
     assert not bot2._maybe_clear_for_size(), "未超预算不应清空"
     bot2.bridge.say_as_viktor = orig_say
