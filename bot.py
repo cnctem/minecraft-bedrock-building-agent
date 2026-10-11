@@ -53,6 +53,7 @@ RE_LIST = re.compile(r"^There are (\d+)/(\d+) players online")
 
 # 控制面硬编码词: 完全匹配时直接中止正在运行的 Agent 任务(不走模型, 类似 Ctrl-C)
 STOP_WORD = "停止"   # 控制面: 中止当前任务(不进上下文, 绕模型)
+PIN_NAME = "viktor_pin"  # 常加载区域命名前缀(本任务临时用, 轮次结束移除)
 CLEAR_WORD = "清空"  # 控制面: 清空会话上下文(任何玩家可触发, 不进上下文)
 
 # 运行模式(三态): 普通 / 创造(high) / 创造max
@@ -263,6 +264,31 @@ RUN_COMMAND_SCHEMA = {
     },
 }
 
+PIN_REGION_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "pin_region",
+        "description": (
+            "把一片矩形区域设为常加载(ticking area), 防止玩家离开或不在线时区块卸载, "
+            "导致 fill/setblock/clone 报 0 blocks filled、scan_blocks/get_block 报区块未加载。"
+            "施工范围可能超出在线玩家附近(模拟距离只有 4 区块)时, 开工前先调用它覆盖整个施工面。"
+            "只需给 x/z 范围: 高度整列加载, 不用管 y。仅限主世界。"
+            "生命周期跟随本轮任务: 连续工作结束、被“停止”或会话结束时自动移除; "
+            "同一回合重复调用会移动区域(先删旧的再设新的)。仅限白名单/op 玩家的请求。"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "x1": {"type": "integer", "description": "矩形一角 x"},
+                "z1": {"type": "integer", "description": "矩形一角 z"},
+                "x2": {"type": "integer", "description": "对角 x"},
+                "z2": {"type": "integer", "description": "对角 z"},
+            },
+            "required": ["x1", "z1", "x2", "z2"],
+        },
+    },
+}
+
 SYSTEM_PROMPT = """你是维克托·米哈伊洛维奇·切布里科夫(Viktor Chebrikov), Minecraft 服务器 "OSCP" 的智能管家。你通过服务器聊天记录感知世界。
 
 规则:
@@ -273,11 +299,12 @@ SYSTEM_PROMPT = """你是维克托·米哈伊洛维奇·切布里科夫(Viktor C
 - 一般来说: 玩家喊你的名字、向你提问、请求帮助、话题明显与你相关时, 应该回应; 玩家之间与你无关的闲聊, 保持安静; 玩家向你告别后, 退下并保持安静, 直到再次被点名或明确请求。
 - 语气沉稳、可靠、略带老派管家的礼貌与幽默。用中文(玩家用其他语言时可跟随)。
 - 回复简短, 适合游戏内聊天栏阅读: 通常一两句话, 不超过 100 字, 不要用 markdown、列表或代码块(创造模式下可放宽, 见文末创造模式说明)。
-- 你的能力: 说话(send_chat_message)、保持安静(stay_silent)、长期记忆(update_memory)、查玩家进出(get_player_activity)、查服务器状态(get_server_status)、查玩家坐标(get_player_position)、查物品栏(get_player_inventory)、查手持物品(get_player_hand)、执行 MC 指令(run_server_command)、备份存档(backup_world)、切换创造模式(set_creative_mode)、读坐标方块(get_block)、批量扫描切面(scan_blocks)、批量工具调用(ptc)。
+- 你的能力: 说话(send_chat_message)、保持安静(stay_silent)、长期记忆(update_memory)、查玩家进出(get_player_activity)、查服务器状态(get_server_status)、查玩家坐标(get_player_position)、查物品栏(get_player_inventory)、查手持物品(get_player_hand)、执行 MC 指令(run_server_command)、备份存档(backup_world)、切换创造模式(set_creative_mode)、读坐标方块(get_block)、批量扫描切面(scan_blocks)、常加载区域(pin_region)、批量工具调用(ptc)。
 - 指令适用于传送、建造、查找等, 不带斜杠(如 "tp 玩家名 x y z"、"fill ..."、"locate structure village"); 输出会返回给你, 简要转述即可。玩家让你记过的坐标等信息在长期记忆里, 用得上就查。
 - 工具结果里带 [错误]/[警告] 的(例如 Syntax error、0 blocks filled、The block couldn't be placed、Too many blocks、Unknown command)说明这一步没成功, 必须如实告诉玩家哪一步失败、大致原因。只有工具明确报了成功(Block placed、N blocks filled)才能说完成——绝不允许在没看到成功回执时声称“已办妥/已完成”。
 - 玩家消息含糊、明显是语音转文字碎片(如“从”、“这两个做”、“二十号”)时, 先问清楚再动手; 尤其不要凭猜测执行会改动世界的指令(fill/setblock/clone 等)。
 - 施工要成片做: 矩形区间优先用一条 fill, 不要用几十条 setblock 逐块摆——又慢又占满上下文。每完成一批就先 send_chat_message 报一句, 不要憋到最后才说。
+- 大范围施工开工前先调 pin_region 把施工面设为常加载: 服务器模拟距离只有 4 区块, 玩家走开或全部离线后, 远处区块会卸载, fill 会报 0 blocks filled、扫描会报区块未加载。它会跟随本轮任务自动移除, 不用你手动清理。
 - 方块 id 用基岩版名: Java 版名(如 gray_bed)会报 Syntax error。基岩版床统一是 bed(颜色靠数据值)。
 - 指令仅限白名单玩家; 若工具返回权限不足, 礼貌拒绝即可, 不要试图绕过。
 - 玩家要求备份存档时用 backup_world。它会真实地把世界写盘并压缩一遍, 服务器会卡顿几十秒到一分钟: 调用前先 send_chat_message 告知“正在备份, 会卡一下, 请稍候”, 拿到结果后再把文件路径和大小告诉玩家。备份期间不要同时执行会改世界的指令。
@@ -304,6 +331,7 @@ CREATIVE_PROMPT = """
 - 先规划后施工: 先用 send_chat_message 向玩家讲清整体方案(分区、尺寸、材料、顺序), 再动手。
 - 积极探索: 动手前用 ptc 一次批量读清现场——区域四角、中心、地面高度、已有结构是靠什么方块。创造模式下 ptc 的单次批量上限和结果长度都放宽了, 该一次查几十个点就查几十个, 不要凭想象施工。
 - 精确施工: 坐标务必算准; 大范围操作先试一小块确认效果, 再铺开。
+- 开工前先 pin_region 覆盖整个施工面(常加载), 否则玩家走开/离线后区块卸载, 施工会静默失败。
 - 成片操作: 优先 fill/clone 等批量指令, 避免逐块 setblock; 每批完成向玩家简报进度。
 - 施工后必复检: 每填完一批, 立刻用 ptc 批量抽检关键坐标(区域四角、中心、边界、以及刚好在范围外的一格), 确认真的已经是目标方块。“指令已执行”不等于“改对了”, 只看成功回执就报完成是不可以的。
 - 先列清单再动手: 扫描/抽检后, 把所有不合格的坐标完整写在一张清单里(有几条就是几条), 然后逐条对照修复。千万不要凭印象“应该就这两个”, 已经有读出来是异常的点被顺手漏掉的先例。
@@ -464,6 +492,7 @@ class Bot:
         capabilities.register("set_creative_mode", SET_CREATIVE_SCHEMA, self._tool_set_creative)
         capabilities.register("get_block", GET_BLOCK_SCHEMA, self._tool_get_block)
         capabilities.register("scan_blocks", SCAN_BLOCKS_SCHEMA, self._tool_scan_blocks)
+        capabilities.register("pin_region", PIN_REGION_SCHEMA, self._tool_pin_region)
         capabilities.set_ptc_limits(cfg.get("ptc_max_calls", 24),
                                     cfg.get("ptc_result_limit", 30000),
                                     cfg.get("ptc_stated_calls", 12))
@@ -488,6 +517,7 @@ class Bot:
         self.agent_busy = False          # 当前是否有任务在跑(供停止词判断)
         self._clear_requested = False    # 清空请求延到安全点执行(见 _on_clear)
         self.mode = MODE_NORMAL          # 三态: normal / creative / creative_max, 会话结束自动复位
+        self._pinned: list[str] = []     # 本轮任务设置的常加载区域名(轮次结束自动移除)
 
     @property
     def creative_mode(self) -> bool:
@@ -502,6 +532,7 @@ class Bot:
         log(f"=== 会话 #{self.session.id} 开始 (玩家: {sorted(self.players)}) ===")
 
     def _end_session(self):
+        self._unpin_all()  # 兜底: 会话结束时不留常加载区域
         if self.creative_mode:
             log("[模式] 会话结束, 创造模式自动复位")
             self.mode = MODE_NORMAL
@@ -984,6 +1015,39 @@ class Bot:
                 lines.append(line.strip())
         return lines
 
+    def _console_output(self, cmd: str) -> str:
+        """发一条控制台指令并轮询等待输出, 返回抽取后的输出文本。
+        超时、被中止或读不到日志时返回空串。"""
+        log_file = SERVER_LOG_PATH
+        try:
+            offset = log_file.stat().st_size
+        except FileNotFoundError:
+            return ""
+        self.bridge.send_command(cmd)
+        # screen 日志 flush 有延迟(实测可达 3s), 轮询等待输出
+        timeout = self.cfg.get("command_result_timeout_sec", 6)
+        deadline = time.time() + timeout
+        while True:
+            if self.abort.is_set():
+                return ""
+            try:
+                with open(log_file, encoding="utf-8", errors="replace") as f:
+                    f.seek(offset)
+                    new = f.read()
+            except FileNotFoundError:
+                return ""
+            # 带时间戳的输出行(剔除聊天桥行, 保留错误/警告) + list 的裸名单行(无时间戳)
+            lines = self._extract_command_output(new, cmd)
+            if lines:
+                time.sleep(0.5)  # 宽限, 让多行输出到齐
+                with open(log_file, encoding="utf-8", errors="replace") as f:
+                    f.seek(offset)
+                    new = f.read()
+                return "\n".join(self._extract_command_output(new, cmd)).strip()
+            if time.time() >= deadline:
+                return ""
+            time.sleep(0.3)
+
     def _tool_run_command(self, args: dict) -> str:
         requesters = {p for p, _ in self.current_batch}
         denied = sorted(p for p in requesters if not self._is_command_allowed(p))
@@ -996,41 +1060,64 @@ class Bot:
         blocklist = {c.lower() for c in self.cfg.get("command_blocklist", [])}
         if verb in blocklist:
             return f"指令 {verb} 在禁止列表中, 未执行。"
-        log_file = SERVER_LOG_PATH
-        try:
-            offset = log_file.stat().st_size
-        except FileNotFoundError:
-            offset = 0
-        self.bridge.send_command(cmd)
-        # screen 日志 flush 有延迟(实测可达 3s), 轮询等待输出
-        timeout = self.cfg.get("command_result_timeout_sec", 6)
-        deadline = time.time() + timeout
-        out = ""
-        while True:
+        out = self._console_output(cmd)
+        if not out:
             if self.abort.is_set():
                 return f"已中止(指令已发出, 无法撤回): /{cmd}"
-            try:
-                with open(log_file, encoding="utf-8", errors="replace") as f:
-                    f.seek(offset)
-                    new = f.read()
-            except FileNotFoundError:
-                return f"指令已发送: /{cmd} (无法读取输出)"
-            # 带时间戳的输出行(剔除聊天桥行, 保留错误/警告) + list 的裸名单行(无时间戳)
-            lines = self._extract_command_output(new, cmd)
-            if lines:
-                time.sleep(0.5)  # 宽限, 让多行输出到齐
-                with open(log_file, encoding="utf-8", errors="replace") as f:
-                    f.seek(offset)
-                    new = f.read()
-                lines = self._extract_command_output(new, cmd)
-                out = "\n".join(lines).strip()
-                break
-            if time.time() >= deadline:
-                break
-            time.sleep(0.3)
-        if not out:
+            timeout = self.cfg.get("command_result_timeout_sec", 6)
             return f"指令已执行: /{cmd} ({timeout}s 内无输出)"
         return f"指令已执行: /{cmd}\n输出:\n{out[:800]}"
+
+    # ---------- 常加载区域 ----------
+
+    def _tool_pin_region(self, args: dict) -> str:
+        """pin_region: 任务期间把施工区域设为常加载(ticking area)。
+        生命周期 = 本轮次: 连续工作结束、被“停止”、会话结束或进程退出时由 _unpin_all 移除。"""
+        requesters = {p for p, _ in self.current_batch}
+        denied = sorted(p for p in requesters if not self._is_command_allowed(p))
+        if denied:
+            return f"权限不足: {denied} 既不是指令白名单成员也不是服务器 operator, 请礼貌拒绝。"
+        try:
+            x1, z1, x2, z2 = (int(args[k]) for k in ("x1", "z1", "x2", "z2"))
+        except (KeyError, TypeError, ValueError):
+            return "错误: 需要整数参数 x1, z1, x2, z2。"
+        # 基岩版单个常加载区域上限 100 区块(实测报错), 按 10x10 区块对齐切片。
+        # 区域边界向外对齐到区块, 保证每片不超限。
+        cx1, cx2 = sorted((x1 // 16, x2 // 16))
+        cz1, cz2 = sorted((z1 // 16, z2 // 16))
+        tiles = []
+        for cx in range(cx1, cx2 + 1, 10):
+            for cz in range(cz1, cz2 + 1, 10):
+                tiles.append((cx * 16, cz * 16,
+                              min(cx + 9, cx2) * 16 + 15, min(cz + 9, cz2) * 16 + 15))
+        max_areas = self.cfg.get("pin_max_areas", 6)
+        if len(tiles) > max_areas:
+            return (f"错误: 这片区域需要 {len(tiles)} 个常加载片(单片上限 100 区块), "
+                    f"超过上限 {max_areas}。请缩小范围或分段施工。")
+        self._unpin_all()  # 同一回合再次调用 = 移动区域
+        for i, (ax1, az1, ax2, az2) in enumerate(tiles):
+            if self.abort.is_set():
+                self._unpin_all()
+                return "(已中止)"
+            name = PIN_NAME if len(tiles) == 1 else f"{PIN_NAME}_{i + 1}"
+            out = self._console_output(f"tickingarea add {ax1} 0 {az1} {ax2} 0 {az2} {name}")
+            if "[错误]" in out or not out:
+                self._unpin_all()  # 设了一半失败要清干净, 不留下孤儿区域
+                return f"错误: 设置常加载区域失败: {out or '指令无回执, 请检查服务器状态'}"
+            self._pinned.append(name)
+        log(f"[常加载] 已设置 {len(self._pinned)} 个区域覆盖 "
+            f"({x1},{z1})~({x2},{z2}): {', '.join(self._pinned)}")
+        return (f"已设置 {len(self._pinned)} 个常加载区域, 覆盖 ({x1},{z1})~({x2},{z2}) "
+                "整列(不限高度)。本轮任务结束会自动移除; 再次调用 pin_region 会移动区域。")
+
+    def _unpin_all(self):
+        """移除本任务设置的常加载区域(任务结束/中止/会话结束/进程退出时调用)。"""
+        if not self._pinned:
+            return
+        names, self._pinned = self._pinned, []
+        for name in names:
+            self.bridge.send_command(f"tickingarea remove {name}")
+        log(f"[常加载] 已移除 {len(names)} 个区域: {', '.join(names)}")
 
     # ---------- 存档备份 ----------
 
@@ -1437,6 +1524,7 @@ class Bot:
                     continue
                 finally:
                     self.agent_busy = False
+                    self._unpin_all()  # 常加载区域生命周期 = 本轮次(正常结束/中止/出错都移除)
                 if self.abort.is_set():
                     log("[停止] 任务已按玩家要求中止")
                     self.session.add_assistant(reply)

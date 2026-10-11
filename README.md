@@ -71,6 +71,7 @@ python3 bot.py --test         # 解析逻辑自测
 | `get_player_hand(player?)` | 在线玩家手持物品 |
 | `get_block(x, y, z, dimension?)` | 读坐标上的方块类型与状态（行为包脚本；基岩版无 `/data`） |
 | `scan_blocks(x1..z2, dimension?, filter?)` | 批量扫一个 1 格厚切面（≤16×16×1，厚轴可为 X/Y/Z）：默认回非空气方块，给 `filter` 则回类型含该关键字的方块并附未匹配类型统计 |
+| `pin_region(x1, z1, x2, z2)` | 把施工面设为常加载（ticking area，自动按 ≤100 区块切片）：防止玩家走开/离线后区块卸载导致 fill 失败。**生命周期 = 本轮次**：连续工作结束、被「停止」、会话结束或进程退出时自动移除 |
 | `backup_world()` | 把当前存档热备份成 `.7z`（`save hold` → 7z → `save resume`） |
 | `set_creative_mode(mode, reason?)` | 切换运行模式 normal / creative / creative_max（思考强度 low/high/max + 创造提示词/放宽上限，max 再翻倍） |
 | `ptc(calls, stop_on_error?)` | 批量工具调用：一次提交多条工具调用，串行执行后合并成一条结果（省往返与上下文） |
@@ -151,6 +152,7 @@ BDS 控制台 **不回显玩家聊天**，所以用行为包 `viktor_bridge` 订
 | `backup_dir` | 备份输出目录（默认 `/home/jrj/mc_backup`，文件名 `世界名-YYYYmmdd-HHMMSS.7z`） |
 | `backup_hold_timeout_sec` / `backup_timeout_sec` | 等 `save hold` 完成 / 7z 打包的超时 |
 | `backup_compression_level` | 7z 压缩级别（`-mx`，默认 5） |
+| `pin_max_areas` | `pin_region` 单次最多切几个常加载片（默认 6；基岩版单片上限 100 区块、全维度上限 10 个） |
 | `max_queue` | 已移除；每条聊天都由模型判断 |
 
 > screen 日志的 flush 间隔必须调小（`logfile flush 1`，见 `run.sh`），
