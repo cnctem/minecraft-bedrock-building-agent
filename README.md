@@ -70,6 +70,7 @@ python3 bot.py --test         # 解析逻辑自测
 | `get_player_inventory(player?)` | 在线玩家物品栏（36 格） |
 | `get_player_hand(player?)` | 在线玩家手持物品 |
 | `get_block(x, y, z, dimension?)` | 读坐标上的方块类型与状态（行为包脚本；基岩版无 `/data`） |
+| `scan_blocks(x1..z2, dimension?, filter?)` | 批量扫一个 1 格厚切面（≤16×16×1，厚轴可为 X/Y/Z）：默认回非空气方块，给 `filter` 则回类型含该关键字的方块并附未匹配类型统计 |
 | `backup_world()` | 把当前存档热备份成 `.7z`（`save hold` → 7z → `save resume`） |
 | `set_creative_mode(mode, reason?)` | 切换运行模式 normal / creative / creative_max（思考强度 low/high/max + 创造提示词/放宽上限，max 再翻倍） |
 | `ptc(calls, stop_on_error?)` | 批量工具调用：一次提交多条工具调用，串行执行后合并成一条结果（省往返与上下文） |
@@ -84,6 +85,7 @@ BDS 控制台 **不回显玩家聊天**，所以用行为包 `viktor_bridge` 订
 - `scriptevent viktor:pos` → `[VIKTOR-POS] 玩家 x y z 维度`
 - `scriptevent viktor:inv` → `[VIKTOR-INV] 玩家 槽位 物品 数量`（末行 `DONE 手持槽位`）
 - `scriptevent viktor:block <x> <y> <z> [维度]` → `[VIKTOR-BLOCK] x y z 维度 方块ID [状态]`
+- `scriptevent viktor:scan <x1> <y1> <z1> <x2> <y2> <z2> [维度] [过滤]` → 逐行 `[VIKTOR-SCAN] x y z 维度 方块ID [状态]`，末行 `[VIKTOR-SCAN] DONE total=.. matched=.. unloaded=.. other=..`
 
 需要 `@minecraft/server` 的 **beta** 模块与 `level.dat` 里的实验开关。
 修改脚本后用控制台 `reload` 热重载，不必重启服务器。
@@ -138,10 +140,12 @@ BDS 控制台 **不回显玩家聊天**，所以用行为包 `viktor_bridge` 订
 | `mc_server_dir` | 服务器目录（读 `permissions.json`） |
 | `command_users` | 指令白名单（额外的，operator 自动放行） |
 | `command_blocklist` | 禁止执行的指令 |
-| `command_result_timeout_sec` / `position_timeout_sec` / `inventory_timeout_sec` | 等待脚本/控制台回包的秒数 |
+| `command_result_timeout_sec` / `position_timeout_sec` / `inventory_timeout_sec` / `block_timeout_sec` / `scan_timeout_sec` | 等待脚本/控制台回包的秒数 |
+| `scan_result_limit` | `scan_blocks` 返回文本的字符上限（超出截断） |
 | `normal_effort` / `creative_effort` / `creative_max_effort` | 三态的思考强度（low / high / max） |
 | `parallel_tool_calls` | 是否告诉 API 允许一次返回多个工具调用（默认 true） |
 | `ptc_max_calls` / `ptc_stated_calls` | `ptc` 程序放行数（24）与对模型声明的口径（12）——留一倍余量 |
+| `ptc_result_limit` / `creative_ptc_result_limit` | `ptc` 合并结果的字符上限（30000 / 60000；`creative_max` 再 ×2） |
 | `creative_ptc_max_calls` / `creative_ptc_stated_calls` | 创造模式下的同一对数值（48 / 24） |
 | `creative_max_reply_tokens` / `creative_max_tool_rounds` / `creative_reply_max_chunks` | 创造模式放宽的各项上限；`creative_max` 下这些上限自动 ×2（工具轮次 32→64、ptc 48/24→96/48 等） |
 | `backup_dir` | 备份输出目录（默认 `/home/jrj/mc_backup`，文件名 `世界名-YYYYmmdd-HHMMSS.7z`） |

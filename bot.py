@@ -47,6 +47,7 @@ RE_POS = re.compile(r"\[VIKTOR-POS\] (\S+) (-?[\d.]+) (-?[\d.]+) (-?[\d.]+) (\S+
 RE_INV = re.compile(r"\[VIKTOR-INV\] (\S+) (\d+) (\S+) (\d+)")
 RE_INV_DONE = re.compile(r"\[VIKTOR-INV\] (\S+) DONE (-?\d+)")
 RE_BLOCK = re.compile(r"\[VIKTOR-BLOCK\] (.*)$")
+RE_SCAN = re.compile(r"\[VIKTOR-SCAN\] (.*)$")
 RE_LEAVE = re.compile(r"^Player disconnected: ([^,]+), xuid:")
 RE_LIST = re.compile(r"^There are (\d+)/(\d+) players online")
 
@@ -61,6 +62,8 @@ MODE_CREATIVE_MAX = "creative_max"
 CREATIVE_MODES = (MODE_CREATIVE, MODE_CREATIVE_MAX)
 MODE_LABELS = {MODE_NORMAL: "普通", MODE_CREATIVE: "创造", MODE_CREATIVE_MAX: "创造max"}
 CREATIVE_MAX_SCALE = 2  # 创造max 的输出/工具轮次/ptc/分段等限制相对创造再翻倍
+SCAN_STATED_SLICE = 16  # scan_blocks 向模型声明的切面单边上限(16×16×1)
+SCAN_MAX_SLICE = 20     # scan_blocks 程序实际允许(留一倍余量)
 
 SEND_CHAT_SCHEMA = {
     "type": "function",
@@ -165,6 +168,41 @@ GET_BLOCK_SCHEMA = {
     },
 }
 
+SCAN_BLOCKS_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "scan_blocks",
+        "description": (
+            "批量读取一个 1 格厚的矩形切面(平面)上每个方块的类型, 一次扫一整片, 比逐个 get_block 快得多。"
+            "切面须为 16×16×1 以内: 厚度为 1 的那个轴可以是 X、Y 或 Z。坐标给对角两点(x1y1z1 与 x2y2z2), 顺序不限。"
+            "默认只返回非空气方块; 给 filter 则只返回类型含该关键字的方块, 并附上未匹配方块的类型统计——"
+            "例如填完草方块后用 filter=grass 扫描, 若 other 里出现 air 就说明有没填满的格子。"
+            "只能读已加载的区块(在线玩家附近或常加载区), 未加载的格子计入 unloaded。"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "x1": {"type": "integer", "description": "对角点 1 的 X"},
+                "y1": {"type": "integer", "description": "对角点 1 的 Y"},
+                "z1": {"type": "integer", "description": "对角点 1 的 Z"},
+                "x2": {"type": "integer", "description": "对角点 2 的 X"},
+                "y2": {"type": "integer", "description": "对角点 2 的 Y"},
+                "z2": {"type": "integer", "description": "对角点 2 的 Z"},
+                "dimension": {"type": "string",
+                              "description": "维度: overworld(默认)/nether/the_end"},
+                "filter": {
+                    "type": "string",
+                    "description": (
+                        "只返回类型包含该关键字的方块(如 grass 匹配 grass_block; air 专门找空洞)。"
+                        "省略则返回所有非空气方块。"
+                    ),
+                },
+            },
+            "required": ["x1", "y1", "z1", "x2", "y2", "z2"],
+        },
+    },
+}
+
 BACKUP_SCHEMA = {
     "type": "function",
     "function": {
@@ -235,7 +273,7 @@ SYSTEM_PROMPT = """你是维克托·米哈伊洛维奇·切布里科夫(Viktor C
 - 一般来说: 玩家喊你的名字、向你提问、请求帮助、话题明显与你相关时, 应该回应; 玩家之间与你无关的闲聊, 保持安静; 玩家向你告别后, 退下并保持安静, 直到再次被点名或明确请求。
 - 语气沉稳、可靠、略带老派管家的礼貌与幽默。用中文(玩家用其他语言时可跟随)。
 - 回复简短, 适合游戏内聊天栏阅读: 通常一两句话, 不超过 100 字, 不要用 markdown、列表或代码块(创造模式下可放宽, 见文末创造模式说明)。
-- 你的能力: 说话(send_chat_message)、保持安静(stay_silent)、长期记忆(update_memory)、查玩家进出(get_player_activity)、查服务器状态(get_server_status)、查玩家坐标(get_player_position)、查物品栏(get_player_inventory)、查手持物品(get_player_hand)、执行 MC 指令(run_server_command)、备份存档(backup_world)、切换创造模式(set_creative_mode)、读坐标方块(get_block)、批量工具调用(ptc)。
+- 你的能力: 说话(send_chat_message)、保持安静(stay_silent)、长期记忆(update_memory)、查玩家进出(get_player_activity)、查服务器状态(get_server_status)、查玩家坐标(get_player_position)、查物品栏(get_player_inventory)、查手持物品(get_player_hand)、执行 MC 指令(run_server_command)、备份存档(backup_world)、切换创造模式(set_creative_mode)、读坐标方块(get_block)、批量扫描切面(scan_blocks)、批量工具调用(ptc)。
 - 指令适用于传送、建造、查找等, 不带斜杠(如 "tp 玩家名 x y z"、"fill ..."、"locate structure village"); 输出会返回给你, 简要转述即可。玩家让你记过的坐标等信息在长期记忆里, 用得上就查。
 - 工具结果里带 [错误]/[警告] 的(例如 Syntax error、0 blocks filled、The block couldn't be placed、Too many blocks、Unknown command)说明这一步没成功, 必须如实告诉玩家哪一步失败、大致原因。只有工具明确报了成功(Block placed、N blocks filled)才能说完成——绝不允许在没看到成功回执时声称“已办妥/已完成”。
 - 玩家消息含糊、明显是语音转文字碎片(如“从”、“这两个做”、“二十号”)时, 先问清楚再动手; 尤其不要凭猜测执行会改动世界的指令(fill/setblock/clone 等)。
@@ -244,7 +282,7 @@ SYSTEM_PROMPT = """你是维克托·米哈伊洛维奇·切布里科夫(Viktor C
 - 指令仅限白名单玩家; 若工具返回权限不足, 礼貌拒绝即可, 不要试图绕过。
 - 玩家要求备份存档时用 backup_world。它会真实地把世界写盘并压缩一遍, 服务器会卡顿几十秒到一分钟: 调用前先 send_chat_message 告知“正在备份, 会卡一下, 请稍候”, 拿到结果后再把文件路径和大小告诉玩家。备份期间不要同时执行会改世界的指令。
 - 模式切换(set_creative_mode)是三态: normal(普通, 思考强度 low) / creative(创造, 思考强度 high) / creative_max(创造, 思考强度 max, 最慢最贵)。玩家要求大规模施工、复杂规划, 或明确说“开创造模式/认真做/好好想想”时开到 creative; 仅当玩家明确要求“最好/最强/最大/max/不惜代价/尽情发挥”这类最高规格(针对成果质量或思考强度)时才开到 creative_max。切换时用 send_chat_message 告知玩家; 任务完成或回到闲聊后切回 normal 以节省成本。切换仅限白名单/op。
-- 玩家问某个坐标上是什么方块(或“我脚下是什么方块”)时用 get_block; 基岩版没有 /data, 不要去试指令。注意玩家坐标的 y 是脚底高度, “脚下的方块”是 y-1。只能读已加载的区块(在线玩家附近), 工具报“区块未加载”就如实告知。
+- 玩家问某个坐标上是什么方块(或“我脚下是什么方块”)时用 get_block; 基岩版没有 /data, 不要去试指令。注意玩家坐标的 y 是脚底高度, “脚下的方块”是 y-1。只能读已加载的区块(在线玩家附近), 工具报“区块未加载”就如实告知。要成片看/复检一片区域(刚填好的地面、墙、楼层)时用 scan_blocks 一次扫完一个 16×16×1 的切面, 不要用几十个 get_block 逐格查; 扫完看 other 统计(如 air 数量)就能判断有没有漏填。
 - 一次要做多件互不依赖的事(同时查几个玩家、查几个坐标、连着下多条指令)时, 用 ptc 把多个工具调用打包成一次提交, 比一个个调省往返也省上下文; 但有先后依赖、要先看结果再决定下一步时, 仍要分开调用。
 - 玩家让你“检查/看看有没有问题”或修复某片区域时: 先用 ptc 把整片扫完, 把**所有**不合格的坐标列成完整清单(有几个写几个), 逐条修复, 修完再把整个区域复检一遍确认全部合格。不要只看自己补过的那几格就收工, 也不要凭印象漏掉已经读出来是异常的点。
 - 你有一份跨会话的长期记忆(见文末), 每次初始化都会注入给你。
@@ -425,8 +463,9 @@ class Bot:
         capabilities.register("backup_world", BACKUP_SCHEMA, self._tool_backup_world)
         capabilities.register("set_creative_mode", SET_CREATIVE_SCHEMA, self._tool_set_creative)
         capabilities.register("get_block", GET_BLOCK_SCHEMA, self._tool_get_block)
+        capabilities.register("scan_blocks", SCAN_BLOCKS_SCHEMA, self._tool_scan_blocks)
         capabilities.set_ptc_limits(cfg.get("ptc_max_calls", 24),
-                                    cfg.get("ptc_result_limit", 3000),
+                                    cfg.get("ptc_result_limit", 30000),
                                     cfg.get("ptc_stated_calls", 12))
         self.current_batch: list[tuple[str, str]] = []  # 当前正在处理的请求者
         self.player_xuids: dict[str, str] = self._load_xuid_cache()
@@ -850,6 +889,80 @@ class Bot:
             time.sleep(0.2)
         return "行为包脚本没有回应, 查不到方块(可能脚本未加载, 或区块未加载)。"
 
+    def _tool_scan_blocks(self, args: dict) -> str:
+        """批量扫一个 1 格厚矩形切面。靠行为包脚本 `scriptevent viktor:scan` 一次循环扫完,
+        比逐个 get_block 快得多; 默认报非空气方块, 给了 filter 只报类型含该关键字的方块。"""
+        try:
+            x1, y1, z1, x2, y2, z2 = (int(args[k]) for k in
+                                      ("x1", "y1", "z1", "x2", "y2", "z2"))
+        except (KeyError, TypeError, ValueError):
+            return "需要整数坐标 x1 y1 z1 x2 y2 z2。"
+        dim = (args.get("dimension") or "overworld").strip().lower()
+        filt = re.sub(r"\s+", "", args.get("filter") or "").lower()
+        xs, ys, zs = sorted((x1, x2)), sorted((y1, y2)), sorted((z1, z2))
+        ex, ey, ez = xs[1] - xs[0] + 1, ys[1] - ys[0] + 1, zs[1] - zs[0] + 1
+        ext = sorted((ex, ey, ez))
+        if ext[0] != 1:
+            return f"这不是 1 格厚的切面({ex}×{ey}×{ez})。请让其中一个轴只有 1 格。"
+        if ext[2] > SCAN_MAX_SLICE:
+            return (f"切面单边最多 {SCAN_STATED_SLICE} 格(程序上限 {SCAN_MAX_SLICE}), "
+                    f"当前 {ex}×{ey}×{ez}, 请分几次扫描。")
+        log_file = SERVER_LOG_PATH
+        try:
+            offset = log_file.stat().st_size
+        except FileNotFoundError:
+            return "无法读取服务器日志, 查不到方块。"
+        cmd = f"scriptevent viktor:scan {x1} {y1} {z1} {x2} {y2} {z2} {dim}"
+        if filt:
+            cmd += f" {filt}"
+        self.bridge.send_command(cmd)
+        deadline = time.time() + self.cfg.get("scan_timeout_sec", 15)
+        rows, done = [], None
+        while time.time() < deadline:
+            if self.abort.is_set():
+                return "已中止。"
+            try:
+                with open(log_file, encoding="utf-8", errors="replace") as f:
+                    f.seek(offset)
+                    new = f.read()
+            except FileNotFoundError:
+                break
+            for line in new.splitlines():
+                m = RE_SCAN.search(line)
+                if not m:
+                    continue
+                body = m.group(1).strip()
+                if body.startswith("DONE"):
+                    done = body[4:].strip()
+                else:
+                    parts = body.split(" ", 4)
+                    if len(parts) >= 5 and all(p.lstrip("-").isdigit() for p in parts[:3]):
+                        rows.append(parts)
+            if done is not None:
+                break
+            time.sleep(0.2)
+        if done is None:
+            return "行为包脚本没有回应, 扫描失败(可能脚本未加载, 或区块未加载)。"
+        info = dict(re.findall(r"(\w+)=([^\s]+)", done))
+        if "error" in info:
+            return f"扫描失败: {info['error']}"
+        total, matched = info.get("total", "?"), info.get("matched", "?")
+        unloaded, other = info.get("unloaded", "0"), info.get("other", "")
+        label = f'匹配 "{filt}"' if filt else "非空"
+        head = (f"切面 {ex}×{ey}×{ez} [{dim}] 共 {total} 格: {label} {matched} 格, "
+                f"未加载 {unloaded} 格")
+        if other:
+            head += f"; 其他方块: {other}"
+        limit = self.cfg.get("scan_result_limit", 6000)
+        out, shown = [head], 0
+        for p in rows:
+            out.append(f"({p[0]}, {p[1]}, {p[2]}) {p[4].replace('minecraft:', '', 1)}")
+            shown += 1
+            if len("\n".join(out)) > limit:
+                out.append(f"...(结果过长, 已截断; 共匹配 {matched} 格)")
+                break
+        return "\n".join(out)
+
     def _extract_command_output(self, text: str, cmd: str) -> list[str]:
         """从日志文本里抽出指令输出。ERROR/WARN 行必须保留并加标记——
         否则指令静默失败时模型看不到任何反馈, 会编造“已办妥”。"""
@@ -859,7 +972,8 @@ class Bot:
             if m:
                 level, body = m.group(2), m.group(3)
                 if any(t in body for t in ("[VIKTOR-CHAT]", "[VIKTOR-POS]",
-                                          "[VIKTOR-INV]", "[VIKTOR-BLOCK]")):
+                                          "[VIKTOR-INV]", "[VIKTOR-BLOCK]",
+                                          "[VIKTOR-SCAN]")):
                     continue  # 桥接上报行不是指令输出
                 if level == "ERROR":
                     body = "[错误] " + body
@@ -1115,7 +1229,7 @@ class Bot:
                 "temperature": self.cfg.get("creative_temperature"),  # 默认不传
                 "ptc_calls": scale * self.cfg.get("creative_ptc_max_calls", 48),
                 "ptc_stated": scale * self.cfg.get("creative_ptc_stated_calls", 24),
-                "ptc_result_limit": scale * self.cfg.get("creative_ptc_result_limit", 6000),
+                "ptc_result_limit": scale * self.cfg.get("creative_ptc_result_limit", 60000),
             }
         return {
             "effort": self.cfg.get("normal_effort", "low"),
@@ -1124,7 +1238,7 @@ class Bot:
             "temperature": self.cfg["temperature"],
             "ptc_calls": self.cfg.get("ptc_max_calls", 24),
             "ptc_stated": self.cfg.get("ptc_stated_calls", 12),
-            "ptc_result_limit": self.cfg.get("ptc_result_limit", 3000),
+            "ptc_result_limit": self.cfg.get("ptc_result_limit", 30000),
         }
 
     def _apply_mode_limits(self, params: dict):
@@ -1662,6 +1776,27 @@ def self_test():
     assert "obsidian" in r and "bedrock" not in r, r
     print(r)
     assert "需要整数坐标" in bot2._tool_get_block({"x": "a", "y": 1, "z": 2})
+    # 能力测试: 批量扫描切面(行为包脚本通道)
+    def fake_scan():
+        time.sleep(0.6)
+        with open(SERVER_LOG_PATH, "a", encoding="utf-8") as f:
+            f.write("[2026-10-10 18:32:00:000 INFO] [Scripting] [VIKTOR-SCAN] "
+                    "320 64 -460 minecraft:overworld minecraft:grass_block\n")
+            f.write("[2026-10-10 18:32:00:000 INFO] [Scripting] [VIKTOR-SCAN] "
+                    "321 64 -460 minecraft:overworld minecraft:grass_block\n")
+            f.write("[2026-10-10 18:32:00:000 INFO] [Scripting] [VIKTOR-SCAN] "
+                    "DONE total=4 matched=2 unloaded=0 other=air=2\n")
+
+    threading.Thread(target=fake_scan, daemon=True).start()
+    rs = bot2._tool_scan_blocks({"x1": 320, "y1": 64, "z1": -460,
+                                 "x2": 321, "y2": 64, "z2": -459, "filter": "grass"})
+    assert "共 4 格" in rs and "grass_block" in rs and "air=2" in rs, rs
+    print(rs)
+    # 非 1 格厚 / 超限 应直接拒绝, 不发指令
+    assert "1 格厚" in bot2._tool_scan_blocks({"x1": 0, "y1": 0, "z1": 0,
+                                               "x2": 2, "y2": 2, "z2": 2})
+    assert "分几次" in bot2._tool_scan_blocks({"x1": 0, "y1": 0, "z1": 0,
+                                              "x2": 30, "y2": 0, "z2": 30})
     bot2.bridge.send_command = orig_send
 
     # 指令执行: 输出必须包含 ERROR/WARN 行, 否则模型看不到失败会编造成功
@@ -1702,7 +1837,7 @@ def self_test():
     assert "最多 3 个" in capabilities.execute(
         "ptc", json.dumps({"calls": [{"tool": "stay_silent", "arguments": {}}] * 4})), "上限未生效"
     # 口头 12 / 程序 24: 超一点能过, 超一倍才拒
-    capabilities.set_ptc_limits(24, 3000, 12)
+    capabilities.set_ptc_limits(24, 30000, 12)
     _ok = json.dumps({"calls": [{"tool": "stay_silent", "arguments": {}}] * 24})
     _no = json.dumps({"calls": [{"tool": "stay_silent", "arguments": {}}] * 25})
     assert "已保持安静" in capabilities.execute("ptc", _ok), "程序放行 24 应通过"

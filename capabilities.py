@@ -103,7 +103,7 @@ GET_ACTIVITY_SCHEMA = {
 # ②查询类工具共用同一条日志通道, 并行时两个 get_block 会互相抢到对方的回包而答错坐标。
 MAX_PTC_CALLS = 24          # 程序实际放行数(留一倍余量)
 STATED_PTC_CALLS = 12       # 提示词/报错向模型声明的数(口头限制)
-PTC_RESULT_LIMIT = 3000  # 合并结果的字符上限, 防止一条工具结果撑爆上下文
+PTC_RESULT_LIMIT = 30000  # 合并结果的字符上限, 防止一条工具结果撑爆上下文
 
 
 def set_ptc_limits(max_calls: int | None = None, result_limit: int | None = None,
