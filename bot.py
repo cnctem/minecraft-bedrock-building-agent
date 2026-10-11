@@ -4,7 +4,7 @@ mc-ai-bot: 把 MC 基岩版服务器(screen 会话)的聊天接入 DeepSeek。
 
 工作方式:
   - tail screen 日志(logs/server.log) 解析玩家聊天/进出服事件
-  - 以 "服务器内 0 玩家" 为会话分水岭: 玩家清零时会话结束, 下一人进服开新会话
+  - 玩家全部离开(→0)不结束会话, 任务可跨离线期继续; 玩家数 0→1 时完整初始化新会话
   - 玩家消息以 "维克托*" 开头时触发 AI 回复(其余聊天仍进入上下文)
   - 通过 screen stuff 注入 tellraw 命令回复到游戏内
 
@@ -598,14 +598,35 @@ class Bot:
         was_empty = not self.players
         self.players.add(name)
         if was_empty:
-            self._start_session()
+            self._reset_on_rejoin(name)
         log(f"[+] {name} 进服, 当前 {len(self.players)} 人")
 
+    def _reset_on_rejoin(self, name: str):
+        """玩家数 0→1: 完整初始化会话(与“清空”同一套 _reset_session)。
+        初始化要为正在进行的任务让路: 不中止任务, 置 _clear_requested 延迟标志,
+        等任务到达安全点(工具往返闭合, _run_pending_clear)后再初始化。
+        玩家全部离开期间会话不结束, 任务可以跨离线期继续做。"""
+        if not self.session:
+            self._start_session()
+            return
+        with self.cv:
+            busy = self.agent_busy
+            self.pending.clear()  # 离线期积压的消息随旧会话一起作废
+        if busy:
+            self._clear_requested = True
+            log(f"[清空] {name} 进服(0→1): 有任务在进行, 等待任务到达安全点后初始化")
+            self.bridge.say_as_viktor(
+                "欢迎回来。我手头还有任务在进行, 等它做完我就清空上下文重新开始。",
+                self.cfg["reply_chunk_len"], self._reply_max_chunks())
+            return
+        n = self._reset_session()
+        log(f"[清空] {name} 进服(0→1), 已完整初始化新会话(丢弃 {n} 条消息)")
+
     def _on_leave(self, name: str):
+        """玩家离开只更新名单。全部离开(→0)不再结束会话: 正在进行的任务继续跑,
+        会话留到下次 0→1(或“清空”/超预算)时才初始化。"""
         self.players.discard(name)
         log(f"[-] {name} 离服, 当前 {len(self.players)} 人")
-        if not self.players:
-            self._end_session()
 
     def _on_stop(self, name: str):
         """玩家发来完全匹配的“停止”: 直接中止运行中的 Agent 任务, 不经过模型。"""
@@ -672,10 +693,10 @@ class Bot:
         if mm := RE_LIST.match(body):
             count = int(mm.group(1))
             if count == 0 and self.players:
-                # 启动时校准: list 显示 0 人但内存里有人(漏了解析), 直接清零
+                # 启动时校准: list 显示 0 人但内存里有人(漏了解析), 直接清零。
+                # 不结束会话: 离开不再结束会话, 会话留给下次 0→1 初始化。
                 log(f"[校准] list 显示 0 人, 清空玩家列表 {sorted(self.players)}")
                 self.players.clear()
-                self._end_session()
             elif count > 0 and not self.session:
                 self._start_session()
             self._await_list_names = count > 0  # 下一行(无时间戳)是逗号分隔的玩家名
@@ -1604,7 +1625,8 @@ def self_test():
     ]
     for s in samples:
         bot.process_line(s)
-    assert bot.session is None, "离服后会话应结束"
+    # 新会话生命周期: 离服(→0)不结束会话; 下次 0→1 进服才完整初始化
+    assert bot.session is not None, "离服后会话应保持"
     assert bot.players == set(), "离服后玩家列表应为空"
     assert bot.player_xuids.get("TestPlayer") == "12345", bot.player_xuids
     # 所有聊天都应入队, 是否回复由 Agent 判断
@@ -1613,6 +1635,25 @@ def self_test():
             ("TestPlayer", "维克托,介绍一下你自己"),
             ("TestPlayer", "再见")]
     assert got == want, got
+    sid = bot.session.id
+    bot.process_line(
+        "[2026-10-10 14:21:00:000 INFO] Player connected: TestPlayer, xuid: 12345")
+    assert bot.session is not None and bot.session.id != sid, "0→1 进服应初始化新会话"
+    # 0→1 时若任务在进行: 不中止, 置延迟标志让路
+    bot.agent_busy = True
+    sid2 = bot.session.id
+    bot.process_line(
+        "[2026-10-10 14:22:00:000 INFO] Player disconnected: TestPlayer, xuid: 12345, pfid: abc")
+    bot.process_line(
+        "[2026-10-10 14:22:10:000 INFO] Player connected: TestPlayer, xuid: 12345")
+    assert bot.session.id == sid2, "任务进行中, 0→1 不应立即初始化"
+    assert bot._clear_requested, "任务进行中, 0→1 应置延迟初始化标志"
+    bot.agent_busy = False
+    bot._run_pending_clear()
+    assert bot.session.id != sid2 and not bot._clear_requested, "安全点应执行延迟初始化"
+    bot.process_line(
+        "[2026-10-10 14:23:00:000 INFO] Player disconnected: TestPlayer, xuid: 12345, pfid: abc")
+    assert bot.players == set(), "测试收尾: 玩家列表应为空"
     # send_chat_message 能力已注册
     names = [s["function"]["name"] for s in capabilities.tool_schemas()]
     assert "send_chat_message" in names and "update_memory" in names, names
