@@ -28,7 +28,7 @@ AI 人设：**维克托·米哈伊洛维奇·切布里科夫 (Viktor Chebrikov)*
   并介绍可用控制词（停止/强制停止/清空）；会话与上下文保留。
 - **增量组装、前缀恒定**：system prompt 是常量；长期记忆与当前模式**不写进 system prompt**，
   而是作为 `role=system` 的系统注记追加在对话日志里（会话开始时一条记忆注记；
-  `update_memory` 后再追一条最新记忆；`set_creative_mode` 后在工具响应之后追一条模式注记）。
+  `update_memory` 后再追一条最新记忆；`set_mode` 后在工具响应之后追一条模式注记）。
   日志只追加、不修改、不重排，逐轮请求前缀严格一致，DeepSeek 前缀缓存稳定命中
   （日志里 `缓存命中 N` 字段可看效果）。切模式/更新记忆只是尾部追加，不会把整段前缀作废。
 - 服务器内所有聊天都进上下文（维克托能“听到”大家说话），但要不要回应、该不该沉默由模型自己判断。
@@ -38,7 +38,7 @@ AI 人设：**维克托·米哈伊洛维奇·切布里科夫 (Viktor Chebrikov)*
   注入的消息**可能是任务调整，也可能是玩家间的普通闲聊**，由模型自行判断：相关的照做、
   无关的忽略并继续任务（提示词里已明确）。这些消息在注入时即被消费，不会再另起一轮。
 
-## 思考强度与创造模式
+## 模式（提示词 / 限制 / 工具白名单）
 
 所有请求都走 `deepseek-flash`（DeepSeek-V4.1-Flash，支持 `effort` 思考强度档位 low/high/max）。
 
@@ -49,7 +49,12 @@ AI 人设：**维克托·米哈伊洛维奇·切布里科夫 (Viktor Chebrikov)*
 - **creative_max（创造max）**：仅当玩家明确要求“最好/最强/最大/max/不惜代价”这类最高规格时才切到。
   `effort=max`，且上述各项上限在 creative 基础上再翻倍（工具轮次 32→64 等），最慢最贵。
 
-三种状态由 `set_creative_mode(mode)` 切换；任务完成或会话结束自动复位回 normal。仅限白名单/op。
+模式由三张正交 profile 表组合而成（`bot.py` 里 `PROMPTS` / `LIMITS` / `TOOLS` + `Mode`/`MODES`）：
+**提示词**决定行为、**限制**决定数值预算（effort、输出 token、工具轮次、ptc 批量）、**工具白名单**决定模型能看到哪些工具。
+`creative_max` = creative 的提示词 + 同一份 heavy 限制 ×2 + effort max；未来的计划/执行模式可共用限制、只换提示词。
+
+切换用 `set_mode(mode, reason?)`，**可选目标由程序按当前模式注入 `mode.enum`**：普通 ↔ 创造/创造max 互相可达；一次性根本没有 `set_mode` 工具；计划模式只能切到执行模式。也就是**不能通过任何方式切进一次性/计划模式**，未列出的模式对模型不可知。仅限白名单/op。
+每次切模式会在 tool 响应之后追加一条**模式注记**（当前模式 + 行为提示词 + 刷新后的 ptc 单次上限/工具轮次/输出上限），只往日志尾部加、不改 system 前缀；切模式/更新记忆都不会让前缀缓存失效。
 思维链（`reasoning_content`）只写入 `logs/bot.log`，不进会话上下文。
 
 ## 一次性对话（`1 ...`）
@@ -62,7 +67,7 @@ AI 人设：**维克托·米哈伊洛维奇·切布里科夫 (Viktor Chebrikov)*
 - **模糊请求**：若完全无法判断，只回一条——说明缺哪些关键细节、请补充后重新组织再发，并提醒这是一次性对话。
 - **可并发**：主任务进行中也能触发，且支持同时多个一次性对话（`oneshot_max_concurrent`，默认 4）。因为查询类工具共用同一条 `server.log`，**工具执行会全局串行**（API 调用仍并行），避免并发时抢到彼此的回包。
 - **中断**：`1 强制停止` 立即停止**全部**正在进行的一次性对话；没有 `1 停止`。bare `停止/强制停止` 仍只作用于主对话。
-- **黑名单**：`pin_region`、`set_creative_mode` 不暴露也不可执行（`execute`/`ptc` 层同样拦截，防止经 `ptc` 夹带）；`stay_silent` 不暴露（一次性必须有回执）。
+- **工具白名单**：一次性对话只暴露一张确定性的工具白名单（不含 `pin_region`、`set_mode`、`stay_silent`）；未列出的工具模型根本看不到，执行层再以「全量 − 白名单」兜底，防止经 `ptc` 夹带。
 
 相关配置：`oneshot_effort`、`oneshot_max_reply_tokens`、`oneshot_max_tool_rounds`、`oneshot_max_concurrent`。
 
@@ -98,7 +103,7 @@ python3 bot.py --test         # 解析逻辑自测
 | `scan_blocks(x1..z2, dimension?, filter?)` | 批量扫一个 1 格厚切面（≤16×16×1，厚轴可为 X/Y/Z）：默认回非空气方块，给 `filter` 则回类型含该关键字的方块并附未匹配类型统计 |
 | `pin_region(x1, z1, x2, z2)` | 把施工面设为常加载（ticking area，自动按 ≤100 区块切片）：防止玩家走开/离线后区块卸载导致 fill 失败。**生命周期 = 本轮次**：连续工作结束、被「停止」、会话结束或进程退出时自动移除 |
 | `backup_world()` | 把当前存档热备份成 `.7z`（`save hold` → 7z → `save resume`） |
-| `set_creative_mode(mode, reason?)` | 切换运行模式 normal / creative / creative_max（思考强度 low/high/max + 创造提示词/放宽上限，max 再翻倍） |
+| `set_mode(mode, reason?)` | 切换运行模式；可选目标按当前模式动态注入（普通↔创造/创造max；计划→执行；一次性无此工具） |
 | `ptc(calls, stop_on_error?)` | 批量工具调用：一次提交多条工具调用，串行执行后合并成一条结果（省往返与上下文） |
 
 能力注册表在 `capabilities.py`，可运行时 `register()` 扩展。
@@ -170,7 +175,7 @@ BDS 控制台 **不回显玩家聊天**，所以用行为包 `viktor_bridge` 订
 | `command_blocklist` | 禁止执行的指令 |
 | `command_result_timeout_sec` / `position_timeout_sec` / `inventory_timeout_sec` / `block_timeout_sec` / `scan_timeout_sec` | 等待脚本/控制台回包的秒数 |
 | `scan_result_limit` | `scan_blocks` 返回文本的字符上限（超出截断） |
-| `normal_effort` / `creative_effort` / `creative_max_effort` | 三态的思考强度（low / high / max） |
+| `normal_effort` / `creative_effort` / `creative_max_effort` | 各模式的思考强度（low / high / max） |
 | `oneshot_effort` / `oneshot_max_reply_tokens` / `oneshot_max_tool_rounds` / `oneshot_max_concurrent` | 一次性对话的思考强度、输出上限、工具轮次上限与最大并发数（默认 low / 6000 / 4 / 4） |
 | `parallel_tool_calls` | 是否告诉 API 允许一次返回多个工具调用（默认 true） |
 | `ptc_max_calls` / `ptc_stated_calls` | `ptc` 程序放行数（24）与对模型声明的口径（12）——留一倍余量 |

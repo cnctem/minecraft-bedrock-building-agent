@@ -217,16 +217,16 @@ PTC_DESC = (
     "批量工具调用(Parallel Tool Calling): 一次提交多个工具调用, 按顺序全部执行, "
     "结果合并成一条返回。适合把互不依赖的多步操作压成一次往返: 同时查几个玩家的坐标/物品栏, "
     "或连着下十几条 fill/tp/setblock。比一个个调更省往返和上下文。"
-    "限制: 一次最多 {n} 个调用(超了会被拒绝, 请自己分批); 不允许嵌套 ptc; "
+    "限制: 单次批量的上限以最新系统注记(会随模式刷新)为准, 超了会被拒绝; 不允许嵌套 ptc; "
     "若后一步要看前一步的结果才能决定, 仍应分开调用。"
-    "每项必须写成 {{\"tool\": \"工具名\", \"arguments\": {{...}}}}; 不要用 function 嵌套。"
+    "每项必须写成 {\"tool\": \"工具名\", \"arguments\": {...}}; 不要用 function 嵌套。"
 )
 
 PTC_SCHEMA = {
     "type": "function",
     "function": {
         "name": "ptc",
-        "description": PTC_DESC.format(n=STATED_PTC_CALLS),
+        "description": PTC_DESC,
         "parameters": {
             "type": "object",
             "properties": {
@@ -297,17 +297,22 @@ _REGISTRY = {
 }
 
 
-def tool_schemas(exclude: set | None = None) -> list[dict]:
-    """返回给模型的工具 schema。exclude 里的工具不暴露(一次性对话用)。
-    ptc 的描述按当前线程的口头上限动态生成, 避免并发下互相覆盖。"""
-    stated = get_ptc_limits()[2]
+def registered_names() -> set:
+    """当前已注册的全部能力名(供模式白名单派生执行层黑名单)。"""
+    return set(_REGISTRY.keys())
+
+
+def tool_schemas(allow: set | None = None, mode_choices: list | None = None) -> list[dict]:
+    """返回给模型的工具 schema(技能表)。
+    allow=None 表示全部; 否则只包含白名单里的工具 —— 未列出的模型根本看不到, 也就无从使用。
+    mode_choices 用于 set_mode 的可选目标(按当前模式注入), 实现“不可知”: 模型只知道能切到哪。"""
     out = []
     for name, (schema, _) in _REGISTRY.items():
-        if exclude and name in exclude:
+        if allow is not None and name not in allow:
             continue
-        if name == "ptc":
-            s = json.loads(json.dumps(schema))
-            s["function"]["description"] = PTC_DESC.format(n=stated)
+        if name == "set_mode":
+            s = json.loads(json.dumps(schema))  # 深拷见, 不污染注册表里的原 schema
+            s["function"]["parameters"]["properties"]["mode"]["enum"] = list(mode_choices or [])
             out.append(s)
         else:
             out.append(schema)
