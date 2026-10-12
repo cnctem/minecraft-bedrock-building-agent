@@ -105,8 +105,13 @@ AI 人设：**维克托·米哈伊洛维奇·切布里科夫 (Viktor Chebrikov)*
 screen -dmS viktor bash -c "cd /home/jrj/repo/mc-ai-bot && ./run.sh"
 screen -r viktor              # 查看(Ctrl+A D 退出)
 
+./restart.sh                  # 平滑重启: 优雅退出(落盘当前会话) → 带 VIKTOR_RESTORE 自动灌回, 玩家无感
+
 python3 bot.py --test         # 解析逻辑自测
 ```
+
+`restart.sh` 做的事: 找到唯一的 bot 进程 → `kill -TERM` 优雅退出(触发会话落盘到 `logs/sessions/`) →
+取最新落盘、以 `VIKTOR_RESTORE=<它>` 重新起 screen。升级代码/改配置后用它对玩家零感知。
 
 注意：**MC 服务器（screen 会话 mc）重启后必须重启本 bot**（或重新执行 run.sh），
 否则 screen 日志失效，bot 收不到聊天。
@@ -287,3 +292,4 @@ BDS 控制台 **不回显玩家聊天**，所以用行为包 `viktor_bridge` 订
 - `skills/<name>/SKILL.md`（+ `references/`）— 技能书；`use_skill` 按需载入，会话开头只注入名字与描述
 - `/home/jrj/mc_backup/` — 存档备份输出目录
 - `run.sh` — 启动脚本：重设 screen 日志设置并跑 bot
+- `restart.sh` — 平滑重启：优雅退出(落盘会话) → 带 `VIKTOR_RESTORE` 自动灌回，玩家无感
