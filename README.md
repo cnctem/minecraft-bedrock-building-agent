@@ -108,7 +108,7 @@ python3 bot.py --test         # 解析逻辑自测
 | `get_player_activity(minutes)` | 解析日志，查玩家进出记录 |
 | `get_server_status()` | 进程 CPU/内存、运行时长、负载、在线玩家 |
 | `run_server_command(cmd)` | 以控制台身份执行基岩版指令（如 `tp`/`fill`/`locate`），输出返回给模型 |
-| `get_player_position(player?)` | 在线玩家实时坐标（行为包脚本，无指令可查） |
+| `get_player_position(player?)` | 在线玩家实时坐标（行为包脚本，无指令可查）。返回整数**方块坐标**（向下取整），与玩家屏幕左上角显示的坐标完全一致 |
 | `get_player_inventory(player?)` | 在线玩家物品栏（36 格） |
 | `get_player_hand(player?)` | 在线玩家手持物品 |
 | `get_block(x, y, z, dimension?)` | 读坐标上的方块类型与状态（行为包脚本；基岩版无 `/data`） |
@@ -125,7 +125,7 @@ python3 bot.py --test         # 解析逻辑自测
 BDS 控制台 **不回显玩家聊天**，所以用行为包 `viktor_bridge` 订阅事件并 `console.log`：
 
 - `world.beforeEvents.chatSend` → `[VIKTOR-CHAT] 玩家: 内容`
-- `scriptevent viktor:pos` → `[VIKTOR-POS] 玩家 x y z 维度`
+- `scriptevent viktor:pos` → `[VIKTOR-POS] 玩家 x y z 维度`（整数方块坐标，与玩家屏幕一致）
 - `scriptevent viktor:inv` → `[VIKTOR-INV] 玩家 槽位 物品 数量`（末行 `DONE 手持槽位`）
 - `scriptevent viktor:block <x> <y> <z> [维度]` → `[VIKTOR-BLOCK] x y z 维度 方块ID [状态]`
 - `scriptevent viktor:scan <x1> <y1> <z1> <x2> <y2> <z2> [维度] [过滤]` → 逐行 `[VIKTOR-SCAN] x y z 维度 方块ID [状态]`，末行 `[VIKTOR-SCAN] DONE total=.. matched=.. unloaded=.. other=..`
