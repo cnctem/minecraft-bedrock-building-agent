@@ -11,6 +11,7 @@ AI 决定调用时由 bot 执行 handler 并把结果回传, 然后 AI 再生成
 """
 import json
 import re
+import threading
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -105,24 +106,43 @@ MAX_PTC_CALLS = 24          # 程序实际放行数(留一倍余量)
 STATED_PTC_CALLS = 12       # 提示词/报错向模型声明的数(口头限制)
 PTC_RESULT_LIMIT = 30000  # 合并结果的字符上限, 防止一条工具结果撑爆上下文
 
+# 并发支持: 每个请求线程有各自的 ptc 上限与工具黑名单。
+# 主对话与多个一次性对话同时跑时, 创造模式的上限不会被一次性的普通上限覆盖。
+_LOCAL = threading.local()
+
+
+def get_ptc_limits() -> tuple[int, int, int]:
+    """返回当前线程的 (程序放行数, 结果字符上限, 口头声明数)。"""
+    return (getattr(_LOCAL, "max_calls", MAX_PTC_CALLS),
+            getattr(_LOCAL, "result_limit", PTC_RESULT_LIMIT),
+            getattr(_LOCAL, "stated_calls", STATED_PTC_CALLS))
+
 
 def set_ptc_limits(max_calls: int | None = None, result_limit: int | None = None,
                    stated_calls: int | None = None):
-    """由 bot 根据当前模式(普通/创造)调整批量上限。
+    """由 bot 根据当前模式(普通/创造/一次性)调整本线程的批量上限。
     max_calls 是程序放行数, stated_calls 是对模型声明的口径(描述与报错都用它),
     两者留一倍差距: 模型偶尔超一点不会直接撞墙。"""
-    global MAX_PTC_CALLS, PTC_RESULT_LIMIT, STATED_PTC_CALLS
     if max_calls:
-        MAX_PTC_CALLS = max(1, int(max_calls))
+        _LOCAL.max_calls = max(1, int(max_calls))
     if result_limit:
-        PTC_RESULT_LIMIT = max(500, int(result_limit))
+        _LOCAL.result_limit = max(500, int(result_limit))
     if stated_calls:
-        STATED_PTC_CALLS = max(1, int(stated_calls))
-        PTC_SCHEMA["function"]["description"] = PTC_DESC.format(n=STATED_PTC_CALLS)
+        _LOCAL.stated_calls = max(1, int(stated_calls))
 
 
 def set_ptc_limit(n: int):
     set_ptc_limits(max_calls=n, stated_calls=n)
+
+
+def set_blocked_tools(names) -> None:
+    """设置本线程禁用的工具名(空表示不限制)。一次性对话用它挡住 pin_region 等。
+    execute / ptc 都会遵守, 防止模型通过 ptc 夹带调用黑名单工具。"""
+    _LOCAL.blocked = set(names or ())
+
+
+def _blocked_tools() -> set:
+    return getattr(_LOCAL, "blocked", set())
 
 
 # 模型有时会把数组项写成别的形状(少了 tool 键、或直接用 OpenAI 的 function 嵌套),
@@ -148,10 +168,11 @@ def _ptc_args(item: dict):
 
 
 def ptc(calls, stop_on_error: bool = False) -> str:
+    max_calls, result_limit, stated_calls = get_ptc_limits()
     if not isinstance(calls, list) or not calls:
         return "错误: calls 需要是非空数组。"
-    if len(calls) > MAX_PTC_CALLS:
-        return (f"错误: 一次最多 {STATED_PTC_CALLS} 个调用, 收到 {len(calls)} 个。"
+    if len(calls) > max_calls:
+        return (f"错误: 一次最多 {stated_calls} 个调用, 收到 {len(calls)} 个。"
                 "请拆成几批提交。")
     out = []
     for i, item in enumerate(calls, 1):
@@ -187,8 +208,8 @@ def ptc(calls, stop_on_error: bool = False) -> str:
             out.append(f"(失败, 已按 stop_on_error 跳过剩余 {len(calls) - i} 个调用)")
             break
     text = "\n".join(out)
-    if len(text) > PTC_RESULT_LIMIT:
-        text = text[:PTC_RESULT_LIMIT] + f"\n...(结果过长, 已截断到 {PTC_RESULT_LIMIT} 字符)"
+    if len(text) > result_limit:
+        text = text[:result_limit] + f"\n...(结果过长, 已截断到 {result_limit} 字符)"
     return text
 
 
@@ -276,8 +297,21 @@ _REGISTRY = {
 }
 
 
-def tool_schemas() -> list[dict]:
-    return [schema for schema, _ in _REGISTRY.values()]
+def tool_schemas(exclude: set | None = None) -> list[dict]:
+    """返回给模型的工具 schema。exclude 里的工具不暴露(一次性对话用)。
+    ptc 的描述按当前线程的口头上限动态生成, 避免并发下互相覆盖。"""
+    stated = get_ptc_limits()[2]
+    out = []
+    for name, (schema, _) in _REGISTRY.items():
+        if exclude and name in exclude:
+            continue
+        if name == "ptc":
+            s = json.loads(json.dumps(schema))
+            s["function"]["description"] = PTC_DESC.format(n=stated)
+            out.append(s)
+        else:
+            out.append(schema)
+    return out
 
 
 def register(name: str, schema: dict, handler):
@@ -286,6 +320,8 @@ def register(name: str, schema: dict, handler):
 
 
 def execute(name: str, arguments_json: str) -> str:
+    if name in _blocked_tools():
+        return f"错误: 当前模式不支持调用 {name}。"
     entry = _REGISTRY.get(name)
     if not entry:
         return f"错误: 未知能力 {name}"

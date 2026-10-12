@@ -49,6 +49,20 @@ AI 人设：**维克托·米哈伊洛维奇·切布里科夫 (Viktor Chebrikov)*
 三种状态由 `set_creative_mode(mode)` 切换；任务完成或会话结束自动复位回 normal。仅限白名单/op。
 思维链（`reasoning_content`）只写入 `logs/bot.log`，不进会话上下文。
 
+## 一次性对话（`1 ...`）
+
+玩家在聊天里以 `1 ` 开头（数字 1 + 空格；单独发一个 `1` 也算，随后提示补内容）时，触发**一次性对话**。任何玩家都能用。
+
+- **不进主对话**：触发词、这次的全部工具往返与上下文都不进主会话，主对话完全不知道它存在，也不会顺带开启/清空主会话。每次一次性单独落盘到 `logs/oneshot/`。
+- **新状态、闭式完成**：组装提示词时追加一次性规则，bot 知道这是一次“下达指令 → 执行 → 回报”的任务，必须一次做完、**不能中途向玩家提问**。但允许一整轮多步工具调用（例：先查坐标 → 写长期记忆 → 发消息回报）。
+- **只做确定性操作**：不切创造模式、不设常加载区域、不做开放式设计或大规模施工。
+- **模糊请求**：若完全无法判断，只回一条——说明缺哪些关键细节、请补充后重新组织再发，并提醒这是一次性对话。
+- **可并发**：主任务进行中也能触发，且支持同时多个一次性对话（`oneshot_max_concurrent`，默认 4）。因为查询类工具共用同一条 `server.log`，**工具执行会全局串行**（API 调用仍并行），避免并发时抢到彼此的回包。
+- **中断**：`1 强制停止` 立即停止**全部**正在进行的一次性对话；没有 `1 停止`。bare `停止/强制停止` 仍只作用于主对话。
+- **黑名单**：`pin_region`、`set_creative_mode` 不暴露也不可执行（`execute`/`ptc` 层同样拦截，防止经 `ptc` 夹带）；`stay_silent` 不暴露（一次性必须有回执）。
+
+相关配置：`oneshot_effort`、`oneshot_max_reply_tokens`、`oneshot_max_tool_rounds`、`oneshot_max_concurrent`。
+
 ## 运行
 
 ```bash
@@ -154,6 +168,7 @@ BDS 控制台 **不回显玩家聊天**，所以用行为包 `viktor_bridge` 订
 | `command_result_timeout_sec` / `position_timeout_sec` / `inventory_timeout_sec` / `block_timeout_sec` / `scan_timeout_sec` | 等待脚本/控制台回包的秒数 |
 | `scan_result_limit` | `scan_blocks` 返回文本的字符上限（超出截断） |
 | `normal_effort` / `creative_effort` / `creative_max_effort` | 三态的思考强度（low / high / max） |
+| `oneshot_effort` / `oneshot_max_reply_tokens` / `oneshot_max_tool_rounds` / `oneshot_max_concurrent` | 一次性对话的思考强度、输出上限、工具轮次上限与最大并发数（默认 low / 6000 / 4 / 4） |
 | `parallel_tool_calls` | 是否告诉 API 允许一次返回多个工具调用（默认 true） |
 | `ptc_max_calls` / `ptc_stated_calls` | `ptc` 程序放行数（24）与对模型声明的口径（12）——留一倍余量 |
 | `ptc_result_limit` / `creative_ptc_result_limit` | `ptc` 合并结果的字符上限（30000 / 60000；`creative_max` 再 ×2） |
