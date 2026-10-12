@@ -60,6 +60,7 @@ PIN_NAME = "viktor_pin"  # 常加载区域命名前缀(本任务临时用, 轮�
 CLEAR_WORD = "清空"  # 控制面: 清空会话上下文(任何玩家可触发, 不进上下文)
 PLAN_WORD = "计划模式"  # 控制面: 进入计划模式(任何玩家可触发, 程序处理)
 EXIT_PLAN_WORD = "退出计划"  # 控制面: 退出计划模式回 normal(任何玩家可触发)
+RESTORE_WORD = "恢复会话"  # 控制面: 把最近一次落盘的会话灌回(任何玩家可触发)
 
 # 运行模式(名字仅作标识; 行为/限制/工具白名单由三张 profile 表组合而成, 见下方 Mode/MODES)
 MODE_NORMAL = "normal"
@@ -491,7 +492,7 @@ class ScreenBridge:
     def sync_player_count(self) -> None:
         self.send_command("list")
 
-    def say_as_viktor(self, text: str, max_len: int, max_chunks: int):
+    def say_as_viktor(self, text: str, max_len: int, max_chunks: int, system: bool = False):
         # 去掉换行与控制字符, 防止一条回复里夹带命令
         text = re.sub(r"[\r\n\x00-\x1f]", " ", text).strip()
         # 上下文格式是 [时间] 名字: 内容, 模型有时会照样模仿, 剥掉这类前缀
@@ -502,6 +503,8 @@ class ScreenBridge:
             text = stripped
         if not text:
             return
+        if system:
+            text = "[系统] " + text
         chunks = []
         while text and len(chunks) < max_chunks:
             chunks.append(text[:max_len])
@@ -722,6 +725,7 @@ class Bot:
         任务可以跨离线期继续做。"""
         if not self.session:
             self._start_session()
+            self._say_later("新会话已开始。发送「恢复会话」可找回上一段对话。", system=True)
             return
         with self.cv:
             busy = self.agent_busy
@@ -731,10 +735,11 @@ class Bot:
             self._say_later(
                 "欢迎回来。我手头还有任务在进行。"
                 "要我停就发「停止」(做完当前这一步再停)或「强制停止」(立即中止); "
-                "想清空上下文, 请先停下再发「清空」。")
+                "想清空上下文, 请先停下再发「清空」。", system=True)
             return
         n = self._reset_session()
         log(f"[清空] {name} 进服(0→1), 已完整初始化新会话(丢弃 {n} 条消息)")
+        self._say_later("新会话已开始。发送「恢复会话」可找回上一段对话。", system=True)
 
     def _on_leave(self, name: str):
         """玩家离开只更新名单。全部离开(→0)不再结束会话: 正在进行的任务继续跑,
@@ -756,7 +761,7 @@ class Bot:
         else:
             log(f"[停止] {name} 要求停止, 但当前没有运行中的任务")
             msg = "当前没有正在执行的任务。"
-        self.bridge.say_as_viktor(msg, self.cfg["reply_chunk_len"], self.cfg["reply_max_chunks"])
+        self._sys(msg)
 
     def _on_force_stop(self, name: str):
         """玩家发来完全匹配的“强制停止”: 立即中止运行中的任务, 不经过模型。
@@ -771,14 +776,19 @@ class Bot:
         else:
             log(f"[强制停止] {name} 要求强制停止, 但当前没有运行中的任务")
             msg = "当前没有正在执行的任务。"
-        self.bridge.say_as_viktor(msg, self.cfg["reply_chunk_len"], self.cfg["reply_max_chunks"])
+        self._sys(msg)
 
-    def _say_later(self, text: str, delay: float = 5.0):
+    def _say_later(self, text: str, delay: float = 5.0, system: bool = False):
         """延迟播报: 进服瞬间客户端尚未就绪, 立即 tellraw 会丢消息(实测)。"""
         t = threading.Timer(delay, lambda: self.bridge.say_as_viktor(
-            text, self.cfg["reply_chunk_len"], self._reply_max_chunks()))
+            text, self.cfg["reply_chunk_len"], self._reply_max_chunks(), system=system))
         t.daemon = True
         t.start()
+
+    def _sys(self, text: str):
+        """发送程序生成(非模型)的系统提示, 带 [系统] 前缀, 让玩家区分这不是 AI 回复。"""
+        self.bridge.say_as_viktor(text, self.cfg["reply_chunk_len"],
+                                  self._reply_max_chunks(), system=True)
 
     def _on_no_stop(self, name: str):
         """玩家发来完全匹配的“不停止”: 撤销还未生效的停止/强制停止, 不经过模型。
@@ -796,7 +806,7 @@ class Bot:
         else:
             log(f"[不停止] {name} 要求不停止, 但没有尚未生效的停止指令")
             msg = "当前没有尚未生效的停止指令。"
-        self.bridge.say_as_viktor(msg, self.cfg["reply_chunk_len"], self.cfg["reply_max_chunks"])
+        self._sys(msg)
 
     def _on_clear(self, name: str):
         """玩家发来完全匹配的“清空”: 丢弃整个会话上下文, 任何玩家都可触发。
@@ -806,16 +816,12 @@ class Bot:
             busy = self.agent_busy or bool(self.pending)
         if busy:
             log(f"[清空] {name} 要求清空, 但有任务在进行, 清空无效")
-            self.bridge.say_as_viktor(
-                "现在有任务正在进行, 清空无效。请先发「停止」(做完当前这一步再停)"
-                "或「强制停止」(立即中止), 停下来后再清空。",
-                self.cfg["reply_chunk_len"], self._reply_max_chunks())
+            self._sys("现在有任务正在进行, 清空无效。请先发「停止」(做完当前这一步再停)"
+                      "或「强制停止」(立即中止), 停下来后再清空。")
             return
         n = self._reset_session()
         log(f"[清空] {name} 要求清空上下文, 已完整初始化新会话(丢弃 {n} 条消息)")
-        self.bridge.say_as_viktor(
-            f"上下文已清空(丢弃 {n} 条消息), 我重新开始。",
-            self.cfg["reply_chunk_len"], self._reply_max_chunks())
+        self._sys(f"上下文已清空(丢弃 {n} 条消息)。发送「恢复会话」可找回刚才的对话。")
 
     def _reset_session(self) -> int:
         """完整初始化: 结束当前会话(落盘、复位任何非普通模式)并开启一个全新会话。
@@ -849,6 +855,28 @@ class Bot:
                 break
         log(f"[恢复] 从 {p.name} 灌回 {len(msgs)} 条消息, 模式={MODES[self.mode].label}")
 
+    def _on_restore_session(self, name: str):
+        """硬编码控制词"恢复会话": 把最近一次落盘的会话灌回(程序处理, 不走模型)。"""
+        with self.cv:
+            busy = self.agent_busy or bool(self.pending)
+        if busy:
+            self._sys("现在有任务在进行, 请先「停止」或等它做完, 再恢复会话。")
+            return
+        dumps = sorted(SESSION_DIR.glob("session-*.jsonl"),
+                       key=lambda p: p.stat().st_mtime, reverse=True)
+        if not dumps:
+            self._sys("没有可恢复的历史会话。")
+            return
+        path = dumps[0]
+        try:
+            self.resume_session(str(path))
+        except Exception as e:
+            log(f"[恢复] 失败: {e}")
+            self._sys("恢复会话失败, 请稍后再试。")
+            return
+        self._sys(f"已恢复上一段会话({path.name}, {len(self.session.messages)} 条消息, "
+                  f"模式 {MODES[self.mode].label})。")
+
     # ---------- 计划模式(硬编码控制词, 程序处理, 不走模型) ----------
 
     def _program_set_mode(self, mode: str, name: str) -> None:
@@ -864,21 +892,16 @@ class Bot:
         with self.cv:
             busy = self.agent_busy or bool(self.pending)
         if busy:
-            self.bridge.say_as_viktor(
-                "现在有任务在进行, 请先发「停止」或等它做完, 再进入计划模式。",
-                self.cfg["reply_chunk_len"], self._reply_max_chunks())
+            self._sys("现在有任务在进行, 请先发「停止」或等它做完, 再进入计划模式。")
             return
         if self.mode == MODE_PLAN:
-            self.bridge.say_as_viktor("已在计划模式中, 发送「退出计划」可退出。",
-                                      self.cfg["reply_chunk_len"], self._reply_max_chunks())
+            self._sys("已在计划模式中, 发送「退出计划」可退出。")
             return
         if not self.session:
             self.players.add(name)
             self._start_session()
         self._program_set_mode(MODE_PLAN, name)
-        self.bridge.say_as_viktor(
-            "已切换到计划模式, 发送「退出计划」可退出计划模式。",
-            self.cfg["reply_chunk_len"], self._reply_max_chunks())
+        self._sys("已切换到计划模式, 发送「退出计划」可退出计划模式。")
         # 让 Agent 主动开口引导(无用户消息, 仅以 nudge 触发一次模型回合)
         with self.cv:
             self._nudge = True
@@ -889,16 +912,13 @@ class Bot:
         with self.cv:
             busy = self.agent_busy or bool(self.pending)
         if busy:
-            self.bridge.say_as_viktor("我正在回复, 请稍后再发「退出计划」。",
-                                      self.cfg["reply_chunk_len"], self._reply_max_chunks())
+            self._sys("我正在回复, 请稍后再发「退出计划」。")
             return
         if self.mode != MODE_PLAN:
-            self.bridge.say_as_viktor("当前不在计划模式。",
-                                      self.cfg["reply_chunk_len"], self._reply_max_chunks())
+            self._sys("当前不在计划模式。")
             return
         self._program_set_mode(MODE_NORMAL, name)
-        self.bridge.say_as_viktor("已退出计划模式, 回到普通模式。",
-                                  self.cfg["reply_chunk_len"], self._reply_max_chunks())
+        self._sys("已退出计划模式, 回到普通模式。")
 
     # ---------- 一次性对话(可并发, 与主对话完全隔离) ----------
 
@@ -906,9 +926,7 @@ class Bot:
         """处理 "1 ..." 触发。先剥掉前缀再交给一次性线程; 前缀本身不进任何上下文。"""
         body = ONESHOT_TRIGGER.sub("", stripped, count=1).strip()
         if not body:
-            self.bridge.say_as_viktor(
-                "一次性对话要在“1 ”后面写清要做的事, 例如: 1 记住我现在的位置。",
-                self.cfg["reply_chunk_len"], self._reply_max_chunks())
+            self._sys("一次性对话要在“1 ”后面写清要做的事, 例如: 1 记住我现在的位置。")
             return
         if body == "强制停止":
             self._on_oneshot_force_stop(name)
@@ -926,9 +944,7 @@ class Bot:
         if full:
             log(f"[一次性] {name} 触发被拒: 已有 {active} 个在跑"
                 f"(上限 {self.oneshot_max_concurrent})")
-            self.bridge.say_as_viktor(
-                "现在一次性对话有点多, 请稍后再发。",
-                self.cfg["reply_chunk_len"], self._reply_max_chunks())
+            self._sys("现在一次性对话有点多, 请稍后再发。")
             return
         log(f"[一次性] {name} 触发: {body}")
         threading.Thread(target=self._run_oneshot, args=(name, body), daemon=True).start()
@@ -945,7 +961,7 @@ class Bot:
         else:
             log(f"[一次性] {name} 要求强制停止, 但没有正在进行的一次性对话")
             msg = "当前没有正在进行的一次性对话。"
-        self.bridge.say_as_viktor(msg, self.cfg["reply_chunk_len"], self._reply_max_chunks())
+        self._sys(msg)
 
     def _run_oneshot(self, name: str, body: str) -> None:
         """一次性对话工作线程: 独立 context, 结束后落盘 logs/oneshot/, 绝不碰主会话。"""
@@ -972,10 +988,12 @@ class Bot:
         finally:
             try:
                 if not spoke and not ctx.abort.is_set():
-                    # 兜底: 模型把回复写在正文(玩家看不到)时必须补发, 且一次性必须有回执
-                    self.bridge.say_as_viktor(
-                        reply.strip() or "抱歉, 这次一次性请求没算完, 请拆小后再发一次。",
-                        self.cfg["reply_chunk_len"], self._reply_max_chunks())
+                    # 兜底: 模型把回复写在正文(玩家看不到)时必须补发; 程序兜底文本带 [系统]
+                    if reply.strip():
+                        self.bridge.say_as_viktor(reply, self.cfg["reply_chunk_len"],
+                                                  self._reply_max_chunks())
+                    else:
+                        self._sys("抱歉, 这次一次性请求没算完, 请拆小后再发一次。")
                 ctx.session.add_assistant(reply or "(已通过工具发言)")
             except Exception as e:
                 log(f"[一次性#{oid}] 收尾发言失败: {e}")
@@ -1059,6 +1077,9 @@ class Bot:
                 return
             if stripped == EXIT_PLAN_WORD:
                 self._on_exit_plan(name)
+                return
+            if stripped == RESTORE_WORD:
+                self._on_restore_session(name)
                 return
             # 消息本身不在这里写上下文: 由 worker 开轮时(或 Agent 循环的安全点)
             # 统一提交, 避免插进 assistant(tool_calls) 与 tool 中间拆散配对。
@@ -1605,10 +1626,8 @@ class Bot:
             # 从普通进入创造: 第一轮是长思考, 玩家会干等几十秒没反馈。
             # 这是程序行为, 不依赖模型自觉: 开关一翻就直接播报(升档不重复播报)。
             if not was_creative and self.cfg.get("notify_creative_mode", True):
-                self.bridge.say_as_viktor(
-                    self.cfg.get("creative_notice",
-                                 "创造模式已开启: 我在深度思考, 可能要等一会儿, 请稍候。"),
-                    self.cfg["reply_chunk_len"], self._reply_max_chunks())
+                self._sys(self.cfg.get("creative_notice",
+                                       "创造模式已开启: 我在深度思考, 可能要等一会儿, 请稍候。"))
             return (f"已进入{MODES[mode].label}模式: 从下一次请求起思考强度 {p['effort']}, "
                     "并启用创造工作方式(更长输出、更多工具轮次、更大上下文)。"
                     "完成后记得用 set_mode 切回 normal。")
@@ -1736,8 +1755,7 @@ class Bot:
         log(f"[清空] 上下文约 {used} 估算 token 超过预算 {budget}, "
             f"已完整初始化新会话(丢弃 {n} 条消息)")
         if self.cfg.get("notify_context_clear", True):
-            self.bridge.say_as_viktor("上下文太长, 我已清空重开。", self.cfg["reply_chunk_len"],
-                                      self._reply_max_chunks())
+            self._sys("上下文太长, 我已清空重开。发送「恢复会话」可找回上一段对话。")
         return True
 
     def _input_token_budget(self) -> int:
@@ -1870,8 +1888,7 @@ class Bot:
                                    if oneshot else
                                    "这件事我一遍想不完, 刚才没能给出答复。请拆小一点再说, "
                                    "或者让我开创造模式慢慢做。")
-                        self.bridge.say_as_viktor(msg_txt, self.cfg["reply_chunk_len"],
-                                                  self._reply_max_chunks())
+                        self._sys(msg_txt)
                         return "(输出被截断且无正文, 已告知玩家拆分需求)", True
                 return content, spoke
             rounds += 1
@@ -1914,8 +1931,7 @@ class Bot:
             msg_txt = ("这次一次性请求步骤较多, 我没能一次做完, 请拆小后重发。"
                        if oneshot else
                        "任务分批较多, 我先做到这里。请核对现场, 说“继续”我再往下做。")
-            self.bridge.say_as_viktor(msg_txt, self.cfg["reply_chunk_len"],
-                                      self._reply_max_chunks())
+            self._sys(msg_txt)
             spoke = True
         return "(工具轮次用尽, 已告知玩家先停下核对)", spoke
 
@@ -2812,6 +2828,37 @@ def self_test():
                                       for v in seen_ctx.values()), seen_ctx
     assert bot2.session is tsess and bot2.session.messages == tmsg_before
     print("一次性对话自测 OK")
+
+    # [系统] 前缀: 程序生成的提示带前缀, 模型生成的不带
+    sys_out = []
+    orig_send_cmd = bot2.bridge.send_command
+    bot2.bridge.send_command = lambda cmd: sys_out.append(cmd)
+    ScreenBridge.say_as_viktor(bot2.bridge, "已清空", 120, 3, system=True)
+    ScreenBridge.say_as_viktor(bot2.bridge, "模型的话", 120, 3)
+    bot2.bridge.send_command = orig_send_cmd
+    assert any("[系统] 已清空" in c for c in sys_out), sys_out
+    assert any("模型的话" in c and "[系统]" not in c for c in sys_out), sys_out
+    print("系统前缀自测 OK")
+
+    # 恢复会话: 从最近落盘的 dump 灌回, 并回一条 [系统] 提示
+    SESSION_DIR.mkdir(parents=True, exist_ok=True)
+    rdump = SESSION_DIR / "session-20990101-000000-s1.jsonl"
+    rdump.write_text("\n".join(json.dumps(m, ensure_ascii=False) for m in [
+        {"role": "system", "content": memory_note()},
+        {"role": "user", "content": "Bob: 记住这座桥"},
+        {"role": "assistant", "content": "好的"},
+    ]) + "\n", encoding="utf-8")
+    rs = []
+    orig_say_rs = bot2.bridge.say_as_viktor
+    bot2.bridge.say_as_viktor = lambda text, *a, **k: rs.append(text)
+    bot2.agent_busy = False
+    bot2.pending.clear()
+    bot2._on_restore_session("Tester")
+    assert any("已恢复" in t for t in rs), rs
+    assert bot2.session.messages[-1]["content"] == "好的", bot2.session.messages[-1]
+    bot2.bridge.say_as_viktor = orig_say_rs
+    rdump.unlink(missing_ok=True)
+    print("恢复会话自测 OK")
 
     r = bot2._tool_run_command({"command": "list"})
     assert "指令已执行: /list" in r, r
