@@ -2522,6 +2522,11 @@ def self_test():
     assert Bot._ptc_speaks({"function": {"arguments": json.dumps(
         {"calls": [{"tool": "send_chat_message", "arguments": {"text": "hi"}}]})}})
     assert not Bot._ptc_speaks({"function": {"arguments": "{}"}})
+    # 不回显参数: 结果里不应出现模型自己那份 arguments(省 token)
+    _r = capabilities.execute("ptc", json.dumps({"calls": [
+        {"tool": "stay_silent", "arguments": {"zzz": "UNIQUE_ARG"}}]}))
+    assert "已保持安静" in _r and "UNIQUE_ARG" not in _r, _r
+    assert "stay_silent -> " in _r, _r
     print("PTC 自测 OK")
 
     # 能力测试: 创造模式(权限/等待提醒/参数切换/payload/思维链剥离/会话复位)

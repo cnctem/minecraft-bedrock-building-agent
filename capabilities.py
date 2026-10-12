@@ -183,14 +183,12 @@ def ptc(calls, stop_on_error: bool = False) -> str:
         if name == "ptc":
             out.append(f"[{i}] 错误: 不允许嵌套 ptc")
             continue
-        shown = ""
         raw = _ptc_args(item)
         if isinstance(raw, str):
-            args_json, shown = raw, raw
+            args_json = raw
         else:
             try:
                 args_json = json.dumps(raw, ensure_ascii=False)
-                shown = args_json
             except (TypeError, ValueError) as e:
                 out.append(f"[{i}] {name}: 错误: 参数无法序列化: {e}")
                 continue
@@ -202,7 +200,8 @@ def ptc(calls, stop_on_error: bool = False) -> str:
             out.append(f"[{i}] {name}: 错误: 未知能力")
             continue
         result = execute(name, args_json)
-        out.append(f"[{i}] {name}({shown}) -> {result}")
+        # 不回显参数: 模型自己的 ptc 调用里已有, 回显纯属重复占上下文
+        out.append(f"[{i}] {name} -> {result}")
         if stop_on_error and ("[错误]" in result or "[警告]" in result
                               or result.startswith("错误:")):
             out.append(f"(失败, 已按 stop_on_error 跳过剩余 {len(calls) - i} 个调用)")
@@ -214,12 +213,9 @@ def ptc(calls, stop_on_error: bool = False) -> str:
 
 
 PTC_DESC = (
-    "批量工具调用(Parallel Tool Calling): 一次提交多个工具调用, 按顺序全部执行, "
-    "结果合并成一条返回。适合把互不依赖的多步操作压成一次往返: 同时查几个玩家的坐标/物品栏, "
-    "或连着下十几条 fill/tp/setblock。比一个个调更省往返和上下文。"
-    "限制: 单次批量的上限以最新系统注记(会随模式刷新)为准, 超了会被拒绝; 不允许嵌套 ptc; "
-    "若后一步要看前一步的结果才能决定, 仍应分开调用。"
-    "每项必须写成 {\"tool\": \"工具名\", \"arguments\": {...}}; 不要用 function 嵌套。"
+    "批量调用多个工具: 一次提交多个调用, 按顺序执行后合并成一条返回, 省往返与上下文。"
+    "适合互不依赖的多步(查多人坐标/物品栏、连下多条 fill/tp/setblock); 有先后依赖时分开调。"
+    "上限见模式注记, 超了会被拒; 不允许嵌套 ptc; 每项写成 {\"tool\": \"名\", \"arguments\": {...}}。"
 )
 
 PTC_SCHEMA = {
