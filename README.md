@@ -113,12 +113,31 @@ python3 bot.py --test         # 解析逻辑自测
 | `get_player_hand(player?)` | 在线玩家手持物品 |
 | `get_block(x, y, z, dimension?)` | 读坐标上的方块类型与状态（行为包脚本；基岩版无 `/data`） |
 | `scan_blocks(x1..z2, dimension?, filter?)` | 批量扫一个 1 格厚切面（≤16×16×1，厚轴可为 X/Y/Z）：默认回非空气方块，给 `filter` 则回类型含该关键字的方块并附未匹配类型统计 |
+| `find_items(query?, category?, limit?)` | 查基岩版物品/方块 ID 速查表（唯一权威来源）。`query` 支持中文/英文/ID 片段子串匹配，`category` 限定分类，不传参数返回分类总览。结果 id 可直接用于 `give`/`fill`/`setblock` |
 | `pin_region(x1, z1, x2, z2)` | **仅创造/执行模式下可用**：把施工面设为常加载（ticking area，自动按 ≤100 区块切片）：防止玩家走开/离线后区块卸载导致 fill 失败。**生命周期 = 创造/执行模式**：离开这些模式（切回 normal 等）或会话结束时自动移除 |
 | `backup_world()` | 把当前存档热备份成 `.7z`（`save hold` → 7z → `save resume`） |
 | `set_mode(mode, reason?)` | 切换运行模式；可选目标按当前模式动态注入（普通↔创造/创造max；计划→执行；一次性无此工具） |
 | `ptc(calls, stop_on_error?)` | 批量工具调用：一次提交多条工具调用，串行执行后合并成一条结果（省往返与上下文） |
 
 能力注册表在 `capabilities.py`，可运行时 `register()` 扩展。
+
+### 物品/方块 ID 速查表
+
+解决“玩家说别名/口语、模型想不起 ID、自由创作不知道有哪些 ID”三类问题。
+数据全部来自**服务器本体**，版本精确、无需手工维护：
+
+- **ID 清单**：行为包 `scriptevent viktor:ids` 调 `ItemTypes.getAll()` / `BlockTypes.getAll()` 导出
+  （控制台跑一次，输出 `[VIKTOR-IDS] …`，先落到 `data/raw_ids.txt`）
+- **译名**：`resource_packs/vanilla/texts/{zh_CN,en_US}.lang` 官方译名
+- 生成脚本 `tools/build_items.py` 把二者合成 `data/items.json`（`id → {中文名, 英文名, 分类, 别名}`）；
+  基岩版 lang 键新旧混杂（`tile.birchFence` / `tile.wooden_slab.birch` / `tile.concretePowder.black`），
+  脚本用一组“族规则 + 通用旋转”反查，约 89% 能自动拿到中文名，其余退化为英文名（模型可自行翻译）。
+  同义词/Java 名/口语别名写在 `data/item_aliases.json`。
+
+**Agent 友好 / 省 token 的做法**：整表（~1240 项）**绝不进提示词**，只暴露一个 `find_items` 工具按需检索，
+命中结果才进上下文；中文名让“混凝土”“台阶”这类模糊词直接子串命中整族。所有模式（含一次性/计划）都可查。
+
+服务器升级后重跑：控制台 `scriptevent viktor:ids` → 更新 `data/raw_ids.txt` → `python3 tools/build_items.py`。
 
 ### 行为包脚本桥
 
@@ -129,6 +148,7 @@ BDS 控制台 **不回显玩家聊天**，所以用行为包 `viktor_bridge` 订
 - `scriptevent viktor:inv` → `[VIKTOR-INV] 玩家 槽位 物品 数量`（末行 `DONE 手持槽位`）
 - `scriptevent viktor:block <x> <y> <z> [维度]` → `[VIKTOR-BLOCK] x y z 维度 方块ID [状态]`
 - `scriptevent viktor:scan <x1> <y1> <z1> <x2> <y2> <z2> [维度] [过滤]` → 逐行 `[VIKTOR-SCAN] x y z 维度 方块ID [状态]`，末行 `[VIKTOR-SCAN] DONE total=.. matched=.. unloaded=.. other=..`
+- `scriptevent viktor:ids` → 分块输出全部物品/方块 ID（`[VIKTOR-IDS] ITEMS/BLOCKS …`、末行 `DONE`），供离线重建 ID 速查表
 
 需要 `@minecraft/server` 的 **beta** 模块与 `level.dat` 里的实验开关。
 修改脚本后用控制台 `reload` 热重载，不必重启服务器。
@@ -217,5 +237,9 @@ BDS 控制台 **不回显玩家聊天**，所以用行为包 `viktor_bridge` 订
 - `logs/sessions/*.jsonl` — 每次会话的完整上下文存档
 - `memory.md` — 长期记忆（会话开始时注入为系统注记；人工直接改动在下一次会话生效，`update_memory` 则即时追加新注记），备份在 `logs/memory-backup/`
 - `capabilities.py` — 能力注册表
+- `data/items.json` — 物品/方块 ID 速查表（`tools/build_items.py` 生成；含中文名、分类、别名）
+- `data/raw_ids.txt` — `scriptevent viktor:ids` 导出的原始 ID 清单（重建速查表的输入）
+- `data/item_aliases.json` — 手写的同义词/Java 名/口语别名
+- `tools/build_items.py` — 从 `data/raw_ids.txt` + 官方 lang 生成 `data/items.json`
 - `/home/jrj/mc_backup/` — 存档备份输出目录
 - `run.sh` — 启动脚本：重设 screen 日志设置并跑 bot

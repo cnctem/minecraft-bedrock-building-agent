@@ -255,6 +255,141 @@ PTC_SCHEMA = {
 }
 
 
+# ---------- 物品/方块 ID 速查 ----------
+# 数据由 tools/build_items.py 从服务器本体导出(行为包 scriptevent viktor:ids + 官方 lang),
+# 版本精确、无需手工维护。这里只做按需检索, 绝不把整表塞进提示词, 省 token。
+
+ITEMS_PATH = BASE_DIR / "data" / "items.json"
+_ITEMS_CACHE: dict | None = None
+
+
+def _items() -> dict:
+    global _ITEMS_CACHE
+    if _ITEMS_CACHE is None:
+        try:
+            _ITEMS_CACHE = json.loads(ITEMS_PATH.read_text(encoding="utf-8"))
+        except Exception:
+            _ITEMS_CACHE = {}
+    return _ITEMS_CACHE
+
+
+def _item_haystack(iid: str, meta: dict) -> str:
+    parts = [iid, meta.get("zh", ""), meta.get("en", "")] + list(meta.get("alias", []))
+    return " ".join(parts).lower()
+
+
+def _item_score(iid: str, meta: dict, q: str, q_en: str) -> int:
+    if not q:
+        return 1
+    zh = str(meta.get("zh", "")).lower()
+    en = str(meta.get("en", "")).lower()
+    iidl = iid.lower()
+    s = 0
+    if q == iidl:
+        s = max(s, 1000)
+    elif iidl.startswith(q):
+        s = max(s, 720)
+    elif q in iidl:
+        s = max(s, 560)
+    if zh:
+        if q == zh:
+            s = max(s, 980)
+        elif q in zh:
+            s = max(s, 820)
+    for a in meta.get("alias", []):
+        al = str(a).lower()
+        if q == al:
+            s = max(s, 950)
+            break
+        if q in al:
+            s = max(s, 740)
+    if en and q in en:
+        s = max(s, 420)
+    if q_en and q_en in iidl:
+        s = max(s, 500)
+    return s
+
+
+def find_items(query: str = "", category: str = "", limit: int = 20) -> str:
+    data = _items()
+    if not data:
+        return "物品表不存在(需先运行 tools/build_items.py 生成 data/items.json)。"
+    query = (query or "").strip()
+    category = (category or "").strip()
+    try:
+        limit = max(1, min(int(limit or 20), 60))
+    except (TypeError, ValueError):
+        limit = 20
+
+    cats: dict[str, list[str]] = {}
+    for iid, meta in data.items():
+        cats.setdefault(meta.get("cat", "杂项"), []).append(iid)
+
+    if not query and not category:
+        lines = [f"共 {len(data)} 个可用 ID, 分类如下:"]
+        for cat in sorted(cats, key=lambda c: (-len(cats[c]), c)):
+            ex = ", ".join(f"{s}({data[s]['zh']})" for s in cats[cat][:6])
+            lines.append(f"- {cat}({len(cats[cat])}): {ex} …")
+        lines.append('浏览用 find_items(category="建筑"); 搜索用 find_items(query="..."), '
+                     "query 支持中文/英文/ID 片段。")
+        return "\n".join(lines)
+
+    q = query.lower()
+    q_en = re.sub(r"\s+", "_", q)
+    tokens = [t for t in re.split(r"[\s,，、/]+", q) if t]
+    scored: list[tuple[int, str]] = []
+    for iid, meta in data.items():
+        if category and meta.get("cat") != category:
+            continue
+        if tokens and not all(t in _item_haystack(iid, meta) or t in iid for t in tokens):
+            continue
+        s = _item_score(iid, meta, q, q_en)
+        if s > 0:
+            scored.append((s, iid))
+    if not scored:
+        hint = f'没有匹配 "{query}" 的 ID。'
+        if re.search(r"[\u4e00-\u9fff]", query):
+            hint += " 中文没命中时换英文关键词再试(如 混凝土→concrete、台阶→slab、金块→gold_block)。"
+        if category:
+            hint += f' 也可能不在分类 "{category}" 里, 去掉 category 再查。'
+        return hint
+    scored.sort(key=lambda x: (-x[0], x[1]))
+    total = len(scored)
+    shown = scored[:limit]
+    out = [f"{iid}  {data[iid]['zh']}  [{data[iid]['cat']}]" for _, iid in shown]
+    head = f'匹配 "{query}"' if query else f'分类 "{category}"'
+    text = f"{head}: {total} 项" + (f", 显示前 {len(shown)}:" if total > len(shown) else ":")
+    text += "\n" + "\n".join(out)
+    if total > len(shown):
+        text += f"\n…(还有 {total - len(shown)} 项; 可加关键词或提高 limit)"
+    return text
+
+
+FIND_ITEMS_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "find_items",
+        "description": (
+            "查询基岩版可用的物品/方块 ID 速查表(从服务器本体导出, 版本精确, 是唯一权威的 ID 来源)。"
+            "不确定 ID、玩家用了别名/口语/模糊说法(如“玻璃板”“金块”“陶瓦”)、或自由创作挑材料时, "
+            "先查这里, 不要凭记忆猜 ID(尤其别用 Java 版名)。"
+            "query 支持中文/英文/ID 片段, 子串匹配: query='混凝土' 会列出所有混凝土, "
+            "query='stairs' 会列出所有楼梯。不传参数返回分类总览; 只传 category 浏览该分类。"
+            "结果里的 id 可直接用于 give/fill/setblock 等指令(不带 minecraft: 前缀)。"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "关键词(中文/英文/ID 片段), 可留空"},
+                "category": {"type": "string",
+                             "description": "限定分类: 建筑/自然/功能/红石/工具/装备/食物/材料/刷怪蛋/杂项"},
+                "limit": {"type": "integer", "description": "最多返回多少条, 默认 20, 上限 60"},
+            },
+        },
+    },
+}
+
+
 # ---------- 注册表 ----------
 
 UPDATE_MEMORY_SCHEMA = {
@@ -293,6 +428,9 @@ _REGISTRY = {
                             lambda args: get_player_activity(args.get("minutes", 60))),
     "ptc": (PTC_SCHEMA,
             lambda args: ptc(args.get("calls") or [], bool(args.get("stop_on_error")))),
+    "find_items": (FIND_ITEMS_SCHEMA,
+                   lambda args: find_items(args.get("query", ""),
+                                           args.get("category", ""), args.get("limit", 20))),
     # 未来新能力加在这里: "tool_name": (SCHEMA, handler)
 }
 

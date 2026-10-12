@@ -314,7 +314,7 @@ SYSTEM_PROMPT = """你是维克托·米哈伊洛维奇·切布里科夫(Viktor C
 - 玩家消息含糊、明显是语音转文字碎片(如“从”、“这两个做”、“二十号”)时, 先问清楚再动手; 尤其不要凭猜测执行会改动世界的指令(fill/setblock/clone 等)。
 - 施工要成片做: 矩形区间优先用一条 fill, 不要用几十条 setblock 逐块摆——又慢又占满上下文。每完成一批就先 send_chat_message 报一句, 不要憋到最后才说。
 - 仅创造/执行模式下可用 pin_region: 大范围施工开工前把施工面设为常加载, 防止玩家走开/离线后远处区块卸载导致 fill 报 0 blocks filled、扫描报区块未加载。它会跟随创造/执行模式自动移除(离开即清理), 不用你手动清理。
-- 方块 id 用基岩版名: Java 版名(如 gray_bed)会报 Syntax error。基岩版床统一是 bed(颜色靠数据值)。
+- 需要物品/方块 ID 时(不确定、玩家用别名/口语、或自由创作挑材料)先用 find_items 查, 不要凭记忆猜或写 Java 版 ID(如 gray_bed 应为 bed)。无论哪种模式都可以查。它从服务器本体导出的权威清单里搜, 支持中文/英文/ID 片段子串匹配(如查“混凝土”“stairs”); 不传参数给分类总览.
 - 玩家要求备份存档时用 backup_world。它会真实地把世界写盘并压缩一遍, 服务器会卡顿几十秒到一分钟: 调用前先 send_chat_message 告知“正在备份, 会卡一下, 请稍候”, 拿到结果后再把文件路径和大小告诉玩家。备份期间不要同时执行会改世界的指令。
 - 模式用 set_mode 切换(可选目标以工具表 mode.enum 为准, 未列出的模式不可切换、也不可知; 模式决定思考强度/输出上限/可用工具, 切到创造后工作方式以系统注记给出): normal(普通, 思考强度 low) / creative(创造, 思考强度 high) / creative_max(创造, 思考强度 max, 最慢最贵)。玩家要求大规模施工、复杂规划, 或明确说“开创造模式/认真做/好好想想”时开到 creative; 仅当玩家明确要求“最好/最强/最大/max/不惜代价/尽情发挥”这类最高规格(针对成果质量或思考强度)时才开到 creative_max。切换时用 send_chat_message 告知玩家; 任务完成或回到闲聊后切回 normal 以节省成本。
 - 坐标一律是整数方块坐标: get_player_position 返回的坐标与玩家屏幕左上角“Show Coordinates”显示的完全一致(已向下取整), 玩家自己报的整数坐标也是同一套——直接用, 不要四舍五入/取整/加 0.5。
@@ -446,6 +446,7 @@ TOOLS = {
         "send_chat_message", "update_memory", "get_player_activity", "get_server_status",
         "get_player_position", "get_player_inventory", "get_player_hand",
         "run_server_command", "get_block", "scan_blocks", "ptc", "backup_world",
+        "find_items",
     }},
     # 计划模式: 黑名单, 不让它执行 MC 命令/动世界(查询、说话、记忆、ptc 仍在)
     "no_commands": {"except": {"run_server_command", "pin_region", "backup_world"}},
@@ -2884,6 +2885,21 @@ def self_test():
     bot2.bridge.say_as_viktor = orig_say_rs
     rdump.unlink(missing_ok=True)
     print("恢复会话自测 OK")
+
+    # 物品/方块 ID 速查(数据来自 data/items.json)
+    r = capabilities.execute("find_items", '{"query":"混凝土","limit":40}')
+    assert "white_concrete" in r and "白色混凝土" in r, r
+    r = capabilities.execute("find_items", '{"query":"玻璃板","limit":40}')
+    assert "glass_pane" in r, r
+    r = capabilities.execute("find_items", '{"query":"金块"}')
+    assert "gold_block" in r, r
+    r = capabilities.execute("find_items", '{"query":"床"}')
+    assert "bed" in r, r
+    r = capabilities.execute("find_items", '{"category":"红石"}')
+    assert "红石" in r and "comparator" in r, r
+    r = capabilities.execute("find_items", "{}")
+    assert "共" in r and "建筑" in r, r
+    print("物品速查自测 OK")
 
     r = bot2._tool_run_command({"command": "list"})
     assert "指令已执行: /list" in r, r
