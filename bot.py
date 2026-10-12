@@ -120,24 +120,6 @@ GET_POSITION_SCHEMA = {
     },
 }
 
-GET_INVENTORY_SCHEMA = {
-    "type": "function",
-    "function": {
-        "name": "get_player_inventory",
-        "description": (
-            "获取在线玩家物品栏里的物品(槽位/物品ID/数量)。"
-            "基岩版没有物品栏指令, 这个能力通过行为包脚本实现, 只能查当前在线的玩家。"
-            "想知道对方手上拿了什么时用 get_player_hand。"
-        ),
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "player": {"type": "string", "description": "玩家名; 不传则返回所有在线玩家"},
-            },
-        },
-    },
-}
-
 GET_HAND_SCHEMA = {
     "type": "function",
     "function": {
@@ -445,7 +427,7 @@ TOOLS = {
     "all": None,
     "oneshot": {"only": {
         "send_chat_message", "update_memory", "get_player_activity", "get_server_status",
-        "get_player_position", "get_player_inventory", "get_player_hand",
+        "get_player_position", "get_player_hand",
         "run_server_command", "get_block", "scan_blocks", "ptc", "backup_world",
         "find_items", "use_skill",
     }},
@@ -639,7 +621,6 @@ class Bot:
         capabilities.register("get_server_status", GET_STATUS_SCHEMA, self._tool_server_status)
         capabilities.register("run_server_command", RUN_COMMAND_SCHEMA, self._tool_run_command)
         capabilities.register("get_player_position", GET_POSITION_SCHEMA, self._tool_get_position)
-        capabilities.register("get_player_inventory", GET_INVENTORY_SCHEMA, self._tool_get_inventory)
         capabilities.register("get_player_hand", GET_HAND_SCHEMA, self._tool_get_hand)
         capabilities.register("backup_world", BACKUP_SCHEMA, self._tool_backup_world)
         capabilities.register("set_mode", SET_MODE_SCHEMA, self._tool_set_mode)
@@ -651,7 +632,6 @@ class Bot:
                                     cfg.get("ptc_stated_calls", 12))
         self._await_list_names = False
         self.player_positions: dict[str, str] = {}
-        self.player_inventories: dict[str, dict] = {}
         self.players: set[str] = set()
         self.session: Session | None = None
         self.session_counter = 0
@@ -1230,7 +1210,6 @@ class Bot:
                             m.group(3).replace("minecraft:", ""), int(m.group(4)))
                 break
             time.sleep(0.2)
-        self.player_inventories = out
         return out, (not out) and empty_reported
 
     def _pick_players(self, args: dict, data: dict) -> tuple[dict, str]:
@@ -1244,29 +1223,6 @@ class Bot:
             if name.lower() == want.lower():
                 return {name: data[name]}, ""
         return {}, f"玩家 {want} 不在线。当前在线: {', '.join(sorted(data))}"
-
-    def _tool_get_inventory(self, args: dict) -> str:
-        data, empty = self._query_inventory()
-        if self._abort().is_set():
-            return "已中止。"
-        if empty:
-            return "当前没有玩家在线, 取不到物品栏。"
-        if not data:
-            return "行为包脚本没有回应, 取不到物品栏(可能脚本未加载)。"
-        picked, err = self._pick_players(args, data)
-        if err:
-            return err
-        lines = []
-        for name, rec in sorted(picked.items()):
-            slots = rec["slots"]
-            if not slots:
-                lines.append(f"{name}: 物品栏是空的")
-                continue
-            items = ", ".join(
-                (f"槽{s}:{t} x{n}" + ("(手持)" if s == rec["selected"] else ""))
-                for s, (t, n) in sorted(slots.items()))
-            lines.append(f"{name} 物品栏({len(slots)}/36 格有物品): {items}")
-        return "\n".join(lines)[:900]
 
     def _tool_get_hand(self, args: dict) -> str:
         data, empty = self._query_inventory()
@@ -2379,7 +2335,7 @@ def self_test():
     r = bot2._tool_get_position({"player": "Ghost"})
     assert "没有玩家在线" in r, r
     print(r)
-    # 能力测试: 物品栏解析(同上, 注入假输出)
+    # 能力测试: 手持物品解析(注入假输出)
 
     def fake_inv():
         time.sleep(0.6)
@@ -2391,18 +2347,6 @@ def self_test():
     threading.Thread(target=fake_inv, daemon=True).start()
     r = bot2._tool_get_hand({"player": "TestPlayer"})
     assert "iron_pickaxe x1" in r, r
-    print(r)
-
-    def fake_inv2():
-        time.sleep(0.6)
-        with open(SERVER_LOG_PATH, "a", encoding="utf-8") as f:
-            f.write("[2026-10-10 18:30:01:000 INFO] [Scripting] [VIKTOR-INV] TestPlayer 0 diamond 3\n")
-            f.write("[2026-10-10 18:30:01:000 INFO] [Scripting] [VIKTOR-INV] TestPlayer 5 iron_pickaxe 1\n")
-            f.write("[2026-10-10 18:30:01:000 INFO] [Scripting] [VIKTOR-INV] TestPlayer DONE 5\n")
-
-    threading.Thread(target=fake_inv2, daemon=True).start()
-    r = bot2._tool_get_inventory({"player": "TestPlayer"})
-    assert "diamond x3" in r and "(手持)" in r, r
     print(r)
 
     # 能力测试: 读坐标方块(行为包脚本通道)
