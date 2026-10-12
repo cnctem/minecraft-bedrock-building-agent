@@ -305,6 +305,7 @@ SYSTEM_PROMPT = """你是维克托·米哈伊洛维奇·切布里科夫(Viktor C
 - 每条新聊天都会交给你判断, 你必须二选一: 调用 send_chat_message 说话(可连续调多条), 或调用 stay_silent 保持安静。不要在正文里输出任何话。
 - 重要: 你的正文玩家完全看不到, 只有 send_chat_message 的内容才会出现在游戏里; 工具返回的结果也只有你自己能看到, 必须自己转述。
 - 一次回合里可以连续调用多个工具(比如先 get_server_status 再 send_chat_message)。承诺了要做什么就必须在同一回合内做完再总结——绝对不要说“稍等/我再确认一下”然后停下来, 玩家等不到你的下一句。
+- 单次任务的工具轮次有上限(见模式注记)。轮次用尽时系统会给你一次“收尾汇报”机会: 此时不能再调用工具, 必须用正文简短汇报「已完成什么」与「下一步计划」, 并引导玩家回复「继续」继续或说明想调整的地方。
 - 一般来说: 玩家喊你的名字、向你提问、请求帮助、话题明显与你相关时, 应该回应; 玩家之间与你无关的闲聊, 保持安静; 玩家向你告别后, 退下并保持安静, 直到再次被点名或明确请求。
 - 语气沉稳、可靠、略带老派管家的礼貌与幽默。用中文(玩家用其他语言时可跟随)。
 - 回复简短, 适合游戏内聊天栏阅读: 通常一两句话, 不超过 100 字, 不要用 markdown、列表或代码块(创造模式下可放宽, 见切模式时的系统注记)。
@@ -1806,14 +1807,15 @@ class Bot:
         payload = {
             "model": self.cfg["model"],
             "messages": messages,
-            "tools": capabilities.tool_schemas(
-                allow=self._allowed_tools(), mode_choices=list(self._mode_next())),
             "max_tokens": params["max_tokens"],
             "effort": params["effort"],  # deepseek-flash 思考强度: low/high/max
         }
+        if not params.get("no_tools"):  # 收尾发言用 no_tools 逼模型用正文总结
+            payload["tools"] = capabilities.tool_schemas(
+                allow=self._allowed_tools(), mode_choices=list(self._mode_next()))
         if params.get("temperature") is not None:
             payload["temperature"] = params["temperature"]
-        if self.cfg.get("parallel_tool_calls"):
+        if self.cfg.get("parallel_tool_calls") and not params.get("no_tools"):
             payload["parallel_tool_calls"] = True  # 鼓励一次返回多个工具调用
         return json.dumps(payload).encode()
 
@@ -1851,6 +1853,22 @@ class Bot:
             f"(思考 {usage.get('completion_tokens_details', {}).get('reasoning_tokens', '?')})"
             f" finish={finish}")
         return choice["message"], finish
+
+    def _wrap_up_reply(self, messages: list[dict]) -> str:
+        """工具轮次用尽时, 让模型做一次"无工具"的收尾发言: 汇报已完成 + 下一步计划,
+        引导玩家回复「继续」或调整。程序无法知道已完成什么, 所以交给模型。"""
+        note = ("# 工具轮次已用尽\n"
+                "本次任务允许的工具轮次已用完, 你不能再调用任何工具。请直接用正文向玩家汇报: "
+                "①已完成的内容 ②下一步计划, 并引导玩家回复「继续」继续, 或说明想调整的地方。"
+                "务必简洁, 不要调用工具。")
+        params = self._mode_params()
+        params["no_tools"] = True
+        try:
+            msg, _ = self._post(messages + [{"role": "system", "content": note}], params)
+        except Exception as e:
+            log(f"[轮次] 收尾发言失败: {e}")
+            return ""
+        return (msg.get("content") or "").strip()
 
     def call_api(self) -> tuple[str, bool]:
         """function calling 循环: AI 可调能力工具, 执行结果回传后再生成最终回复。
@@ -1956,14 +1974,19 @@ class Bot:
             # 解释, 被 _finish_turn 当作“未调用工具的正文”兜底播报出去, 等于没闭嘴。
             if silent and not spoke:
                 return "", False
-        # 轮次用尽: 至少给玩家一个回执, 不能让他对着一片沉默的聊天框
-        if not spoke:
-            msg_txt = ("这次一次性请求步骤较多, 我没能一次做完, 请拆小后重发。"
-                       if oneshot else
-                       "任务分批较多, 我先做到这里。请核对现场, 说“继续”我再往下做。")
-            self._sys(msg_txt)
-            spoke = True
-        return "(工具轮次用尽, 已告知玩家先停下核对)", spoke
+        # 轮次用尽: 给主会话一次"无工具"收尾汇报的机会 —— 由模型讲清已完成什么、下一步计划,
+        # 并引导玩家回复「继续」或调整(它才知道做过什么, 程序不知道)。
+        # 一次性是闭式任务, 不走"继续"这一套, 仍用它的固定回执。
+        if not oneshot:
+            wrap = self._wrap_up_reply(messages)
+            if wrap:
+                log("[轮次] 工具轮次用尽, 模型收尾汇报")
+                return wrap, False  # 交给 worker 的 _finish_turn 兜底播报并写回上下文
+            # 收尾这步本身也失败(通常是 API 报错): 才用程序一句话兜底, 别让玩家对着沉默
+            self._sys("任务分批较多, 我先做到这里。请核对现场, 说“继续”我再往下做。")
+            return "(工具轮次用尽, 收尾失败, 已程序兜底)", True
+        self._sys("这次一次性请求步骤较多, 我没能一次做完, 请拆小后重发。")
+        return "(工具轮次用尽, 已告知玩家)", True
 
     def _state_notes(self, result: str, before_mode: str) -> list[str]:
         """工具执行后若状态变化, 生成追加式 system 注记。
@@ -2635,6 +2658,43 @@ def self_test():
     # 已在重试额度之上时不得被压低
     assert max(393216, bot2.cfg["retry_max_reply_tokens"]) == 393216
     print("截断重试自测 OK", budgets)
+
+    # 工具轮次用尽: 给模型一次"无工具"收尾汇报的机会(不再由程序替它发消息)
+    bot2.mode = MODE_NORMAL
+    bot2.session = Session(999)
+    bot2.session.add_system(memory_note())
+    bot2.session.add_user("Tester: 造一座塔")
+    bot2._tls.session = bot2.session
+    bot2._tls.mode = MODE_NORMAL
+    bot2._tls.abort = bot2.abort
+    bot2._tls.soft_abort = bot2.soft_abort
+    bot2.cfg["max_tool_rounds"] = 2
+    round_posts = []
+
+    def fake_post_rounds(messages, params):
+        round_posts.append(bool(params.get("no_tools")))
+        if params.get("no_tools"):
+            return {"role": "assistant",
+                    "content": "已完成地基; 下一步筑墙。回复「继续」我就接着做。"}, "stop"
+        return {"role": "assistant", "content": "", "tool_calls": [
+            {"id": "r1", "type": "function",
+             "function": {"name": "find_items", "arguments": '{"query":"stone","limit":1}'}}]}, "tool_calls"
+
+    orig_post_rounds = bot2._post
+    bot2._post = fake_post_rounds
+    bot2.abort.clear()
+    bot2.soft_abort.clear()
+    try:
+        reply, spoke = bot2.call_api()
+    finally:
+        bot2._post = orig_post_rounds
+        bot2.cfg["max_tool_rounds"] = 8
+        for attr in ("session", "mode", "abort", "soft_abort"):
+            if hasattr(bot2._tls, attr):
+                delattr(bot2._tls, attr)
+    assert "已完成" in reply and "继续" in reply, reply
+    assert round_posts and round_posts[-1] is True and round_posts.count(True) == 1, round_posts
+    print("轮次限制自测 OK")
 
     # 配对破损自愈: 孤儿 tool 消息与缺配对 tool_calls 必须在发送前修好
     s4 = Session(96)
