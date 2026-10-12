@@ -470,6 +470,10 @@ MODES = {
 }
 
 
+# 可重试的 HTTP 状态码: 限流/瞬态错误重试有意义; 4xx(400 参数错/401 鉴权)重试无意义。
+RETRYABLE_HTTP = {408, 409, 425, 429, 500, 502, 503, 504}
+
+
 def memory_note() -> str:
     """长期记忆注记。会话开始时注入一条; update_memory 之后再追加一条(以最新为准)。
     读文件与固定前缀无关, 所以人工改 memory.md 也不会改动已发出的前缀。"""
@@ -1819,30 +1823,56 @@ class Bot:
             payload["parallel_tool_calls"] = True  # 鼓励一次返回多个工具调用
         return json.dumps(payload).encode()
 
-    def _post(self, messages: list[dict], params: dict) -> tuple[dict, str]:
-        cfg = self.cfg
-        # 全局最小间隔: 只串行化“发起时刻”, 不包住整个请求/工具执行, 以允许并发一次性。
+    def _rate_limit(self) -> None:
+        """全局最小间隔: 只串行化“发起时刻”, 不包住整个请求/工具执行, 以允许并发一次性。"""
         with self.rate_lock:
             gap = time.time() - self.last_api_call
-            if gap < cfg["api_min_interval_sec"]:
-                time.sleep(cfg["api_min_interval_sec"] - gap)
+            if gap < self.cfg["api_min_interval_sec"]:
+                time.sleep(self.cfg["api_min_interval_sec"] - gap)
             self.last_api_call = time.time()
-        req = urllib.request.Request(
-            cfg["api_base"].rstrip("/") + "/chat/completions",
-            data=self._build_payload(messages, params),
-            headers={
-                "Content-Type": "application/json",
-                "Authorization": f"Bearer {cfg['api_key']}",
-            },
-            method="POST",
-        )
-        try:
-            with urllib.request.urlopen(req, timeout=cfg["api_timeout_sec"]) as resp:
-                data = json.loads(resp.read())
-        except urllib.error.HTTPError as e:
-            # HTTPError 的正文里才有 DeepSeek 的具体报错原因, 必须读出来
-            body = e.read().decode("utf-8", "replace")[:400]
-            raise RuntimeError(f"HTTP {e.code}: {body}") from None
+
+    @staticmethod
+    def _backoff_delay(attempt: int, base: float, retry_after=None) -> float:
+        """第 attempt 次尝试失败后的等待: base·2^(n-1), 上限 30s; 有 Retry-After 取较大者(≤60s)。"""
+        delay = min(base * (2 ** (attempt - 1)), 30.0)
+        if retry_after:
+            try:
+                delay = max(delay, min(float(retry_after), 60.0))
+            except (TypeError, ValueError):
+                pass
+        return delay
+
+    def _post(self, messages: list[dict], params: dict) -> tuple[dict, str]:
+        cfg = self.cfg
+        payload = self._build_payload(messages, params)
+        url = cfg["api_base"].rstrip("/") + "/chat/completions"
+        headers = {"Content-Type": "application/json",
+                   "Authorization": f"Bearer {cfg['api_key']}"}
+        attempts = max(1, int(cfg.get("api_max_attempts", 3)))
+        base = float(cfg.get("api_retry_backoff_sec", 1.0))
+        data = None
+        for attempt in range(1, attempts + 1):
+            self._rate_limit()  # 每次尝试(含重试)都遵守最小间隔
+            req = urllib.request.Request(url, data=payload, headers=headers, method="POST")
+            try:
+                with urllib.request.urlopen(req, timeout=cfg["api_timeout_sec"]) as resp:
+                    data = json.loads(resp.read())
+                break
+            except urllib.error.HTTPError as e:
+                # HTTPError 的正文里才有 DeepSeek 的具体报错原因, 必须读出来
+                body = e.read().decode("utf-8", "replace")[:400]
+                if e.code not in RETRYABLE_HTTP or attempt >= attempts:
+                    raise RuntimeError(f"HTTP {e.code}: {body}") from None
+                delay = self._backoff_delay(
+                    attempt, base, e.headers.get("Retry-After") if e.headers else None)
+                log(f"[API] HTTP {e.code} ({body[:100]}) — {delay:.1f}s 后第 {attempt+1}/{attempts} 次尝试")
+                time.sleep(delay)
+            except (urllib.error.URLError, TimeoutError, OSError, ValueError) as e:
+                if attempt >= attempts:
+                    raise RuntimeError(f"{type(e).__name__}: {e}") from None
+                delay = self._backoff_delay(attempt, base)
+                log(f"[API] {type(e).__name__}: {e} — {delay:.1f}s 后第 {attempt+1}/{attempts} 次尝试")
+                time.sleep(delay)
         usage = data.get("usage", {})
         choice = data["choices"][0]
         finish = choice.get("finish_reason") or ""
@@ -2035,6 +2065,8 @@ class Bot:
                 reply, spoke = self.call_api()
             except Exception as e:
                 log(f"[API 错误] {e}")
+                if not self._abort().is_set():
+                    self._sys("抱歉, 我这边暂时连不上或出错了, 刚才这条没能处理。请稍后再发一次。")
             finally:
                 self.agent_busy = False
             if reply is None:
@@ -2695,6 +2727,68 @@ def self_test():
     assert "已完成" in reply and "继续" in reply, reply
     assert round_posts and round_posts[-1] is True and round_posts.count(True) == 1, round_posts
     print("轮次限制自测 OK")
+
+    # API 错误有界退避重试: 可重试的 503 重试后成功; 400 不重试直接抛错
+    import io as _io
+    import urllib.error as _ue
+    import urllib.request as _ur
+
+    class _Resp:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def read(self):
+            return json.dumps({"choices": [{"message": {
+                "role": "assistant", "content": "重试成功", "tool_calls": None},
+                "finish_reason": "stop"}], "usage": {}}).encode()
+
+    retry_calls = []
+
+    def fake_urlopen(req, timeout=None):
+        retry_calls.append(1)
+        if len(retry_calls) < 3:
+            raise _ue.HTTPError(req.full_url, 503, "busy", {}, _io.BytesIO(b"busy"))
+        return _Resp()
+
+    bot2.session = Session(1000)
+    bot2._tls.session = bot2.session
+    bot2._tls.mode = MODE_NORMAL
+    bot2.cfg["api_retry_backoff_sec"] = 0
+    orig_urlopen = _ur.urlopen
+    _ur.urlopen = fake_urlopen
+    try:
+        msg, finish = bot2._post([{"role": "user", "content": "hi"}],
+                                 {"max_tokens": 100, "effort": "low"})
+    finally:
+        _ur.urlopen = orig_urlopen
+        bot2.cfg["api_retry_backoff_sec"] = 1
+        for attr in ("session", "mode"):
+            if hasattr(bot2._tls, attr):
+                delattr(bot2._tls, attr)
+    assert msg["content"] == "重试成功" and finish == "stop", (msg, finish)
+    assert len(retry_calls) == 3, retry_calls
+
+    bad_calls = []
+
+    def fake_urlopen_400(req, timeout=None):
+        bad_calls.append(1)
+        raise _ue.HTTPError(req.full_url, 400, "bad", {}, _io.BytesIO(b"bad request"))
+
+    _ur.urlopen = fake_urlopen_400
+    try:
+        try:
+            bot2._post([{"role": "user", "content": "hi"}],
+                       {"max_tokens": 100, "effort": "low"})
+            raise AssertionError("400 应当直接抛错")
+        except RuntimeError as e:
+            assert "HTTP 400" in str(e), e
+    finally:
+        _ur.urlopen = orig_urlopen
+    assert len(bad_calls) == 1, bad_calls
+    print("API 重试自测 OK")
 
     # 配对破损自愈: 孤儿 tool 消息与缺配对 tool_calls 必须在发送前修好
     s4 = Session(96)

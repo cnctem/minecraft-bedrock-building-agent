@@ -10,6 +10,8 @@
   "retry_max_reply_tokens": 32768,
   "api_timeout_sec": 60,
   "api_min_interval_sec": 0.1,
+  "api_max_attempts": 3,
+  "api_retry_backoff_sec": 1,
   "max_tool_rounds": 8,
   "parallel_tool_calls": true,
   "ptc_max_calls": 24,
