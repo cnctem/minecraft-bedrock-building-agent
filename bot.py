@@ -56,7 +56,7 @@ RE_LIST = re.compile(r"^There are (\d+)/(\d+) players online")
 FORCE_STOP_WORD = "强制停止"  # 控制面: 立即中止当前任务(连工具内部等待也打断)
 SOFT_STOP_WORD = "停止"      # 控制面: 到安全点停止(当前步骤做完、工具往返闭合后停)
 NO_STOP_WORD = "不停止"       # 控制面: 撤销还未生效的停止/强制停止
-PIN_NAME = "viktor_pin"  # 常加载区域命名前缀(本任务临时用, 轮次结束移除)
+PIN_NAME = "viktor_pin"  # 常加载区域命名前缀(仅创造/执行模式; 离开即清理)
 CLEAR_WORD = "清空"  # 控制面: 清空会话上下文(任何玩家可触发, 不进上下文)
 PLAN_WORD = "计划模式"  # 控制面: 进入计划模式(任何玩家可触发, 程序处理)
 EXIT_PLAN_WORD = "退出计划"  # 控制面: 退出计划模式回 normal(任何玩家可触发)
@@ -70,6 +70,7 @@ MODE_PLAN = "plan"        # 未来: 与用户对话确认/完善计划
 MODE_EXECUTE = "execute"  # 未来: 只执行既定计划
 MODE_ONESHOT = "oneshot"  # 只能由 "1 ..." 触发, set_mode 进不去/出不来/不可知
 CREATIVE_MODES = (MODE_CREATIVE, MODE_CREATIVE_MAX)
+PIN_MODES = (MODE_CREATIVE, MODE_CREATIVE_MAX, MODE_EXECUTE)  # 支持常加载: 创造家族 + 执行(施工)
 SCAN_STATED_SLICE = 16  # scan_blocks 向模型声明的切面单边上限(16×16×1)
 SCAN_MAX_SLICE = 20     # scan_blocks 程序实际允许(留一倍余量)
 ONESHOT_TRIGGER = re.compile(r"^1(?:[ \u3000]+|$)")  # "1 " / "1　" 开头, 或单一个 "1" = 一次性对话
@@ -278,7 +279,7 @@ PIN_REGION_SCHEMA = {
             "导致 fill/setblock/clone 报 0 blocks filled、scan_blocks/get_block 报区块未加载。"
             "施工范围可能超出在线玩家附近(模拟距离只有 4 区块)时, 开工前先调用它覆盖整个施工面。"
             "只需给 x/z 范围: 高度整列加载, 不用管 y。仅限主世界。"
-            "生命周期跟随本轮任务: 连续工作结束、被“停止”或会话结束时自动移除; "
+            "仅在创造/执行模式下可用; 生命周期跟随创造/执行模式: 离开这些模式或会话结束时自动移除; "
             "同一回合重复调用会移动区域(先删旧的再设新的)。"
         ),
         "parameters": {
@@ -310,7 +311,7 @@ SYSTEM_PROMPT = """你是维克托·米哈伊洛维奇·切布里科夫(Viktor C
 - 工具结果里带 [错误]/[警告] 的(例如 Syntax error、0 blocks filled、The block couldn't be placed、Too many blocks、Unknown command)说明这一步没成功, 必须如实告诉玩家哪一步失败、大致原因。只有工具明确报了成功(Block placed、N blocks filled)才能说完成——绝不允许在没看到成功回执时声称“已办妥/已完成”。
 - 玩家消息含糊、明显是语音转文字碎片(如“从”、“这两个做”、“二十号”)时, 先问清楚再动手; 尤其不要凭猜测执行会改动世界的指令(fill/setblock/clone 等)。
 - 施工要成片做: 矩形区间优先用一条 fill, 不要用几十条 setblock 逐块摆——又慢又占满上下文。每完成一批就先 send_chat_message 报一句, 不要憋到最后才说。
-- 大范围施工开工前先调 pin_region 把施工面设为常加载: 服务器模拟距离只有 4 区块, 玩家走开或全部离线后, 远处区块会卸载, fill 会报 0 blocks filled、扫描会报区块未加载。它会跟随本轮任务自动移除, 不用你手动清理。
+- 仅创造/执行模式下可用 pin_region: 大范围施工开工前把施工面设为常加载, 防止玩家走开/离线后远处区块卸载导致 fill 报 0 blocks filled、扫描报区块未加载。它会跟随创造/执行模式自动移除(离开即清理), 不用你手动清理。
 - 方块 id 用基岩版名: Java 版名(如 gray_bed)会报 Syntax error。基岩版床统一是 bed(颜色靠数据值)。
 - 玩家要求备份存档时用 backup_world。它会真实地把世界写盘并压缩一遍, 服务器会卡顿几十秒到一分钟: 调用前先 send_chat_message 告知“正在备份, 会卡一下, 请稍候”, 拿到结果后再把文件路径和大小告诉玩家。备份期间不要同时执行会改世界的指令。
 - 模式用 set_mode 切换(可选目标以工具表 mode.enum 为准, 未列出的模式不可切换、也不可知; 模式决定思考强度/输出上限/可用工具, 切到创造后工作方式以系统注记给出): normal(普通, 思考强度 low) / creative(创造, 思考强度 high) / creative_max(创造, 思考强度 max, 最慢最贵)。玩家要求大规模施工、复杂规划, 或明确说“开创造模式/认真做/好好想想”时开到 creative; 仅当玩家明确要求“最好/最强/最大/max/不惜代价/尽情发挥”这类最高规格(针对成果质量或思考强度)时才开到 creative_max。切换时用 send_chat_message 告知玩家; 任务完成或回到闲聊后切回 normal 以节省成本。
@@ -1449,8 +1450,8 @@ class Bot:
     # ---------- 常加载区域 ----------
 
     def _tool_pin_region(self, args: dict) -> str:
-        """pin_region: 任务期间把施工区域设为常加载(ticking area)。
-        生命周期 = 本轮次: 连续工作结束、被“停止”、会话结束或进程退出时由 _unpin_all 移除。"""
+        """pin_region: 创造/执行模式下把施工区域设为常加载(ticking area)。
+        生命周期 = 创造/执行模式: 离开这些模式(切回 normal 等)或会话结束时由 _unpin_all 移除。"""
         try:
             x1, z1, x2, z2 = (int(args[k]) for k in ("x1", "z1", "x2", "z2"))
         except (KeyError, TypeError, ValueError):
@@ -1482,7 +1483,7 @@ class Bot:
         log(f"[常加载] 已设置 {len(self._pinned)} 个区域覆盖 "
             f"({x1},{z1})~({x2},{z2}): {', '.join(self._pinned)}")
         return (f"已设置 {len(self._pinned)} 个常加载区域, 覆盖 ({x1},{z1})~({x2},{z2}) "
-                "整列(不限高度)。本轮任务结束会自动移除; 再次调用 pin_region 会移动区域。")
+                "整列(不限高度)。离开创造/执行模式时会自动移除; 再次调用会移动区域。")
 
     def _unpin_all(self):
         """移除本任务设置的常加载区域(任务结束/中止/会话结束/进程退出时调用)。"""
@@ -1619,6 +1620,8 @@ class Bot:
             return f"当前已处于 {MODES[mode].label} 模式。"
         was_creative = self.creative_mode
         self.mode = mode
+        if mode not in PIN_MODES:
+            self._unpin_all()  # 离开创造/执行模式 -> 常加载区域生命周期结束
         p = self._mode_params()
         if mode in CREATIVE_MODES:
             log(f"[模式] {'切换' if was_creative else '进入'}创造模式: {mode} "
@@ -1732,6 +1735,9 @@ class Bot:
             allow = names - set(spec.get("except", ()))
         if not m.next_modes:
             allow.discard("set_mode")
+        # 常加载仅创造/执行模式支持
+        if (mode or self._mode()) not in PIN_MODES:
+            allow.discard("pin_region")
         return allow
 
     def _apply_mode_limits(self, params: dict):
@@ -1984,7 +1990,6 @@ class Bot:
                 log(f"[API 错误] {e}")
             finally:
                 self.agent_busy = False
-                self._unpin_all()  # 常加载区域生命周期 = 本轮次(正常结束/中止/出错都移除)
             if reply is None:
                 pass  # API 出错: 本批不做回复(已记日志)
             elif self._abort().is_set():
@@ -2686,6 +2691,23 @@ def self_test():
     assert bot2.mode == MODE_NORMAL, bot2.mode
     bot2.bridge.say_as_viktor = orig_say_plan
     print("计划模式自测 OK")
+
+    # 常加载仅创造/执行模式支持: normal/oneshot/plan 都不暴露 pin_region
+    for _m in (MODE_NORMAL, MODE_ONESHOT, MODE_PLAN):
+        assert "pin_region" not in bot2._allowed_tools(_m), (_m, bot2._allowed_tools(_m))
+    for _m in PIN_MODES:
+        assert "pin_region" in bot2._allowed_tools(_m), _m
+    # 离开创造模式 -> 自动清理常加载
+    unp = []
+    orig_send_pin = bot2.bridge.send_command
+    bot2.bridge.send_command = lambda cmd: unp.append(cmd)
+    bot2._pinned = ["viktor_pin_test"]
+    bot2.mode = MODE_CREATIVE_MAX
+    r = bot2._tool_set_mode({"mode": MODE_NORMAL, "reason": "测试"})
+    bot2.bridge.send_command = orig_send_pin
+    assert not bot2._pinned and any("tickingarea remove viktor_pin_test" in c for c in unp), unp
+    assert bot2.mode == MODE_NORMAL, bot2.mode
+    print("常加载生命周期自测 OK")
 
     # 恢复: 灌回落盘会话; 旧 tool_calls 缺 reasoning_content 应补空串; 模式从注记推断
     rp = Path("/tmp/viktor-resume-test.jsonl")

@@ -113,7 +113,7 @@ python3 bot.py --test         # 解析逻辑自测
 | `get_player_hand(player?)` | 在线玩家手持物品 |
 | `get_block(x, y, z, dimension?)` | 读坐标上的方块类型与状态（行为包脚本；基岩版无 `/data`） |
 | `scan_blocks(x1..z2, dimension?, filter?)` | 批量扫一个 1 格厚切面（≤16×16×1，厚轴可为 X/Y/Z）：默认回非空气方块，给 `filter` 则回类型含该关键字的方块并附未匹配类型统计 |
-| `pin_region(x1, z1, x2, z2)` | 把施工面设为常加载（ticking area，自动按 ≤100 区块切片）：防止玩家走开/离线后区块卸载导致 fill 失败。**生命周期 = 本轮次**：连续工作结束、被「停止」、会话结束或进程退出时自动移除 |
+| `pin_region(x1, z1, x2, z2)` | **仅创造/执行模式下可用**：把施工面设为常加载（ticking area，自动按 ≤100 区块切片）：防止玩家走开/离线后区块卸载导致 fill 失败。**生命周期 = 创造/执行模式**：离开这些模式（切回 normal 等）或会话结束时自动移除 |
 | `backup_world()` | 把当前存档热备份成 `.7z`（`save hold` → 7z → `save resume`） |
 | `set_mode(mode, reason?)` | 切换运行模式；可选目标按当前模式动态注入（普通↔创造/创造max；计划→执行；一次性无此工具） |
 | `ptc(calls, stop_on_error?)` | 批量工具调用：一次提交多条工具调用，串行执行后合并成一条结果（省往返与上下文） |
