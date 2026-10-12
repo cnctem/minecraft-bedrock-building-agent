@@ -1543,6 +1543,11 @@ class Bot:
                 return "(已中止)"
             name = PIN_NAME if len(tiles) == 1 else f"{PIN_NAME}_{i + 1}"
             out = self._console_output(f"tickingarea add {ax1} 0 {az1} {ax2} 0 {az2} {name}")
+            if "[错误]" in out and "already exists" in out:
+                # 上次进程被强杀可能留下同名僵尸区域(没来得及 _unpin_all): 清掉重试一次(自愈)
+                log(f"[常加载] {name} 已存在, 先清理残留再重试")
+                self._console_output(f"tickingarea remove {name}")
+                out = self._console_output(f"tickingarea add {ax1} 0 {az1} {ax2} 0 {az2} {name}")
             if "[错误]" in out or not out:
                 self._unpin_all()  # 设了一半失败要清干净, 不留下孤儿区域
                 return f"错误: 设置常加载区域失败: {out or '指令无回执, 请检查服务器状态'}"
@@ -1560,6 +1565,15 @@ class Bot:
         for name in names:
             self.bridge.send_command(f"tickingarea remove {name}")
         log(f"[常加载] 已移除 {len(names)} 个区域: {', '.join(names)}")
+
+    def _cleanup_stale_pins(self):
+        """启动时清理世界里残留的 viktor_pin* 常加载区(上次进程被强杀留下的)。
+        启动时没有任务在跑, 删掉绝对安全; 只碰自己的名字前缀。"""
+        out = self._console_output("tickingarea list")
+        names = sorted(set(re.findall(rf"- ({re.escape(PIN_NAME)}[A-Za-z0-9_]*):", out)))
+        for name in names:
+            self.bridge.send_command(f"tickingarea remove {name}")
+            log(f"[常加载] 启动清理残留区域: {name}")
 
     # ---------- 存档备份 ----------
 
@@ -2145,6 +2159,7 @@ class Bot:
         log_file = SERVER_LOG_PATH
         log_file.touch(exist_ok=True)
         self.offset = log_file.stat().st_size  # 只处理新内容
+        self._cleanup_stale_pins()  # 先清残留(不与 list 校准抢日志)
         self.bridge.sync_player_count()
         # 平滑重启: 若指定 VIKTOR_RESTORE=<落盘会话路径>, 启动时自动灌回(静默, 不发聊天)
         restore = os.environ.get("VIKTOR_RESTORE")
@@ -3115,15 +3130,15 @@ def self_test():
     assert bot2.session is tsess and bot2.session.messages == tmsg_before
     print("一次性对话自测 OK")
 
-    # [系统] 前缀: 程序生成的提示带前缀, 模型生成的不带
+    # [系统] 前缀: 程序生成的提示带 [系统] 且不带 <维克托>; 模型发言带 <维克托> 不带 [系统]
     sys_out = []
     orig_send_cmd = bot2.bridge.send_command
     bot2.bridge.send_command = lambda cmd: sys_out.append(cmd)
     ScreenBridge.say_as_viktor(bot2.bridge, "已清空", 120, 3, system=True)
     ScreenBridge.say_as_viktor(bot2.bridge, "模型的话", 120, 3)
     bot2.bridge.send_command = orig_send_cmd
-    assert any("[系统] 已清空" in c for c in sys_out), sys_out
-    assert any("模型的话" in c and "[系统]" not in c for c in sys_out), sys_out
+    assert any("[系统]" in c and "已清空" in c and "<维克托>" not in c for c in sys_out), sys_out
+    assert any("模型的话" in c and "<维克托>" in c and "[系统]" not in c for c in sys_out), sys_out
     print("系统前缀自测 OK")
 
     # 恢复会话: 从最近落盘的 dump 灌回, 并回一条 [系统] 提示
@@ -3218,6 +3233,39 @@ def self_test():
         bot2.bridge.say_side = orig_side
         bot2._sys = orig_sys_fwd
     print("转发开关自测 OK")
+
+    # 启动清理僵尸常加载区: 只清 viktor_pin* 前缀
+    _seen = []
+    _oc, _sc = bot2._console_output, bot2.bridge.send_command
+    bot2._console_output = lambda cmd: ("List of all ticking areas in current dimension\n"
+                                        "- viktor_pin: 1 0 1 to 2 0 2\n"
+                                        "- viktorpark: 3 0 3 to 4 0 4")
+    bot2.bridge.send_command = lambda c: _seen.append(c)
+    try:
+        bot2._cleanup_stale_pins()
+    finally:
+        bot2._console_output, bot2.bridge.send_command = _oc, _sc
+    assert any("tickingarea remove viktor_pin" in c for c in _seen), _seen
+    assert not any("viktorpark" in c for c in _seen), _seen
+    print("常加载残留清理自测 OK")
+
+    # pin_region 撞名自愈: 先清残留再重试
+    _calls = []
+    _outs = iter(["[错误] A ticking area with the name viktor_pin already exists.",
+                  "Removed ticking area(s)",
+                  ("Added ticking area")])
+    _oc2, _sc2 = bot2._console_output, bot2.bridge.send_command
+    bot2.bridge.send_command = lambda c: _calls.append(c)
+    bot2._cleanup_stale_pins = lambda: None
+    bot2._console_output = lambda cmd: (_calls.append(cmd) or next(_outs))
+    try:
+        r = bot2._tool_pin_region({"x1": 0, "z1": 0, "x2": 15, "z2": 15})
+    finally:
+        bot2._console_output, bot2.bridge.send_command = _oc2, _sc2
+        bot2._pinned.clear()
+    assert "已设置" in r, r
+    assert any("tickingarea remove viktor_pin" in c for c in _calls), _calls
+    print("pin_region 撞名自愈自测 OK")
 
     r = bot2._tool_run_command({"command": "list"})
     assert r.strip() and "禁止" not in r, r
