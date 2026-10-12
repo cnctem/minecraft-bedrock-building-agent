@@ -26,8 +26,11 @@ AI 人设：**维克托·米哈伊洛维奇·切布里科夫 (Viktor Chebrikov)*
   下次有人进服（0→1）时完整初始化新会话（上下文落盘到 `logs/sessions/`）。
   若进服时有任务正在进行：**不初始化、也不挂起初始化**，只发一条提示告知任务在跑，
   并介绍可用控制词（停止/强制停止/清空）；会话与上下文保留。
-- **缓存命中**：system prompt 固定 + 会话内消息 append-only，逐轮请求前缀一致，
-  DeepSeek 自动前缀缓存可命中（日志里 `缓存命中 N` 字段可看效果）。
+- **增量组装、前缀恒定**：system prompt 是常量；长期记忆与当前模式**不写进 system prompt**，
+  而是作为 `role=system` 的系统注记追加在对话日志里（会话开始时一条记忆注记；
+  `update_memory` 后再追一条最新记忆；`set_creative_mode` 后在工具响应之后追一条模式注记）。
+  日志只追加、不修改、不重排，逐轮请求前缀严格一致，DeepSeek 前缀缓存稳定命中
+  （日志里 `缓存命中 N` 字段可看效果）。切模式/更新记忆只是尾部追加，不会把整段前缀作废。
 - 服务器内所有聊天都进上下文（维克托能“听到”大家说话），但要不要回应、该不该沉默由模型自己判断。
 - **任务进行中可插话调整**：Agent 多轮任务执行期间收到的玩家消息，会在安全点（工具往返闭合后）
   注入当前工作循环，模型下一轮即可调整方向/纠错，而不必等任务结束。消息由 worker 开轮时
@@ -40,9 +43,9 @@ AI 人设：**维克托·米哈伊洛维奇·切布里科夫 (Viktor Chebrikov)*
 所有请求都走 `deepseek-flash`（DeepSeek-V4.1-Flash，支持 `effort` 思考强度档位 low/high/max）。
 
 - **normal（普通）**：`effort=low`，回复短、便宜、快，适合闲聊和简单指令。
-- **creative（创造）**：玩家说“开创造模式/认真做”等时切到。`effort=high`，注入面向精细创造的
-  额外提示词（先规划后施工、先试小块再铺开、成片 fill），并放宽输出 token、工具轮次、ptc 批量、
-  发言分段数。
+- **creative（创造）**：玩家说“开创造模式/认真做”等时切到。`effort=high`，并在切换时
+  向对话尾部追加一条“创造工作方式”系统注记（先规划后施工、先试小块再铺开、成片 fill），
+  同时放宽输出 token、工具轮次、ptc 批量、发言分段数。
 - **creative_max（创造max）**：仅当玩家明确要求“最好/最强/最大/max/不惜代价”这类最高规格时才切到。
   `effort=max`，且上述各项上限在 creative 基础上再翻倍（工具轮次 32→64 等），最慢最贵。
 
@@ -189,7 +192,7 @@ BDS 控制台 **不回显玩家聊天**，所以用行为包 `viktor_bridge` 订
 - `logs/bot.log` — 机器人运行日志
 - `logs/sessions/*.jsonl` — 每次会话的完整上下文存档
 - `logs/xuid-cache.json` — 玩家名到 xuid 的映射（判断 operator 用）
-- `memory.md` — 长期记忆（每次初始化注入 system prompt），备份在 `logs/memory-backup/`
+- `memory.md` — 长期记忆（会话开始时注入为系统注记；人工直接改动在下一次会话生效，`update_memory` 则即时追加新注记），备份在 `logs/memory-backup/`
 - `capabilities.py` — 能力注册表
 - `/home/jrj/mc_backup/` — 存档备份输出目录
 - `run.sh` — 启动脚本：重设 screen 日志设置并跑 bot
