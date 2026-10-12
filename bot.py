@@ -1952,15 +1952,18 @@ class Bot:
         spoke = False
         rounds = 0
         budget_retries = 0
+        round_cap = 0  # 本轮工具轮次预算: 取用过的各模式上限的最大值, 只增不减
         while True:
             params = self._mode_params()  # 每轮重读: 中途切创造模式下一轮生效
             self._apply_mode_limits(params)
+            # 中途切回低上限模式(如创造→普通)不应把已用轮次“倒扣”成超限、误触发收尾
+            round_cap = max(round_cap, params["tool_rounds"])
             if budget_retries:
                 # 上一轮被 max_tokens 截断: 抬高额度再来一次(不消耗工具轮次)。
                 # 用 max() 保证只抬高不降低。
                 params["max_tokens"] = max(params["max_tokens"],
                                            self.cfg.get("retry_max_reply_tokens", 32768))
-            if rounds >= params["tool_rounds"]:
+            if rounds >= round_cap:
                 break
             if self._abort().is_set():
                 return "(用户要求强制停止, 任务已中止)", spoke
@@ -2764,6 +2767,38 @@ def self_test():
     assert "已完成" in reply and "继续" in reply, reply
     assert round_posts and round_posts[-1] is True and round_posts.count(True) == 1, round_posts
     print("轮次限制自测 OK")
+
+    # 切回低上限模式(创造→普通)不应把已用轮次倒扣成超限、误触发收尾
+    bot2.mode = MODE_CREATIVE
+    bot2.session = Session(4321)
+    bot2.session.add_system(memory_note())
+    for _attr in ("session", "mode", "abort", "soft_abort", "oneshot"):
+        if hasattr(bot2._tls, _attr):
+            delattr(bot2._tls, _attr)
+    bot2.cfg["max_tool_rounds"] = 2          # 普通上限压到 2; 创造仍是 32
+    seq3 = [0]
+
+    def fake_post_lowcap(m, p):
+        seq3[0] += 1
+        if seq3[0] == 3:
+            bot2.mode = MODE_NORMAL          # 模拟第 3 轮后切回普通(上限 2)
+        if seq3[0] <= 4:
+            return {"role": "assistant", "content": "", "tool_calls": [
+                {"id": f"L{seq3[0]}", "type": "function",
+                 "function": {"name": "find_items", "arguments": '{"query":"stone","limit":1}'}}]}, "tool_calls"
+        return {"role": "assistant", "content": "正常收尾", "tool_calls": None}, "stop"
+
+    orig3 = bot2._post
+    bot2._post = fake_post_lowcap
+    bot2.abort.clear(); bot2.soft_abort.clear(); bot2.pending.clear()
+    try:
+        reply3, _ = bot2.call_api()
+    finally:
+        bot2._post = orig3
+        bot2.cfg["max_tool_rounds"] = 8
+        bot2.mode = MODE_NORMAL
+    assert reply3 == "正常收尾" and seq3[0] == 5, (reply3, seq3[0])
+    print("轮次上限切模式自测 OK")
 
     # API 错误有界退避重试: 可重试的 503 重试后成功; 400 不重试直接抛错
     import io as _io
