@@ -61,6 +61,8 @@ CLEAR_WORD = "清空"  # 控制面: 清空会话上下文(任何玩家可触发,
 PLAN_WORD = "计划模式"  # 控制面: 进入计划模式(任何玩家可触发, 程序处理)
 EXIT_PLAN_WORD = "退出计划"  # 控制面: 退出计划模式回 normal(任何玩家可触发)
 RESTORE_WORD = "恢复会话"  # 控制面: 把最近一次落盘的会话灌回(任何玩家可触发)
+BODY_ON_WORD, BODY_OFF_WORD = "正文开", "正文关"  # 控制面: 正文转发开关(不进上下文)
+TOOL_ON_WORD, TOOL_OFF_WORD = "工具开", "工具关"  # 控制面: 工具转发开关(不进上下文)
 
 # 运行模式(名字仅作标识; 行为/限制/工具白名单由三张 profile 表组合而成, 见下方 Mode/MODES)
 MODE_NORMAL = "normal"
@@ -485,6 +487,17 @@ class ScreenBridge:
         self.send_command("list")
 
     def say_as_viktor(self, text: str, max_len: int, max_chunks: int, system: bool = False):
+        text = self._clean_chat(text)
+        if system:
+            text = "[系统] " + text
+        self._emit(text, max_len, max_chunks, "§e<维克托>§f ", "发言")
+
+    def say_side(self, label: str, text: str, max_len: int, max_chunks: int):
+        """旁路转发(正文/工具): 只发到聊天供玩家观察 Agent 状态, 不进上下文。"""
+        self._emit(self._clean_chat(text), max_len, max_chunks, f"§7{label}§f ", label)
+
+    @staticmethod
+    def _clean_chat(text: str) -> str:
         # 去掉换行与控制字符, 防止一条回复里夹带命令
         text = re.sub(r"[\r\n\x00-\x1f]", " ", text).strip()
         # 上下文格式是 [时间] 名字: 内容, 模型有时会照样模仿, 剥掉这类前缀
@@ -493,18 +506,19 @@ class ScreenBridge:
             if stripped == text:
                 break
             text = stripped
+        return text
+
+    def _emit(self, text: str, max_len: int, max_chunks: int, prefix: str, tag: str):
         if not text:
             return
-        if system:
-            text = "[系统] " + text
         chunks = []
         while text and len(chunks) < max_chunks:
             chunks.append(text[:max_len])
             text = text[max_len:]
         for chunk in chunks:
-            payload = json.dumps(f"§e<维克托>§f {chunk}", ensure_ascii=False)
+            payload = json.dumps(f"{prefix}{chunk}", ensure_ascii=False)
             self.send_command(f'tellraw @a {{"rawtext":[{{"text":{payload}}}]}}')
-            log(f"[发言] {chunk}")  # 记下真实发言, 便于事后排查
+            log(f"[{tag}] {chunk}")  # 记下真实发言, 便于事后排查
             time.sleep(0.4)
 
 
@@ -655,6 +669,8 @@ class Bot:
         self._nudge = False              # 置位 = 唤醒 worker 但不带用户消息(计划模式主动引导用)
         self.mode = MODE_NORMAL          # 主对话当前模式(见 MODES); 一次性线程各自用 MODE_ONESHOT
         self._pinned: list[str] = []     # 本轮任务设置的常加载区域名(轮次结束自动移除)
+        self.body_forward = False        # 正文转发开关(玩家用「正文开/关」切换; 仅显示, 不进上下文)
+        self.tool_forward = False        # 工具转发开关(玩家用「工具开/关」切换; 仅显示, 不进上下文)
 
     # ---------- 请求上下文(主对话 + 并发一次性线程) ----------
     # 工具 handler 经由下面这几个 helper 读取“当前请求”的状态, 主线程回落到 self.*,
@@ -693,6 +709,9 @@ class Bot:
             self.session.add_system(skills)
         # 初始模式(normal)注记, 紧跟在 system prompt 之后、第一条用户消息之前
         self.session.add_system(self._mode_note())
+        # 转发开关随会话初始化复位(默认关)
+        self.body_forward = False
+        self.tool_forward = False
         log(f"=== 会话 #{self.session.id} 开始 (玩家: {sorted(self.players)}) ===")
 
     def _end_session(self):
@@ -784,6 +803,54 @@ class Bot:
         """发送程序生成(非模型)的系统提示, 带 [系统] 前缀, 让玩家区分这不是 AI 回复。"""
         self.bridge.say_as_viktor(text, self.cfg["reply_chunk_len"],
                                   self._reply_max_chunks(), system=True)
+
+    def _on_body_toggle(self, name: str, on: bool):
+        """完全匹配的「正文开/正文关」: 模型正文是否以 [正文] 前缀转发到聊天。
+        只是显示开关, 不中止任务、不进上下文, 任何玩家可切换。"""
+        self.body_forward = on
+        log(f"[转发] {name} {'开启' if on else '关闭'}正文转发")
+        self._sys("正文转发已开启: 模型正文会以 [正文] 前缀发到聊天。" if on
+                  else "正文转发已关闭。")
+
+    def _on_tool_toggle(self, name: str, on: bool):
+        """完全匹配的「工具开/工具关」: 工具调用是否以 [工具] 前缀转发到聊天。"""
+        self.tool_forward = on
+        log(f"[转发] {name} {'开启' if on else '关闭'}工具转发")
+        self._sys("工具转发已开启: 工具调用会以 [工具] 前缀发到聊天。" if on
+                  else "工具转发已关闭。")
+
+    def _forward_body(self, text: str):
+        """正文转发(开关): 模型正文以 [正文] 前缀发到聊天, 仅供观察, 不进上下文。"""
+        if self.body_forward and text and text.strip():
+            self.bridge.say_side("[正文]", text, self.cfg["reply_chunk_len"],
+                                 self._reply_max_chunks())
+
+    @staticmethod
+    def _tool_preview(tc: dict) -> str:
+        """工具转发预览(前20字): run_server_command 给命令; ptc 给子工具名; 其余给 名+参数。"""
+        fn = tc.get("function") or {}
+        name = fn.get("name") or "?"
+        raw = fn.get("arguments") or ""
+        try:
+            args = json.loads(raw) if isinstance(raw, str) else (raw or {})
+        except Exception:
+            args = {}
+        if name == "run_server_command" and isinstance(args, dict):
+            body = str(args.get("command", ""))
+        elif name == "ptc" and isinstance(args, dict):
+            subs = [capabilities._ptc_name(c) for c in (args.get("calls") or [])
+                    if isinstance(c, dict)]
+            body = "ptc " + ",".join(s for s in subs if s)
+        else:
+            body = f"{name} {raw}".strip() if raw else name
+        return re.sub(r"\s+", " ", body).strip()[:20]
+
+    def _forward_tool(self, tc: dict):
+        """工具转发(开关): 每次工具调用以 [工具]+前20字 发到聊天, 仅供观察, 不进上下文。"""
+        if self.tool_forward:
+            preview = self._tool_preview(tc)
+            if preview:
+                self.bridge.say_side("[工具]", preview, self.cfg["reply_chunk_len"], 1)
 
     def _on_no_stop(self, name: str):
         """玩家发来完全匹配的“不停止”: 撤销还未生效的停止/强制停止, 不经过模型。
@@ -1078,6 +1145,18 @@ class Bot:
                 return
             if stripped == RESTORE_WORD:
                 self._on_restore_session(name)
+                return
+            if stripped == BODY_ON_WORD:
+                self._on_body_toggle(name, True)
+                return
+            if stripped == BODY_OFF_WORD:
+                self._on_body_toggle(name, False)
+                return
+            if stripped == TOOL_ON_WORD:
+                self._on_tool_toggle(name, True)
+                return
+            if stripped == TOOL_OFF_WORD:
+                self._on_tool_toggle(name, False)
                 return
             # 消息本身不在这里写上下文: 由 worker 开轮时(或 Agent 循环的安全点)
             # 统一提交, 避免插进 assistant(tool_calls) 与 tool 中间拆散配对。
@@ -1925,9 +2004,17 @@ class Bot:
                                    "或者让我开创造模式慢慢做。")
                         self._sys(msg_txt)
                         return "(输出被截断且无正文, 已告知玩家拆分需求)", True
+                if self.body_forward and content.strip():
+                    self._forward_body(content)
+                    spoke = True  # 已以 [正文] 显示, 不再兜底重复
                 return content, spoke
             rounds += 1
             log(f"[能力] AI 请求调用: {[c['function']['name'] for c in calls]}")
+            # 旁路转发(仅显示给玩家观察, 不进上下文): 工具轮的模型正文 + 每个工具调用
+            self._forward_body(msg.get("content") or "")
+            if self.tool_forward:
+                for tc in calls:
+                    self._forward_tool(tc)
             session.messages.append(msg)
             messages.append(msg)
             silent = False
@@ -3041,6 +3128,51 @@ def self_test():
     r = capabilities.execute("use_skill", '{"name":"nonexistent"}')
     assert "没有名为" in r, r
     print("技能书自测 OK")
+
+    # 转发开关: 正文开/关、工具开/关(控制词不进上下文; 转发只显示、不进上下文)
+    fwd = []
+    orig_side = bot2.bridge.say_side
+    orig_sys_fwd = bot2._sys
+    bot2.bridge.say_side = lambda label, text, *a: fwd.append((label, text))
+    bot2._sys = lambda text: None
+    try:
+        bot2.session = Session(333)
+        bot2.session.add_system(memory_note())
+        bot2.body_forward = bot2.tool_forward = False
+        bot2.pending.clear()
+
+        def _fwd_chat(t):
+            bot2.process_line(
+                f"[2026-10-12 21:00:00:000 INFO] [Scripting] [VIKTOR-CHAT] T: {t}")
+
+        _fwd_chat("正文开")
+        assert bot2.body_forward
+        _fwd_chat("工具开")
+        assert bot2.tool_forward
+        _fwd_chat("正文开一下")           # 非完全匹配不应触发
+        assert bot2.body_forward
+        _fwd_chat("正文关")
+        _fwd_chat("工具关")
+        assert not bot2.body_forward and not bot2.tool_forward
+        assert all("正文开" not in (m.get("content") or "") for m in bot2.session.messages), \
+            "控制词不应进上下文"
+        # 工具预览取“工具命令”前 20 字
+        pv = Bot._tool_preview({"function": {"name": "run_server_command",
+             "arguments": json.dumps({"command": "fill 1 2 3 4 5 6 stone"})}})
+        assert pv.startswith("fill") and len(pv) == 20, pv
+        # 转发只走 say_side, 不进上下文
+        bot2.body_forward = bot2.tool_forward = True
+        n0 = len(bot2.session.messages)
+        bot2._forward_body("正文ABC")
+        bot2._forward_tool({"function": {"name": "run_server_command",
+             "arguments": json.dumps({"command": "fill 1 2 3"})}})
+        assert ("[正文]", "正文ABC") in fwd and any(l == "[工具]" for l, _ in fwd), fwd
+        assert len(bot2.session.messages) == n0, "转发不应写入上下文"
+        bot2.pending.clear()
+    finally:
+        bot2.bridge.say_side = orig_side
+        bot2._sys = orig_sys_fwd
+    print("转发开关自测 OK")
 
     r = bot2._tool_run_command({"command": "list"})
     assert r.strip() and "禁止" not in r, r
