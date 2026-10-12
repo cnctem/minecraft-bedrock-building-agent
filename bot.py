@@ -513,7 +513,8 @@ class ScreenBridge:
         # 系统回执不带 <维克托> 前缀(与 [正文]/[工具] 对齐), 让玩家一眼区分“系统”与“AI 发言”
         text = self._clean_chat(text)
         prefix = "§7[系统]§f " if system else "§e<维克托>§f "
-        self._emit(text, max_len, max_chunks, prefix, "发言")
+        # 日志标签与游戏内前缀保持一致: 系统消息记 [系统], 而不是笼统混作 [发言]
+        self._emit(text, max_len, max_chunks, prefix, "系统" if system else "发言")
 
     def say_side(self, label: str, text: str, max_len: int, max_chunks: int):
         """旁路转发(正文/工具): 只发到聊天供玩家观察 Agent 状态, 不进上下文。"""
