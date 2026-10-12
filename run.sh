@@ -14,4 +14,4 @@ screen -S mc -X logfile "$PWD/logs/server.log" || true
 screen -S mc -X log on || true
 screen -S mc -X logfile flush 1 || true
 
-exec python3 bot.py
+exec python3 bot.py "$@"

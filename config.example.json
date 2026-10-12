@@ -34,9 +34,6 @@
   "poll_interval_sec": 0.5,
   "reply_chunk_len": 120,
   "reply_max_chunks": 3,
-  "command_users": [
-    "kirin9000S"
-  ],
   "command_blocklist": [
     "stop",
     "op",

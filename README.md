@@ -51,11 +51,23 @@ AI 人设：**维克托·米哈伊洛维奇·切布里科夫 (Viktor Chebrikov)*
 
 模式由三张正交 profile 表组合而成（`bot.py` 里 `PROMPTS` / `LIMITS` / `TOOLS` + `Mode`/`MODES`）：
 **提示词**决定行为、**限制**决定数值预算（effort、输出 token、工具轮次、ptc 批量）、**工具白名单**决定模型能看到哪些工具。
-`creative_max` = creative 的提示词 + 同一份 heavy 限制 ×2 + effort max；未来的计划/执行模式可共用限制、只换提示词。
+`creative_max` = creative 的提示词 + 同一份 heavy 限制 ×2 + effort max；计划/执行模式就是共用 heavy 限制、只换提示词的例子。
 
-切换用 `set_mode(mode, reason?)`，**可选目标由程序按当前模式注入 `mode.enum`**：普通 ↔ 创造/创造max 互相可达；一次性根本没有 `set_mode` 工具；计划模式只能切到执行模式。也就是**不能通过任何方式切进一次性/计划模式**，未列出的模式对模型不可知。仅限白名单/op。
+切换用 `set_mode(mode, reason?)`，**可选目标由程序按当前模式注入 `mode.enum`**：普通 ↔ 创造/创造max 互相可达；一次性根本没有 `set_mode` 工具；计划模式只能切到执行模式。也就是**不能通过任何方式切进一次性/计划模式**，未列出的模式对模型不可知。
 每次切模式会在 tool 响应之后追加一条**模式注记**（当前模式 + 行为提示词 + 刷新后的 ptc 单次上限/工具轮次/输出上限），只往日志尾部加、不改 system 前缀；切模式/更新记忆都不会让前缀缓存失效。
 思维链（`reasoning_content`）只写入 `logs/bot.log`，不进会话上下文。
+
+## 计划模式 / 执行模式
+
+由硬编码控制词驱动（任何玩家可用，不走模型）：
+
+- **`计划模式`**：切到计划模式，回一条“已切换到计划模式，发送「退出计划」可退出计划模式”，然后 **nudge 一次**让 Agent 主动开口引导玩家规划。**不重置上下文**，以便利用已有上下文（例如之前用创造模式做过什么）。
+  - 限制与创造max 对齐（`effort=high`，其余数值 = heavy ×2）；但工具用**黑名单**：`run_server_command` / `pin_region` / `backup_world` 不给出（未列出的模型看不到），因此计划阶段不能改世界；查询/说话/记忆/ptc/`set_mode` 仍在。
+  - 提示词要求**计划精确到坐标**（范围、基准点、材料、步骤顺序、验收标准），并明确告知规划者**执行是一次性**（单轮做完，超出就分阶段），定稿并经玩家确认后，模型 `set_mode("execute")`。
+- **`退出计划`**：任何时刻把计划模式切回 normal（程序处理）。
+- **执行模式**：模型从计划模式切过来；限制同计划，工具全开。**一次性周期**——本回合执行完（或停止/出错）后**程序自动切回 normal**，不依赖模型自觉。
+
+模型侧 `set_mode` 的 `next_modes`：普通↔创造/创造max；计划→执行；执行→normal；一次性无 `set_mode`。`计划模式`/`退出计划` 是仅有的两个进入/退出计划的硬编码词，因此**一次性/计划模式无法被 `set_mode` 切进去**。
 
 ## 一次性对话（`1 ...`）
 
@@ -121,14 +133,10 @@ BDS 控制台 **不回显玩家聊天**，所以用行为包 `viktor_bridge` 订
 需要 `@minecraft/server` 的 **beta** 模块与 `level.dat` 里的实验开关。
 修改脚本后用控制台 `reload` 热重载，不必重启服务器。
 
-### 指令权限
+### 指令安全
 
-`run_server_command` 双重校验：
-
-- 请求者是 **服务器 operator**（读 `permissions.json`，配合进服日志里的 `名字→xuid` 映射）
-- 或者列在 `command_users` 里
-
-危险指令（`stop`/`op`/`deop`/`whitelist`/`ban` 等，见 `command_blocklist`）一律拒绝。
+不做玩家权限判定——能进本服（`allowlist.json`）的都是自己人，**任何玩家**都可以让维克托执行指令。
+唯一的保护是**危险指令黑名单**：`stop`/`op`/`deop`/`whitelist`/`ban` 等（见 `command_blocklist`）一律拒绝。
 
 ## 停止 / 强制停止 / 撤销（中断运行中的任务）
 
@@ -170,8 +178,7 @@ BDS 控制台 **不回显玩家聊天**，所以用行为包 `viktor_bridge` 订
 | `max_context_messages` / `creative_max_context_messages` | 上下文按**消息条数**兜底截断的上限（现设 100 万 ≈ 取消；条数不等于 token） |
 | `context_window_tokens` / `context_safety_tokens` | 模型窗口（`deepseek-flash` 为 1M）与安全余量。输入预算 = 窗口 − 本轮输出上限 − 余量，从最新消息往回累加，超出就从 user 边界截断 |
 | `reply_chunk_len` / `reply_max_chunks` | 回复分片发送，防止过长 |
-| `mc_server_dir` | 服务器目录（读 `permissions.json`） |
-| `command_users` | 指令白名单（额外的，operator 自动放行） |
+| `mc_server_dir` | 服务器目录（备份时定位世界存档） |
 | `command_blocklist` | 禁止执行的指令 |
 | `command_result_timeout_sec` / `position_timeout_sec` / `inventory_timeout_sec` / `block_timeout_sec` / `scan_timeout_sec` | 等待脚本/控制台回包的秒数 |
 | `scan_result_limit` | `scan_blocks` 返回文本的字符上限（超出截断） |
@@ -196,7 +203,6 @@ BDS 控制台 **不回显玩家聊天**，所以用行为包 `viktor_bridge` 订
 - `logs/server.log` — screen 捕获的服务器控制台输出（bot 的数据源）
 - `logs/bot.log` — 机器人运行日志
 - `logs/sessions/*.jsonl` — 每次会话的完整上下文存档
-- `logs/xuid-cache.json` — 玩家名到 xuid 的映射（判断 operator 用）
 - `memory.md` — 长期记忆（会话开始时注入为系统注记；人工直接改动在下一次会话生效，`update_memory` 则即时追加新注记），备份在 `logs/memory-backup/`
 - `capabilities.py` — 能力注册表
 - `/home/jrj/mc_backup/` — 存档备份输出目录

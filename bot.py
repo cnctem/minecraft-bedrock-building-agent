@@ -58,6 +58,8 @@ SOFT_STOP_WORD = "停止"      # 控制面: 到安全点停止(当前步骤做�
 NO_STOP_WORD = "不停止"       # 控制面: 撤销还未生效的停止/强制停止
 PIN_NAME = "viktor_pin"  # 常加载区域命名前缀(本任务临时用, 轮次结束移除)
 CLEAR_WORD = "清空"  # 控制面: 清空会话上下文(任何玩家可触发, 不进上下文)
+PLAN_WORD = "计划模式"  # 控制面: 进入计划模式(任何玩家可触发, 程序处理)
+EXIT_PLAN_WORD = "退出计划"  # 控制面: 退出计划模式回 normal(任何玩家可触发)
 
 # 运行模式(名字仅作标识; 行为/限制/工具白名单由三张 profile 表组合而成, 见下方 Mode/MODES)
 MODE_NORMAL = "normal"
@@ -218,7 +220,6 @@ BACKUP_SCHEMA = {
             "把当前世界存档打包成一个 .7z 备份文件, 返回文件路径与大小。"
             "仅在玩家明确要求备份存档时调用。备份会把世界短暂写盘并压缩一遍, "
             "期间服务器会停顿几十秒, 玩家会感到卡顿, 所以不要与其它改世界的指令同时做。"
-            "仅限白名单/op 玩家的请求。"
         ),
         "parameters": {"type": "object", "properties": {}},
     },
@@ -231,7 +232,7 @@ SET_MODE_SCHEMA = {
         "description": (
             "在当前模式允许的目标之间切换运行模式。可选目标由程序按当前模式注入 mode.enum, "
             "未列出的模式不可切换、也不可知。不同模式的思考强度/输出上限/工具轮次/工具白名单不同; "
-            "切到创造模式后工作方式会以系统注记给出。切换仅限白名单/op。"
+            "切到创造模式后工作方式会以系统注记给出。"
         ),
         "parameters": {
             "type": "object",
@@ -255,7 +256,7 @@ RUN_COMMAND_SCHEMA = {
         "description": (
             "以服务器控制台身份执行一条 Minecraft 指令(不带斜杠, 基岩版语法), "
             "如 \"tp 玩家名 x y z\"、\"fill x1 y1 z1 x2 y2 z2 stone\"、\"locate structure village\"、\"list\"、\"time query daytime\"。"
-            "注意: 这是基岩版, 没有 /data 等 Java 版指令; 指令输出会返回给你。仅限白名单/op 玩家的请求。"
+            "注意: 这是基岩版, 没有 /data 等 Java 版指令; 指令输出会返回给你。"
         ),
         "parameters": {
             "type": "object",
@@ -277,7 +278,7 @@ PIN_REGION_SCHEMA = {
             "施工范围可能超出在线玩家附近(模拟距离只有 4 区块)时, 开工前先调用它覆盖整个施工面。"
             "只需给 x/z 范围: 高度整列加载, 不用管 y。仅限主世界。"
             "生命周期跟随本轮任务: 连续工作结束、被“停止”或会话结束时自动移除; "
-            "同一回合重复调用会移动区域(先删旧的再设新的)。仅限白名单/op 玩家的请求。"
+            "同一回合重复调用会移动区域(先删旧的再设新的)。"
         ),
         "parameters": {
             "type": "object",
@@ -310,9 +311,8 @@ SYSTEM_PROMPT = """你是维克托·米哈伊洛维奇·切布里科夫(Viktor C
 - 施工要成片做: 矩形区间优先用一条 fill, 不要用几十条 setblock 逐块摆——又慢又占满上下文。每完成一批就先 send_chat_message 报一句, 不要憋到最后才说。
 - 大范围施工开工前先调 pin_region 把施工面设为常加载: 服务器模拟距离只有 4 区块, 玩家走开或全部离线后, 远处区块会卸载, fill 会报 0 blocks filled、扫描会报区块未加载。它会跟随本轮任务自动移除, 不用你手动清理。
 - 方块 id 用基岩版名: Java 版名(如 gray_bed)会报 Syntax error。基岩版床统一是 bed(颜色靠数据值)。
-- 指令仅限白名单玩家; 若工具返回权限不足, 礼貌拒绝即可, 不要试图绕过。
 - 玩家要求备份存档时用 backup_world。它会真实地把世界写盘并压缩一遍, 服务器会卡顿几十秒到一分钟: 调用前先 send_chat_message 告知“正在备份, 会卡一下, 请稍候”, 拿到结果后再把文件路径和大小告诉玩家。备份期间不要同时执行会改世界的指令。
-- 模式用 set_mode 切换(可选目标以工具表 mode.enum 为准, 未列出的模式不可切换、也不可知; 模式决定思考强度/输出上限/可用工具, 切到创造后工作方式以系统注记给出): normal(普通, 思考强度 low) / creative(创造, 思考强度 high) / creative_max(创造, 思考强度 max, 最慢最贵)。玩家要求大规模施工、复杂规划, 或明确说“开创造模式/认真做/好好想想”时开到 creative; 仅当玩家明确要求“最好/最强/最大/max/不惜代价/尽情发挥”这类最高规格(针对成果质量或思考强度)时才开到 creative_max。切换时用 send_chat_message 告知玩家; 任务完成或回到闲聊后切回 normal 以节省成本。切换仅限白名单/op。
+- 模式用 set_mode 切换(可选目标以工具表 mode.enum 为准, 未列出的模式不可切换、也不可知; 模式决定思考强度/输出上限/可用工具, 切到创造后工作方式以系统注记给出): normal(普通, 思考强度 low) / creative(创造, 思考强度 high) / creative_max(创造, 思考强度 max, 最慢最贵)。玩家要求大规模施工、复杂规划, 或明确说“开创造模式/认真做/好好想想”时开到 creative; 仅当玩家明确要求“最好/最强/最大/max/不惜代价/尽情发挥”这类最高规格(针对成果质量或思考强度)时才开到 creative_max。切换时用 send_chat_message 告知玩家; 任务完成或回到闲聊后切回 normal 以节省成本。
 - 玩家问某个坐标上是什么方块(或“我脚下是什么方块”)时用 get_block; 基岩版没有 /data, 不要去试指令。注意玩家坐标的 y 是脚底高度, “脚下的方块”是 y-1。只能读已加载的区块(在线玩家附近), 工具报“区块未加载”就如实告知。要成片看/复检一片区域(刚填好的地面、墙、楼层)时用 scan_blocks 一次扫完一个 16×16×1 的切面, 不要用几十个 get_block 逐格查; 扫完看 other 统计(如 air 数量)就能判断有没有漏填。
 - 一次要做多件互不依赖的事(同时查几个玩家、查几个坐标、连着下多条指令)时, 用 ptc 把多个工具调用打包成一次提交, 比一个个调省往返也省上下文; 但有先后依赖、要先看结果再决定下一步时, 仍要分开调用。
 - 玩家让你“检查/看看有没有问题”或修复某片区域时: 先用 ptc 把整片扫完, 把**所有**不合格的坐标列成完整清单(有几个写几个), 逐条修复, 修完再把整个区域复检一遍确认全部合格。不要只看自己补过的那几格就收工, 也不要凭印象漏掉已经读出来是异常的点。
@@ -379,12 +379,32 @@ class Mode:
         self.reset_to = reset_to
 
 
+PLAN_PROMPT = """# 计划模式(当前已开启)
+
+你和玩家一起把一件事规划到"照着就能施工"的程度。本模式不能改动世界, 也不能执行 MC 指令。
+- 由你引导: 主动勘察现场(用查询工具和 ptc 批量查坐标、地面高度、已有结构、占用), 结合上下文(例如之前用创造模式造过什么)主动提出方案, 不要干等玩家发号施令。
+- 边聊边定: 先给初步方案与关键选择(尺寸/材料/风格/范围/顺序), 一次问一组关键问题确认, 再逐步细化。
+- 计划必须精确到坐标: 最终计划里每处施工面/结构都要给出明确的 x/y/z 范围与基准点, 以及材料、步骤顺序和验收标准。
+- 执行模式是一次性的: 定稿后会切过去, 而程序在那一轮结束时自动收回, 所以计划必须能在一次执行内做完(执行模式单轮最多 64 轮工具调用、每轮最多批量 96 条)。目标规模超出时**必须分阶段**: 只把第一阶段写成可直接施工到坐标的清单, 并说明后续阶段, 不要一次列到做不完。
+- 定稿时给出编号步骤清单, 并请玩家确认。
+- 玩家确认后, 先用 send_chat_message 说"计划已定, 开始执行", 再调用 set_mode("execute")。未确认前不要切换。
+- 玩家发"退出计划"可随时退出本模式(由程序处理)。"""
+
+EXECUTE_PROMPT = """# 执行模式(当前已开启)
+
+计划已确认, 现在严格按计划一次性执行完。
+- 只执行既定计划: 不重新设计、不扩大范围、不临时改方案。
+- 按计划顺序施工; 成片操作优先 fill/clone, 每完成一批向玩家简报进度。
+- 大范围施工先 pin_region 防区块卸载; 施工后复检关键面, 发现不合格就修, 修好再报完成。
+- 计划没写、与现场冲突、或做不到: 停下来如实告诉玩家并等指示, 不要自作主张。
+- 本轮要把计划执行到底; 全部完成后调用 set_mode("normal") 收尾(即使不调用, 程序也会在本轮结束时自动回普通模式)。"""
+
 # 提示词 profile: 只放"行为", 不含任何数字(数字随模式注记刷新)
 PROMPTS = {
     "none": "",
     "creative": CREATIVE_PROMPT.strip(),
-    "plan": "",      # TODO(未来): 计划模式——与用户对话确认/完善计划, 完成后 set_mode("execute")
-    "execute": "",   # TODO(未来): 执行模式——只执行既定计划, 不再发散
+    "plan": PLAN_PROMPT.strip(),
+    "execute": EXECUTE_PROMPT.strip(),
     "oneshot": ONESHOT_PROMPT.strip(),
 }
 
@@ -413,20 +433,17 @@ EFFORT_KEYS = {
     "creative_max": "creative_max_effort", "oneshot": "oneshot_effort",
 }
 
-# 工具白名单 profile: None = 全部已注册工具; 集合 = 只给这些(未列出的模型根本看不到, 执行层也拦)
+# 工具 profile: None = 全部注册工具; {"only": {...}} = 白名单; {"except": {...}} = 黑名单(全量减去)
+# 无论哪种, 未出现在最终白名单里的工具模型都看不到, 执行层也拦。
 TOOLS = {
     "all": None,
-    # 只读: 能查/能对话/能记记忆, 不做任何改动世界的操作(run_server_command/pin_region/backup_world 都不给)
-    "readonly": {
-        "send_chat_message", "stay_silent", "update_memory", "get_player_activity",
-        "get_server_status", "get_player_position", "get_player_inventory",
-        "get_player_hand", "get_block", "scan_blocks", "ptc", "set_mode",
-    },
-    "oneshot": {
+    "oneshot": {"only": {
         "send_chat_message", "update_memory", "get_player_activity", "get_server_status",
         "get_player_position", "get_player_inventory", "get_player_hand",
         "run_server_command", "get_block", "scan_blocks", "ptc", "backup_world",
-    },
+    }},
+    # 计划模式: 黑名单, 不让它执行 MC 命令/动世界(查询、说话、记忆、ptc 仍在)
+    "no_commands": {"except": {"run_server_command", "pin_region", "backup_world"}},
 }
 
 # 模式表: 只组合上面的 profile。next_modes = set_mode 允许切到的目标(其它模式对模型“不可知”);
@@ -438,9 +455,9 @@ MODES = {
                             next_modes=(MODE_NORMAL, MODE_CREATIVE_MAX)),
     MODE_CREATIVE_MAX: Mode("creative", "heavy",   "all",      "creative_max", label="创造max", scale=2,
                             next_modes=(MODE_NORMAL, MODE_CREATIVE)),
-    MODE_PLAN:         Mode("plan",     "heavy",   "readonly", "creative",     label="计划",
+    MODE_PLAN:         Mode("plan",     "heavy",   "no_commands", "creative",     label="计划", scale=2,
                             next_modes=(MODE_EXECUTE,)),
-    MODE_EXECUTE:      Mode("execute",  "heavy",   "all",      "creative",     label="执行",
+    MODE_EXECUTE:      Mode("execute",  "heavy",   "all",         "creative",     label="执行", scale=2,
                             next_modes=(MODE_NORMAL,)),
     MODE_ONESHOT:      Mode("oneshot",  "oneshot", "oneshot",  "oneshot",      label="一次性"),
 }
@@ -596,7 +613,6 @@ class OneShotContext:
         self.content = content
         self.abort = threading.Event()       # 单独中止这一个(目前只有全局 "1 强制停止" 会置位)
         self.soft_abort = threading.Event()
-        self.batch = [(player, content)]     # 权限校验用
         self.session = Session(oid)          # ephemeral: 结束后落盘到 logs/oneshot/, 不进主会话
 
 
@@ -618,11 +634,6 @@ class Bot:
         capabilities.set_ptc_limits(cfg.get("ptc_max_calls", 24),
                                     cfg.get("ptc_result_limit", 30000),
                                     cfg.get("ptc_stated_calls", 12))
-        self.current_batch: list[tuple[str, str]] = []  # 当前正在处理的请求者
-        self.player_xuids: dict[str, str] = self._load_xuid_cache()
-        self._seed_xuids_from_log()
-        self._perm_mtime: float | None = None
-        self._op_xuids: set[str] = set()
         self._await_list_names = False
         self.player_positions: dict[str, str] = {}
         self.player_inventories: dict[str, dict] = {}
@@ -646,6 +657,7 @@ class Bot:
         self.abort = threading.Event()   # 置位 = 立即中止当前任务(强制停止)
         self.soft_abort = threading.Event()  # 置位 = 到安全点停止(不打断工具内部等待)
         self.agent_busy = False          # 当前是否有任务在跑(供停止词判断)
+        self._nudge = False              # 置位 = 唤醒 worker 但不带用户消息(计划模式主动引导用)
         self.mode = MODE_NORMAL          # 主对话当前模式(见 MODES); 一次性线程各自用 MODE_ONESHOT
         self._pinned: list[str] = []     # 本轮任务设置的常加载区域名(轮次结束自动移除)
 
@@ -658,9 +670,6 @@ class Bot:
 
     def _soft_abort(self) -> threading.Event:
         return getattr(self._tls, "soft_abort", self.soft_abort)
-
-    def _batch(self) -> list[tuple[str, str]]:
-        return getattr(self._tls, "batch", self.current_batch)
 
     def _session(self):
         return getattr(self._tls, "session", self.session)
@@ -690,8 +699,8 @@ class Bot:
 
     def _end_session(self):
         self._unpin_all()  # 兜底: 会话结束时不留常加载区域
-        if self.creative_mode:
-            log("[模式] 会话结束, 创造模式自动复位")
+        if self.mode != MODE_NORMAL:
+            log(f"[模式] 会话结束, {MODES[self.mode].label} 自动复位到普通模式")
             self.mode = MODE_NORMAL
         if self.session:
             self.session.dump()
@@ -699,59 +708,7 @@ class Bot:
                 f"(消息 {len(self.session.messages)} 条, AI 回复 {self.session.replied_count} 次) ===")
             self.session = None
 
-    # ---------- 权限 ----------
-
-    def _load_xuid_cache(self) -> dict[str, str]:
-        try:
-            return json.loads((LOG_DIR / "xuid-cache.json").read_text(encoding="utf-8"))
-        except Exception:
-            return {}
-
-    def _seed_xuids_from_log(self):
-        """启动时从已有日志回填 名字->xuid, 避免新玩家要等下次进服才有映射。"""
-        try:
-            lines = (SERVER_LOG_PATH).read_text(encoding="utf-8", errors="replace").splitlines()
-        except FileNotFoundError:
-            return
-        changed = False
-        for line in lines:
-            m = RE_LINE.match(line)
-            if m and (j := RE_JOIN.match(m.group(3))):
-                name, xuid = j.group(1), j.group(2)
-                if name not in self.player_xuids:
-                    self.player_xuids[name] = xuid
-                    changed = True
-        if changed:
-            self._save_xuid_cache()
-
-    def _save_xuid_cache(self):
-        (LOG_DIR / "xuid-cache.json").write_text(
-            json.dumps(self.player_xuids, ensure_ascii=False, indent=1), encoding="utf-8")
-
-    def _operator_xuids(self) -> set[str]:
-        """读取服务器 permissions.json 中的 operator xuid 集合(mtime 缓存)。"""
-        path = Path(self.cfg.get("mc_server_dir", "/home/jrj/minecraft-bedrock")) / "permissions.json"
-        try:
-            mtime = path.stat().st_mtime
-            if mtime != self._perm_mtime:
-                data = json.loads(path.read_text(encoding="utf-8"))
-                self._op_xuids = {str(e["xuid"]) for e in data if e.get("permission") == "operator"}
-                self._perm_mtime = mtime
-                log(f"[权限] permissions.json 重载, operator 共 {len(self._op_xuids)} 人")
-        except Exception as e:
-            log(f"[权限] 读取 permissions.json 失败: {e}")
-        return self._op_xuids
-
-    def _is_command_allowed(self, player: str) -> bool:
-        if player in self.cfg.get("command_users", []):
-            return True
-        xuid = self.player_xuids.get(player)
-        return bool(xuid and xuid in self._operator_xuids())
-
     def _on_join(self, name: str, xuid: str | None = None):
-        if xuid and self.player_xuids.get(name) != xuid:
-            self.player_xuids[name] = xuid
-            self._save_xuid_cache()
         was_empty = not self.players
         self.players.add(name)
         if was_empty:
@@ -861,12 +818,87 @@ class Bot:
             self.cfg["reply_chunk_len"], self._reply_max_chunks())
 
     def _reset_session(self) -> int:
-        """完整初始化: 结束当前会话(落盘、复位创造模式)并开启一个全新会话。
+        """完整初始化: 结束当前会话(落盘、复位任何非普通模式)并开启一个全新会话。
         玩家发“清空”与“玩家数 0→1”走同一套初始化; 返回被丢弃的消息条数。"""
         n = len(self.session.messages) if self.session else 0
         self._end_session()
         self._start_session()
         return n
+
+    def resume_session(self, path: str) -> None:
+        """重启后把一份已落盘的会话上下文灌回当前会话。
+        旧数据里带 tool_calls 的 assistant 可能缺 reasoning_content(历史 bug), 而 DeepSeek
+        思考模式 + tools 要求每条 assistant 都带该字段, 否则 400; 这里统一补空串。
+        当前模式从最后一条模式注记('# 当前模式: <label>')推断。"""
+        p = Path(path)
+        msgs = [json.loads(line) for line in p.read_text(encoding="utf-8").splitlines()
+                if line.strip()]
+        for m in msgs:
+            if m.get("role") == "assistant" and "reasoning_content" not in m:
+                m["reasoning_content"] = ""
+        self.session_counter += 1
+        self.session = Session(self.session_counter)
+        self.session.messages = msgs
+        for m in reversed(msgs):
+            if m.get("role") == "system" and (m.get("content") or "").startswith("# 当前模式: "):
+                label = m["content"].split("\n", 1)[0].split(": ", 1)[1].strip()
+                for name, mode in MODES.items():
+                    if mode.label == label:
+                        self.mode = name
+                        break
+                break
+        log(f"[恢复] 从 {p.name} 灌回 {len(msgs)} 条消息, 模式={MODES[self.mode].label}")
+
+    # ---------- 计划模式(硬编码控制词, 程序处理, 不走模型) ----------
+
+    def _program_set_mode(self, mode: str, name: str) -> None:
+        """程序侧切模式: 设置模式并追加一条模式注记(append-only, 不改前缀)。"""
+        self.mode = mode
+        if self.session:
+            self.session.add_system(self._mode_note())
+        log(f"[计划] {name} 切换到 {MODES[mode].label} 模式")
+
+    def _on_plan_mode(self, name: str):
+        """硬编码控制词"计划模式": 任何玩家可进入。不重置上下文(以便利用既有上下文,
+        如之前用创造模式造过什么), 进入后追加模式注记并 nudge 一次让 Agent 主动引导。"""
+        with self.cv:
+            busy = self.agent_busy or bool(self.pending)
+        if busy:
+            self.bridge.say_as_viktor(
+                "现在有任务在进行, 请先发「停止」或等它做完, 再进入计划模式。",
+                self.cfg["reply_chunk_len"], self._reply_max_chunks())
+            return
+        if self.mode == MODE_PLAN:
+            self.bridge.say_as_viktor("已在计划模式中, 发送「退出计划」可退出。",
+                                      self.cfg["reply_chunk_len"], self._reply_max_chunks())
+            return
+        if not self.session:
+            self.players.add(name)
+            self._start_session()
+        self._program_set_mode(MODE_PLAN, name)
+        self.bridge.say_as_viktor(
+            "已切换到计划模式, 发送「退出计划」可退出计划模式。",
+            self.cfg["reply_chunk_len"], self._reply_max_chunks())
+        # 让 Agent 主动开口引导(无用户消息, 仅以 nudge 触发一次模型回合)
+        with self.cv:
+            self._nudge = True
+            self.cv.notify()
+
+    def _on_exit_plan(self, name: str):
+        """硬编码控制词"退出计划": 从计划模式回到普通模式(程序处理, 不走模型)。"""
+        with self.cv:
+            busy = self.agent_busy or bool(self.pending)
+        if busy:
+            self.bridge.say_as_viktor("我正在回复, 请稍后再发「退出计划」。",
+                                      self.cfg["reply_chunk_len"], self._reply_max_chunks())
+            return
+        if self.mode != MODE_PLAN:
+            self.bridge.say_as_viktor("当前不在计划模式。",
+                                      self.cfg["reply_chunk_len"], self._reply_max_chunks())
+            return
+        self._program_set_mode(MODE_NORMAL, name)
+        self.bridge.say_as_viktor("已退出计划模式, 回到普通模式。",
+                                  self.cfg["reply_chunk_len"], self._reply_max_chunks())
 
     # ---------- 一次性对话(可并发, 与主对话完全隔离) ----------
 
@@ -925,7 +957,6 @@ class Bot:
         self._tls.oneshot = True
         self._tls.abort = ctx.abort
         self._tls.soft_abort = ctx.soft_abort
-        self._tls.batch = ctx.batch
         self._tls.session = ctx.session
         self._tls.mode = MODE_ONESHOT
         # 一次性会话的注记(记忆 + 本模式行为与数值), 都写在第一条用户消息之前
@@ -952,7 +983,7 @@ class Bot:
             with self._oneshot_lock:
                 self._active_oneshots.pop(oid, None)
                 self._oneshot_active = max(0, self._oneshot_active - 1)
-            for attr in ("oneshot", "abort", "soft_abort", "batch", "session", "mode"):
+            for attr in ("oneshot", "abort", "soft_abort", "session", "mode"):
                 try:
                     delattr(self._tls, attr)
                 except AttributeError:
@@ -1022,6 +1053,12 @@ class Bot:
                 return
             if stripped == CLEAR_WORD:
                 self._on_clear(name)
+                return
+            if stripped == PLAN_WORD:
+                self._on_plan_mode(name)
+                return
+            if stripped == EXIT_PLAN_WORD:
+                self._on_exit_plan(name)
                 return
             # 消息本身不在这里写上下文: 由 worker 开轮时(或 Agent 循环的安全点)
             # 统一提交, 避免插进 assistant(tool_calls) 与 tool 中间拆散配对。
@@ -1373,10 +1410,6 @@ class Bot:
             time.sleep(0.3)
 
     def _tool_run_command(self, args: dict) -> str:
-        requesters = {p for p, _ in self._batch()}
-        denied = sorted(p for p in requesters if not self._is_command_allowed(p))
-        if denied:
-            return f"权限不足: {denied} 既不是指令白名单成员也不是服务器 operator, 请礼貌拒绝。"
         cmd = re.sub(r"[\r\n]+", " ", args["command"].strip()).lstrip("/").strip()
         if not cmd:
             return "空指令, 未执行。"
@@ -1397,10 +1430,6 @@ class Bot:
     def _tool_pin_region(self, args: dict) -> str:
         """pin_region: 任务期间把施工区域设为常加载(ticking area)。
         生命周期 = 本轮次: 连续工作结束、被“停止”、会话结束或进程退出时由 _unpin_all 移除。"""
-        requesters = {p for p, _ in self._batch()}
-        denied = sorted(p for p in requesters if not self._is_command_allowed(p))
-        if denied:
-            return f"权限不足: {denied} 既不是指令白名单成员也不是服务器 operator, 请礼貌拒绝。"
         try:
             x1, z1, x2, z2 = (int(args[k]) for k in ("x1", "z1", "x2", "z2"))
         except (KeyError, TypeError, ValueError):
@@ -1478,10 +1507,6 @@ class Bot:
     def _tool_backup_world(self, args: dict) -> str:
         """按 BDS 官方热备份流程打包存档: save hold -> 7z -> save resume。
         必须保证无论如何都 save resume, 否则服务器会一直不再存盘。"""
-        requesters = {p for p, _ in self._batch()}
-        denied = sorted(p for p in requesters if not self._is_command_allowed(p))
-        if denied:
-            return f"权限不足: {denied} 既不是指令白名单成员也不是服务器 operator, 请礼貌拒绝。"
         seven = shutil.which("7z") or shutil.which("7zz")
         if not seven:
             return "系统里找不到 7z 命令, 无法备份(需要先 sudo apt install 7zip)。"
@@ -1563,10 +1588,6 @@ class Bot:
     # ---------- 创造模式 ----------
 
     def _tool_set_mode(self, args: dict) -> str:
-        requesters = {p for p, _ in self._batch()}
-        denied = sorted(p for p in requesters if not self._is_command_allowed(p))
-        if denied:
-            return f"权限不足: {denied} 既不是指令白名单成员也不是服务器 operator, 请礼貌拒绝。"
         mode = (args.get("mode") or "").strip()
         reason = (args.get("reason") or "").strip()
         if mode not in MODES:
@@ -1679,10 +1700,17 @@ class Bot:
 
     def _allowed_tools(self, mode: str | None = None) -> set:
         """本模式暴露给模型的工具白名单。未列出的工具根本不会出现在工具表里。
+        工具 profile 支持 None(全部)/{"only": 白名单}/{"except": 黑名单}。
         不可切换的模式(如一次性)连 set_mode 都不暴露。"""
         m = self._mode_info(mode)
-        allow = TOOLS[m.tools]
-        allow = set(capabilities.registered_names()) if allow is None else set(allow)
+        spec = TOOLS[m.tools]
+        names = set(capabilities.registered_names())
+        if spec is None:
+            allow = names
+        elif "only" in spec:
+            allow = set(spec["only"])
+        else:
+            allow = names - set(spec.get("except", ()))
         if not m.next_modes:
             allow.discard("set_mode")
         return allow
@@ -1814,16 +1842,18 @@ class Bot:
                 if mid:
                     for m in self._commit_to_context(mid):
                         messages.append(m)
-                    self.current_batch.extend(mid)  # 权限跟随之(非授权玩家插话会一并受限)
                     log(f"[介入] 任务进行中注入 {len(mid)} 条新消息: "
                         + "; ".join(f"{p}: {c}" for p, c in mid))
             msg, finish = self._post(messages, params)
-            # 思维链只进日志不进上下文: 省 token, 也避免跨轮次兼容问题
-            thinking = msg.pop("reasoning_content", None)
+            # 思维链只记日志; 但带 tool_calls 的 assistant 消息必须把 reasoning_content
+            # 一并回传 —— DeepSeek 思考模式的要求, 否则(尤其在 _sanitize 修复配对后)会 400
+            # "reasoning_content must be passed back"。纯正文消息的思维链仍不进上下文。
+            thinking = msg.get("reasoning_content")
             if thinking:
                 log(f"[思考] {str(thinking)[:300].replace(chr(10), ' ')}")
             calls = msg.get("tool_calls") or []
             if not calls:
+                msg.pop("reasoning_content", None)
                 # finish=length: 思考 token 与正文/工具调用共用 max_tokens, 复杂规划
                 # 会把额度烧在思考上, 导致正文为空、工具调用为空——玩家看到沉默。
                 if finish == "length" and budget_retries < 1:
@@ -1916,13 +1946,13 @@ class Bot:
     def _worker(self):
         while self.running:
             with self.cv:
-                while self.running and not self.pending:
+                while self.running and not self.pending and not self._nudge:
                     self.cv.wait(timeout=1)
                 # 积压多条时合并成一次请求(所有消息已在上下文中, 一次回复即可)
                 batch, self.pending = self.pending[:], []
-            if not self.session:
+                nudge, self._nudge = self._nudge, False
+            if not self.session or (not batch and not nudge):
                 continue
-            self.current_batch = batch
             self.abort.clear()       # 新任务开始, 清掉上一次的中止信号
             self.soft_abort.clear()
             self._commit_to_context(batch)  # 本批消息写入上下文(call_api 从会话构建请求)
@@ -1931,15 +1961,17 @@ class Bot:
             # 不再用全局锁包住整轮: 主对话与并发一次性可同时发起请求。
             # 缓存前缀由“主会话只由本 worker 串行追加”保证; 发起节奏由 _post 的 rate_lock 限速。
             self.agent_busy = True
+            reply, spoke = None, False
             try:
                 reply, spoke = self.call_api()
             except Exception as e:
                 log(f"[API 错误] {e}")
-                continue
             finally:
                 self.agent_busy = False
                 self._unpin_all()  # 常加载区域生命周期 = 本轮次(正常结束/中止/出错都移除)
-            if self._abort().is_set():
+            if reply is None:
+                pass  # API 出错: 本批不做回复(已记日志)
+            elif self._abort().is_set():
                 log("[强制停止] 任务已按玩家要求中止")
                 self.session.add_assistant(reply)
             elif self._soft_abort().is_set():
@@ -1947,6 +1979,16 @@ class Bot:
                 self.session.add_assistant(reply)
             else:
                 self._finish_turn(reply, spoke)
+            self._maybe_exit_execute()
+
+    def _maybe_exit_execute(self):
+        """执行模式是一次性周期: 本回合结束(完成/停止/出错)后程序自动回 normal。
+        计划模式不在此列——它靠模型 set_mode("execute") 或玩家「退出计划」结束。"""
+        if self.mode == MODE_EXECUTE:
+            self.mode = MODE_NORMAL
+            if self.session:
+                self.session.add_system(self._mode_note())
+            log("[计划] 执行周期结束, 已自动回到普通模式")
 
     # ---------- 主循环 ----------
 
@@ -2019,7 +2061,6 @@ def self_test():
     bot.bridge.say_as_viktor = lambda text, *a, **k: None
     assert bot.session is not None, "离服后会话应保持"
     assert bot.players == set(), "离服后玩家列表应为空"
-    assert bot.player_xuids.get("TestPlayer") == "12345", bot.player_xuids
     # 所有聊天都应入队, 是否回复由 Agent 判断
     got = [(p, c) for p, c in bot.pending]
     want = [("TestPlayer", "大家好"),
@@ -2206,15 +2247,7 @@ def self_test():
     assert "bedrock_server" in r and "在线玩家" in r, r
     print(r)
 
-    # 能力测试: 指令执行(白名单/黑名单/真实执行)
-    bot2.current_batch = [("Stranger", "tp me")]
-    r = bot2._tool_run_command({"command": "tp Stranger 0 100 0"})
-    assert "权限不足" in r, r
-    # RED83051059 是服务器 operator(permissions.json), 应自动放行
-    assert bot2._is_command_allowed("RED83051059"), \
-        f"xuid映射={bot2.player_xuids.get('RED83051059')}"
-    assert not bot2._is_command_allowed("Stranger")
-    bot2.current_batch = [("kirin9000S", "stop")]
+    # 能力测试: 指令执行(不再有玩家白名单判定, 只保留危险指令黑名单)
     r = bot2._tool_run_command({"command": "/stop"})
     assert "禁止列表" in r, r
     # 能力测试: 玩家坐标(行为包脚本通道; 抑制真实脚本响应, 注入假输出)
@@ -2339,10 +2372,7 @@ def self_test():
                    "[警告] something odd"], got
     print("ERROR 行捕获自测 OK", got)
 
-    # 能力测试: 备份能力的前置校验(不真的打包, 只查权限与世界目录)
-    bot2.current_batch = [("Stranger", "备份一下")]
-    r = bot2._tool_backup_world({})
-    assert "权限不足" in r, r
+    # 能力测试: 备份能力的前置校验(只查世界目录, 不真的打包)
     srv = Path(bot2.cfg["mc_server_dir"])
     wd = srv / "worlds" / bot2._world_name(srv)
     assert wd.is_dir(), wd
@@ -2395,11 +2425,6 @@ def self_test():
     csaid = []
     orig_say3 = bot2.bridge.say_as_viktor
     bot2.bridge.say_as_viktor = lambda text, *a, **k: csaid.append(text)
-    bot2.current_batch = [("Stranger", "开创造模式")]
-    r = bot2._tool_set_mode({"mode": MODE_CREATIVE})
-    assert "权限不足" in r and not bot2.creative_mode, r
-    assert csaid == [], "权限不足不应播报"
-    bot2.current_batch = [("kirin9000S", "开创造模式")]
     r = bot2._tool_set_mode({"mode": MODE_CREATIVE, "reason": "测试"})
     assert "已进入创造模式" in r and bot2.creative_mode, r
     # 创造模式第一轮是长思考, 必须由程序立刻提醒玩家等待(不依赖模型自觉)
@@ -2427,7 +2452,6 @@ def self_test():
     assert payload["effort"] == "high" and payload["model"] == "deepseek-flash", payload
     assert "temperature" not in payload, "创造模式不传采样参数"
     # 只有玩家明确要求最高规格(creative_max)才升到 max, 已开启时也应能升档
-    bot2.current_batch = [("kirin9000S", "给我做到最好")]
     r = bot2._tool_set_mode({"mode": MODE_CREATIVE_MAX, "reason": "玩家要最好"})
     assert bot2.mode == MODE_CREATIVE_MAX and bot2._mode_params()["effort"] == "max", (r, bot2.mode)
     assert csaid == [], "升档到 max 不重复播报进入提醒"
@@ -2448,7 +2472,8 @@ def self_test():
     payload2 = json.loads(bot2._build_payload([], np_))
     assert payload2["effort"] == "low" and payload2["temperature"] == bot2.cfg["temperature"]
 
-    # 思维链剥离: reasoning_content 只进日志, 不进会话上下文
+    # 思维链处理: 带 tool_calls 的 assistant 必须保留 reasoning_content(DeepSeek 思考模式要求,
+    # 否则 _sanitize 修好配对后会 400); 纯正文消息的思维链不进上下文
     if not bot2.session:
         bot2.players.add("T")
         bot2._start_session()
@@ -2464,7 +2489,7 @@ def self_test():
     bot2.call_api()
     bot2._post = orig_post
     tc_msgs = [m for m in bot2.session.messages if m.get("tool_calls")]
-    assert tc_msgs and all("reasoning_content" not in m for m in tc_msgs), tc_msgs
+    assert tc_msgs and all("reasoning_content" in m for m in tc_msgs), tc_msgs
 
     # 兜底播报: 模型把回复写在正文(玩家看不到)时必须自动补发
     said2 = []
@@ -2514,7 +2539,6 @@ def self_test():
     assert not bot2.pending, "插话应在安全点被取走, 不另起一轮"
     assert any("石英" in (m.get("content") or "") for m in bot2.session.messages), \
         "插话应写入上下文"
-    assert ("Boss", "改一下, 用石英") in bot2.current_batch, "权限应跟随插话者"
     bot2.agent_busy = False
     print("任务中插话自测 OK")
 
@@ -2598,6 +2622,76 @@ def self_test():
     _m, _r, _st = capabilities.get_ptc_limits()
     assert _m == bot2.cfg["ptc_max_calls"], _m
     print("创造模式自测 OK")
+
+    # ===== 计划模式自测 =====
+    psaid = []
+    orig_say_plan = bot2.bridge.say_as_viktor
+    bot2.bridge.say_as_viktor = lambda text, *a, **k: psaid.append(text)
+    if not bot2.session:
+        bot2.players.add("T")
+        bot2._start_session()
+    bot2.agent_busy = False
+    bot2.pending.clear()
+    bot2._nudge = False
+    bot2.mode = MODE_NORMAL
+    # 任何玩家可进入; 以 nudge 触发一次引导回合, 不进用户消息
+    bot2.process_line("[2026-10-10 18:46:00:000 INFO] [Scripting] [VIKTOR-CHAT] 路人乙: 计划模式")
+    assert bot2.mode == MODE_PLAN, bot2.mode
+    assert bot2._nudge and not bot2.pending, "进入计划模式应 nudge 引导, 不入队用户消息"
+    assert psaid and "计划模式" in psaid[-1] and "退出计划" in psaid[-1], psaid
+    # 计划模式工具: 黑名单挡住 MC 命令/改世界; 查询/说话/ptc/set_mode 保留
+    ptools = bot2._allowed_tools(MODE_PLAN)
+    assert not ({"run_server_command", "pin_region", "backup_world"} & ptools), ptools
+    assert {"get_player_position", "scan_blocks", "get_block",
+            "send_chat_message", "ptc", "set_mode"} <= ptools, ptools
+    # 计划/执行: effort high, 其余对齐创造max(heavy ×2)
+    pp = bot2._mode_params(MODE_PLAN)
+    ep = bot2._mode_params(MODE_EXECUTE)
+    assert pp["effort"] == "high" == ep["effort"], (pp, ep)
+    assert pp["tool_rounds"] == ep["tool_rounds"] == 2 * bot2.cfg["creative_max_tool_rounds"]
+    assert pp["max_tokens"] == ep["max_tokens"] == 2 * bot2.cfg["creative_max_reply_tokens"]
+    assert pp["ptc_calls"] == ep["ptc_calls"] == 2 * bot2.cfg["creative_ptc_max_calls"]
+    # 计划→执行: 任何玩家都可(不受指令权限限制)
+    r = bot2._tool_set_mode({"mode": MODE_EXECUTE, "reason": "计划定稿"})
+    assert bot2.mode == MODE_EXECUTE and "执行" in r, (r, bot2.mode)
+    # 执行模式为一次性: 回合结束程序自动回 normal
+    bot2._maybe_exit_execute()
+    assert bot2.mode == MODE_NORMAL, bot2.mode
+    # 退出计划: 非计划模式时提示; 计划模式时回 normal
+    psaid.clear()
+    bot2._on_exit_plan("路人乙")
+    assert bot2.mode == MODE_NORMAL and "不在计划模式" in psaid[-1], psaid
+    bot2.mode = MODE_PLAN
+    bot2._on_exit_plan("路人乙")
+    assert bot2.mode == MODE_NORMAL and "已退出计划模式" in psaid[-1], psaid
+    # 会话结束应把 plan/execute 也复位
+    bot2.mode = MODE_PLAN
+    bot2._end_session()
+    assert bot2.mode == MODE_NORMAL, bot2.mode
+    bot2.bridge.say_as_viktor = orig_say_plan
+    print("计划模式自测 OK")
+
+    # 恢复: 灌回落盘会话; 旧 tool_calls 缺 reasoning_content 应补空串; 模式从注记推断
+    rp = Path("/tmp/viktor-resume-test.jsonl")
+    rp.write_text("\n".join(json.dumps(m, ensure_ascii=False) for m in [
+        {"role": "system", "content": memory_note()},
+        {"role": "system", "content": bot2._mode_note(MODE_PLAN)},
+        {"role": "user", "content": "T: 接着规划"},
+        {"role": "assistant", "content": None, "tool_calls": [
+            {"id": "r1", "type": "function",
+             "function": {"name": "stay_silent", "arguments": "{}"}}]},
+        {"role": "tool", "tool_call_id": "r1", "content": "ok"},
+        {"role": "assistant", "content": "计划定稿"},
+    ]) + "\n", encoding="utf-8")
+    saved_sess, saved_mode = bot2.session, bot2.mode
+    bot2.resume_session(str(rp))
+    assert bot2.mode == MODE_PLAN, bot2.mode
+    assert bot2.session.messages[-1]["content"] == "计划定稿"
+    assert all("reasoning_content" in m for m in bot2.session.messages
+               if m["role"] == "assistant"), "恢复时应给 assistant 补 reasoning_content"
+    bot2.session, bot2.mode = saved_sess, saved_mode
+    rp.unlink(missing_ok=True)
+    print("会话恢复自测 OK")
 
     # ===== 一次性对话自测 =====
     import shutil as _shutil
@@ -2719,7 +2813,6 @@ def self_test():
     assert bot2.session is tsess and bot2.session.messages == tmsg_before
     print("一次性对话自测 OK")
 
-    bot2.current_batch = [("kirin9000S", "list")]
     r = bot2._tool_run_command({"command": "list"})
     assert "指令已执行: /list" in r, r
     print(r)
@@ -2730,4 +2823,7 @@ if __name__ == "__main__":
     if "--test" in sys.argv:
         self_test()
     else:
-        Bot(load_config()).run()
+        bot = Bot(load_config())
+        if "--resume" in sys.argv:
+            bot.resume_session(sys.argv[sys.argv.index("--resume") + 1])
+        bot.run()
