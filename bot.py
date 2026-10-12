@@ -326,7 +326,7 @@ CREATIVE_PROMPT = """
 - 精确施工: 坐标务必算准; 大范围操作先试一小块确认效果, 再铺开。
 - 开工前先 pin_region 覆盖整个施工面(常加载), 否则玩家走开/离线后区块卸载, 施工会静默失败。
 - 成片操作: 优先 fill/clone 等批量指令, 避免逐块 setblock; 每批完成向玩家简报进度。
-- 施工后必复检: 每填完一批, 立刻用 ptc 批量抽检关键坐标(区域四角、中心、边界、以及刚好在范围外的一格), 确认真的已经是目标方块。“指令已执行”不等于“改对了”, 只看成功回执就报完成是不可以的。
+- 施工后必复检: 每填完一批, 立刻用 ptc 批量抽检关键坐标(区域四角、中心、边界、以及刚好在范围外的一格), 确认真的已经是目标方块。命令回执(如 N blocks filled)不等于“改对了”, 只看回执就报完成是不可以的。
 - 先列清单再动手: 扫描/抽检后, 把所有不合格的坐标完整写在一张清单里(有几条就是几条), 然后逐条对照修复。千万不要凭印象“应该就这两个”, 已经有读出来是异常的点被顺手漏掉的先例。
 - 发现问题主动修复: 复检发现还是旧方块、位置偏了、漏了一段、尺寸不对, 立刻再下指令修正; 修完把**整个区域再扫一遍**确认全部合格(而不是只看补过的那几格)。修好之前不要对玩家说“已完成”。反复修不好就如实说明卡在哪里、现状如何。
 - 允许更长的说明(方案、步骤、材料清单), 但仍用口语化中文、分段发送、不用 markdown。
@@ -1424,13 +1424,14 @@ class Bot:
         blocklist = {c.lower() for c in self.cfg.get("command_blocklist", [])}
         if verb in blocklist:
             return f"指令 {verb} 在禁止列表中, 未执行。"
+        log(f"[指令] /{cmd}")  # 只进日志: 命令在模型自己的 tool_call 里, 不必再回显占用上下文
         out = self._console_output(cmd)
-        if not out:
-            if self._abort().is_set():
-                return f"已中止(指令已发出, 无法撤回): /{cmd}"
-            timeout = self.cfg.get("command_result_timeout_sec", 6)
-            return f"指令已执行: /{cmd} ({timeout}s 内无输出)"
-        return f"指令已执行: /{cmd}\n输出:\n{out[:800]}"
+        if out:
+            return out[:800]
+        if self._abort().is_set():
+            return "已中止(指令已发出, 无法撤回)"
+        timeout = self.cfg.get("command_result_timeout_sec", 6)
+        return f"已执行, {timeout}s 内无输出"
 
     # ---------- 常加载区域 ----------
 
@@ -3042,7 +3043,7 @@ def self_test():
     print("技能书自测 OK")
 
     r = bot2._tool_run_command({"command": "list"})
-    assert "指令已执行: /list" in r, r
+    assert r.strip() and "禁止" not in r, r
     print(r)
     print("capabilities self-test OK")
 
