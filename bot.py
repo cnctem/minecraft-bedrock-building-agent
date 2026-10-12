@@ -15,6 +15,7 @@ mc-ai-bot: 把 MC 基岩版服务器(screen 会话)的聊天接入 DeepSeek。
 """
 
 import json
+import os
 import re
 import shutil
 import signal
@@ -2144,6 +2145,14 @@ class Bot:
         log_file.touch(exist_ok=True)
         self.offset = log_file.stat().st_size  # 只处理新内容
         self.bridge.sync_player_count()
+        # 平滑重启: 若指定 VIKTOR_RESTORE=<落盘会话路径>, 启动时自动灌回(静默, 不发聊天)
+        restore = os.environ.get("VIKTOR_RESTORE")
+        if restore:
+            try:
+                self.resume_session(restore)
+                log(f"[恢复] 启动时自动恢复 {restore}")
+            except Exception as e:
+                log(f"[恢复] 启动自动恢复失败: {e}")
         worker = threading.Thread(target=self._worker, daemon=True)
         worker.start()
         log(f"机器人已启动, tail {log_file}, screen 会话: {self.cfg['screen_session']}")
