@@ -446,7 +446,7 @@ TOOLS = {
         "send_chat_message", "update_memory", "get_player_activity", "get_server_status",
         "get_player_position", "get_player_inventory", "get_player_hand",
         "run_server_command", "get_block", "scan_blocks", "ptc", "backup_world",
-        "find_items",
+        "find_items", "use_skill",
     }},
     # 计划模式: 黑名单, 不让它执行 MC 命令/动世界(查询、说话、记忆、ptc 仍在)
     "no_commands": {"except": {"run_server_command", "pin_region", "backup_world"}},
@@ -529,6 +529,7 @@ class Session:
         self.started = datetime.now()
         self.messages: list[dict] = []  # 不含 system
         self.replied_count = 0
+        self.loaded_skills: set[str] = set()  # 本会话已载入的技能, 避免重复占上下文
 
     def add_user(self, content: str):
         self.messages.append({"role": "user", "content": content})
@@ -629,6 +630,7 @@ class Bot:
         self.cfg = cfg
         self.bridge = ScreenBridge(cfg["screen_session"])
         capabilities.register("send_chat_message", SEND_CHAT_SCHEMA, self._tool_send_message)
+        capabilities.register("use_skill", capabilities.USE_SKILL_SCHEMA, self._tool_use_skill)
         capabilities.register("get_server_status", GET_STATUS_SCHEMA, self._tool_server_status)
         capabilities.register("run_server_command", RUN_COMMAND_SCHEMA, self._tool_run_command)
         capabilities.register("get_player_position", GET_POSITION_SCHEMA, self._tool_get_position)
@@ -701,6 +703,9 @@ class Bot:
         # 长期记忆作为第一条系统注记追加进日志(而不是写进固定的 system 前缀),
         # 之后每次 update_memory 再追加新注记, 前缀始终稳定。
         self.session.add_system(memory_note())
+        skills = capabilities.skills_note()
+        if skills:
+            self.session.add_system(skills)
         # 初始模式(normal)注记, 紧跟在 system prompt 之后、第一条用户消息之前
         self.session.add_system(self._mode_note())
         log(f"=== 会话 #{self.session.id} 开始 (玩家: {sorted(self.players)}) ===")
@@ -982,6 +987,9 @@ class Bot:
         self._tls.mode = MODE_ONESHOT
         # 一次性会话的注记(记忆 + 本模式行为与数值), 都写在第一条用户消息之前
         ctx.session.add_system(memory_note())
+        skills = capabilities.skills_note()
+        if skills:
+            ctx.session.add_system(skills)
         ctx.session.add_system(self._mode_note())
         ctx.session.add_user(f"{name}: {body}")
         log(f"=== 一次性对话 #{oid} 开始 (玩家: {name}) ===")
@@ -1105,6 +1113,18 @@ class Bot:
         self.bridge.say_as_viktor(args["text"], self.cfg["reply_chunk_len"],
                                   self._reply_max_chunks())
         return "已发送到游戏内聊天。"
+
+    def _tool_use_skill(self, args: dict) -> str:
+        name = (args.get("name") or "").strip()
+        file = (args.get("file") or "").strip()
+        key = f"{name}/{file}" if file else name
+        sess = self._session()
+        if sess is not None and key in sess.loaded_skills and not args.get("force"):
+            return f"（本会话已载入过技能 {key}, 内容见上文; 如确需重新载入请加 force=true。）"
+        text = capabilities.use_skill(name, file)
+        if sess is not None and text.startswith("# 技能书:"):
+            sess.loaded_skills.add(key)
+        return text
 
     @staticmethod
     def _looks_like_name_list(line: str) -> bool:
@@ -2228,7 +2248,10 @@ def self_test():
     old_sid = bot2.session.id
     sent.clear()
     bot2.process_line("[2026-10-10 18:41:02:000 INFO] [Scripting] [VIKTOR-CHAT] 路人甲: 清空")
-    assert [m["role"] for m in bot2.session.messages] == ["system", "system"], "空闲清空后应只剩记忆+模式注记"
+    msgs = bot2.session.messages
+    assert msgs and all(m["role"] == "system" for m in msgs), "空闲清空后应只剩系统注记"
+    assert msgs[0]["content"].startswith("# 你的长期记忆"), msgs[0]["content"][:40]
+    assert "可用技能书" in "".join(m["content"] for m in msgs[1:]), "应含技能书清单注记"
     assert bot2.session.id != old_sid, "空闲清空也应开新会话"
     assert "已清空" in sent[0], sent
     bot2.process_line("[2026-10-10 18:41:05:000 INFO] [Scripting] [VIKTOR-CHAT] 路人甲: 清空一下")
@@ -2240,7 +2263,8 @@ def self_test():
     bot2.mode = MODE_CREATIVE
     old_sid = bot2.session.id
     assert Session._est_tokens(bot2.session.messages) > bot2._input_token_budget()
-    assert bot2._maybe_clear_for_size() and [m["role"] for m in bot2.session.messages] == ["system", "system"], "超预算应整段清空(只剩记忆+模式注记)"
+    assert bot2._maybe_clear_for_size()
+    assert all(m["role"] == "system" for m in bot2.session.messages), "超预算应整段清空(只剩系统注记)"
     assert bot2.session.id != old_sid and bot2.mode == MODE_NORMAL, "超长清空也应完整初始化"
     bot2.cfg["context_window_tokens"] = 1048576
     assert not bot2._maybe_clear_for_size(), "未超预算不应清空"
@@ -2900,6 +2924,19 @@ def self_test():
     r = capabilities.execute("find_items", "{}")
     assert "共" in r and "建筑" in r, r
     print("物品速查自测 OK")
+
+    # 技能书: 清单注记 + 正文/附件按需载入 + 去重
+    note = capabilities.skills_note()
+    assert "mc-commands" in note and "system prompt 为准" in note, note
+    r = capabilities.execute("use_skill", '{"name":"mc-commands"}')
+    assert r.startswith("# 技能书:") and "weirdo_direction" in r, r[:150]
+    r = capabilities.execute("use_skill", '{"name":"mc-commands","file":"references/block-states.md"}')
+    assert "pillar_axis" in r, r[:150]
+    r = capabilities.execute("use_skill", '{"name":"mc-commands","file":"../SKILL.md"}')
+    assert "没有附带资料" in r, r
+    r = capabilities.execute("use_skill", '{"name":"nonexistent"}')
+    assert "没有名为" in r, r
+    print("技能书自测 OK")
 
     r = bot2._tool_run_command({"command": "list"})
     assert "指令已执行: /list" in r, r

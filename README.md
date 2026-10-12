@@ -114,6 +114,7 @@ python3 bot.py --test         # 解析逻辑自测
 | `get_block(x, y, z, dimension?)` | 读坐标上的方块类型与状态（行为包脚本；基岩版无 `/data`） |
 | `scan_blocks(x1..z2, dimension?, filter?)` | 批量扫一个 1 格厚切面（≤16×16×1，厚轴可为 X/Y/Z）：默认回非空气方块，给 `filter` 则回类型含该关键字的方块并附未匹配类型统计 |
 | `find_items(query?, category?, limit?)` | 查基岩版物品/方块 ID 速查表（唯一权威来源）。`query` 支持中文/英文/ID 片段子串匹配，`category` 限定分类，不传参数返回分类总览。结果 id 可直接用于 `give`/`fill`/`setblock` |
+| `use_skill(name, file?, force?)` | 按需载入一本技能书（skill）的正文；`file` 展开其附带资料。系统在会话开头只列出技能名与适用场景，正文用时才载入 |
 | `pin_region(x1, z1, x2, z2)` | **仅创造/执行模式下可用**：把施工面设为常加载（ticking area，自动按 ≤100 区块切片）：防止玩家走开/离线后区块卸载导致 fill 失败。**生命周期 = 创造/执行模式**：离开这些模式（切回 normal 等）或会话结束时自动移除 |
 | `backup_world()` | 把当前存档热备份成 `.7z`（`save hold` → 7z → `save resume`） |
 | `set_mode(mode, reason?)` | 切换运行模式；可选目标按当前模式动态注入（普通↔创造/创造max；计划→执行；一次性无此工具） |
@@ -138,6 +139,25 @@ python3 bot.py --test         # 解析逻辑自测
 命中结果才进上下文；中文名让“混凝土”“台阶”这类模糊词直接子串命中整族。所有模式（含一次性/计划）都可查。
 
 服务器升级后重跑：控制台 `scriptevent viktor:ids` → 更新 `data/raw_ids.txt` → `python3 tools/build_items.py`。
+
+### 技能书（skill）
+
+把“按需才需要的长篇技能知识”从提示词里拆出去，用到才载入。移植自 pi Agent 的
+[skills 机制](../)（描述常驻、正文按需、附件再按需）：
+
+- **格式**：一个目录 + `SKILL.md`，YAML frontmatter 声明 `name` / `description`（目录可再带 `references/*.md` 等资料）。
+  直接兼容 pi / Agent Skills 规范的技能目录，放进去即生效，**加技能不改代码**。
+- **常驻层**：会话开始时只把每本技能的 `name + description` 作为一条 system 注记注入
+  （`capabilities.skills_note()`，在 `_start_session` / `_spawn_oneshot` 里追加），正文不进上下文。
+- **按需层**：模型判断任务落在某技能范围内时调用 `use_skill(name)`，正文才作为工具结果进上下文；
+  技能若附带 `references/`，`SKILL.md` 会列出文件名，模型用 `use_skill(name, "references/x.md")` 再展开。
+- **去重**：同一会话内重复载入同一技能会直接返回“已载入过”（`Session.loaded_skills`），加 `force=true` 可强制重载。
+- **优先级**：技能只是补充说明，**与 system prompt 冲突时以 system prompt 为准**（已写入技能清单注记）。
+
+内置示例：`skills/mc-commands/`（基岩版命令施工手册：fill/setblock/clone 变体、方块状态与朝向、
+超量分段、施工套路；附表 `references/block-states.md` 是实测状态名）。全模式可用（含一次性/计划）。
+
+新增技能只需建目录 `skills/<name>/SKILL.md`，写好 frontmatter 的 `description`（要同时说清“是什么 + 何时用”）。
 
 ### 行为包脚本桥
 
@@ -241,5 +261,6 @@ BDS 控制台 **不回显玩家聊天**，所以用行为包 `viktor_bridge` 订
 - `data/raw_ids.txt` — `scriptevent viktor:ids` 导出的原始 ID 清单（重建速查表的输入）
 - `data/item_aliases.json` — 手写的同义词/Java 名/口语别名
 - `tools/build_items.py` — 从 `data/raw_ids.txt` + 官方 lang 生成 `data/items.json`
+- `skills/<name>/SKILL.md`（+ `references/`）— 技能书；`use_skill` 按需载入，会话开头只注入名字与描述
 - `/home/jrj/mc_backup/` — 存档备份输出目录
 - `run.sh` — 启动脚本：重设 screen 日志设置并跑 bot

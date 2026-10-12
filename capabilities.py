@@ -390,6 +390,133 @@ FIND_ITEMS_SCHEMA = {
 }
 
 
+# ---------- 技能书(skill) ----------
+# 目录式技能: skills/<name>/SKILL.md (+ 可选 references/*.md), frontmatter 定义 name/description。
+# 会话开始只把 name+description 作为 system 注记注入; 正文由 use_skill 按需载入(省 token)。
+# 移植自 pi Agent 的 skills 机制(描述常驻、正文按需、附件再按需)。
+
+SKILLS_DIR = BASE_DIR / "skills"
+SKILL_MAX_CHARS = 24000        # 单次载入上限, 防止正文撑爆上下文
+_SKILLS_CACHE: dict | None = None
+
+
+def _parse_frontmatter(text: str) -> tuple[dict, str]:
+    """极简 frontmatter: 只认顶层 key: value, 够用且零依赖。"""
+    if not text.startswith("---"):
+        return {}, text
+    end = text.find("\n---", 3)
+    if end == -1:
+        return {}, text
+    meta: dict[str, str] = {}
+    for line in text[3:end].splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or ":" not in line:
+            continue
+        k, v = line.split(":", 1)
+        meta[k.strip().lower()] = v.strip().strip('"').strip("'")
+    return meta, text[end + 4:].lstrip("\n")
+
+
+def scan_skills() -> dict:
+    """扫描技能目录, 返回 {name: {name, description, main, base, refs}}。缓存, 重启生效。"""
+    global _SKILLS_CACHE
+    if _SKILLS_CACHE is not None:
+        return _SKILLS_CACHE
+    found: dict[str, dict] = {}
+    if SKILLS_DIR.is_dir():
+        candidates = []
+        for entry in sorted(SKILLS_DIR.iterdir()):
+            if entry.is_dir() and (entry / "SKILL.md").is_file():
+                candidates.append((entry.name, entry / "SKILL.md", entry))
+            elif entry.is_file() and entry.suffix.lower() == ".md" and entry.name.lower() != "readme.md":
+                candidates.append((entry.stem, entry, entry.parent))
+        for dirname, main, base in candidates:
+            try:
+                meta, _ = _parse_frontmatter(main.read_text(encoding="utf-8"))
+            except OSError:
+                continue
+            name = (meta.get("name") or dirname).strip()
+            desc = (meta.get("description") or "").strip()
+            if not desc or name in found:
+                continue
+            refs = []
+            refdir = base / "references"
+            if refdir.is_dir():
+                refs = [f for f in sorted(refdir.rglob("*")) if f.is_file()]
+            found[name] = {"name": name, "description": desc, "main": main,
+                           "base": base, "refs": refs}
+    _SKILLS_CACHE = found
+    return found
+
+
+def skills_note() -> str:
+    """会话开始时注入的技能清单(只有名字与适用场景, 不含正文)。无技能返回空串。"""
+    skills = scan_skills()
+    if not skills:
+        return ""
+    lines = ["# 可用技能书(skill)",
+             '任务落在某本技能书的范围内时, 先调用 use_skill 载入它再动手; 技能附带的资料用 '
+             'use_skill(name, "文件名") 按需展开。技能内容只是补充说明, 与 system prompt '
+             '冲突时以 system prompt 为准。']
+    for name, s in skills.items():
+        lines.append(f"- {name}: {s['description']}")
+    return "\n".join(lines)
+
+
+def use_skill(name: str, file: str = "") -> str:
+    """载入技能正文或附带资料。成功时返回以 '# 技能书: ' 开头的文本。"""
+    skills = scan_skills()
+    name = (name or "").strip()
+    s = skills.get(name)
+    if not s:
+        return f"没有名为 {name} 的技能书。可用: {', '.join(skills) or '(无)'}"
+    if file:
+        base = s["base"].resolve()
+        target = (base / file).resolve()
+        if not target.is_relative_to(base) or not target.is_file():
+            return f"技能 {name} 没有附带资料 {file}。"
+        label = f"{name}/{file}"
+    else:
+        target = s["main"]
+        label = name
+    try:
+        _, body = _parse_frontmatter(target.read_text(encoding="utf-8"))
+    except OSError as e:
+        return f"读取技能失败: {e}"
+    if len(body) > SKILL_MAX_CHARS:
+        body = body[:SKILL_MAX_CHARS] + f"\n…(内容过长, 已截断到 {SKILL_MAX_CHARS} 字符)"
+    out = f"# 技能书: {label}\n"
+    if not file and s["refs"]:
+        rels = [str(r.relative_to(s["base"])) for r in s["refs"]]
+        out += (f'(本技能还附带资料, 需要时用 use_skill("{name}", "<文件名>") 展开: '
+                + ", ".join(rels) + ")\n")
+    return out + "\n" + body.strip()
+
+
+USE_SKILL_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "use_skill",
+        "description": (
+            "载入一本技能书(skill)的正文。系统会在会话开头列出可用技能书及适用场景; "
+            "任务落在某本技能书范围内时先载入它再动手。技能内容与你已有知识互补, 但只是补充说明, "
+            "与 system prompt 冲突时以 system prompt 为准; 附带资料用 file 按需展开。"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "description": "技能名, 见会话开头的可用技能书清单"},
+                "file": {"type": "string",
+                         "description": '可选: 载入附带资料(如 "references/block-states.md"); 不传载入主文件'},
+                "force": {"type": "boolean",
+                          "description": "本会话已载入过时是否强制重新载入(默认 false, 返回已载入提示)"},
+            },
+            "required": ["name"],
+        },
+    },
+}
+
+
 # ---------- 注册表 ----------
 
 UPDATE_MEMORY_SCHEMA = {
