@@ -99,12 +99,32 @@ GET_ACTIVITY_SCHEMA = {
 
 
 # ---------- PTC: 批量工具调用 ----------
-# 一次提交多个工具调用, 串行执行后合并成一条结果返回。
-# 为什么必须串行: ①游戏指令有先后顺序, 乱序执行会毁掉施工;
-# ②查询类工具共用同一条日志通道, 并行时两个 get_block 会互相抢到对方的回包而答错坐标。
+# 一次提交多个工具调用, 合并成一条结果返回。
+# 串行约束只针对"有先后依赖 / 有副作用"的工具(施工指令、状态变更);
+# 查询类工具(get_player_position / get_block / scan_blocks ...)走 bot 的服务端请求总线:
+# 同一批里的查询会先全部登记、再一次性下发, 只付一次 stdin 轮询延迟, 再按请求 id 收齐。
 MAX_PTC_CALLS = 24          # 程序实际放行数(留一倍余量)
 STATED_PTC_CALLS = 12       # 提示词/报错向模型声明的数(口头限制)
 PTC_RESULT_LIMIT = 30000  # 合并结果的字符上限, 防止一条工具结果撑爆上下文
+BUS_BATCH_MAX = 8         # 一次下发给服务端的 bus 请求上限(保护服务端主线程)
+
+# 并发类别: name -> "bus" | "serial"(缺省即 serial)。由 register(...) 声明。
+_CONCURRENCY: dict[str, str] = {}
+
+# bot 注入的"批量执行器": 接 [(name, args_dict), ...], 返回等长结果列表。
+# 未注入时 bus 工具退化为逐个串行 execute(), 便于自测/无服务器场景。
+_BUS_BATCH_RUNNER = None
+
+
+def set_bus_batch_runner(fn) -> None:
+    global _BUS_BATCH_RUNNER
+    _BUS_BATCH_RUNNER = fn
+
+
+def set_bus_batch_max(n: int | None) -> None:
+    global BUS_BATCH_MAX
+    if n:
+        BUS_BATCH_MAX = max(1, int(n))
 
 # 并发支持: 每个请求线程有各自的 ptc 上限与工具黑名单。
 # 主对话与多个一次性对话同时跑时, 创造模式的上限不会被一次性的普通上限覆盖。
@@ -167,6 +187,23 @@ def _ptc_args(item: dict):
     return {}
 
 
+def _is_bus(name: str) -> bool:
+    return _CONCURRENCY.get(name) == "bus"
+
+
+def _parse_args(args_json: str) -> dict:
+    try:
+        v = json.loads(args_json or "{}")
+    except (TypeError, ValueError):
+        return {}
+    return v if isinstance(v, dict) else {}
+
+
+def _is_err(result: str) -> bool:
+    return ("[错误]" in result or "[警告]" in result
+            or result.startswith("错误:"))
+
+
 def ptc(calls, stop_on_error: bool = False) -> str:
     max_calls, result_limit, stated_calls = get_ptc_limits()
     if not isinstance(calls, list) or not calls:
@@ -174,14 +211,17 @@ def ptc(calls, stop_on_error: bool = False) -> str:
     if len(calls) > max_calls:
         return (f"错误: 一次最多 {stated_calls} 个调用, 收到 {len(calls)} 个。"
                 "请拆成几批提交。")
-    out = []
+    blocked = _blocked_tools()
+    # 第一趟: 宽容解析 + 校验, 产出顺序固定的作业表(保留调用序号)。
+    # 每项要么 ("out", 错误文本), 要么 ("run", 工具名, 参数JSON)。
+    jobs = []
     for i, item in enumerate(calls, 1):
         if not isinstance(item, dict):
-            out.append(f"[{i}] 错误: 每一项需要是 {{tool, arguments}} 对象")
+            jobs.append(("out", f"[{i}] 错误: 每一项需要是 {{tool, arguments}} 对象"))
             continue
         name = _ptc_name(item)
         if name == "ptc":
-            out.append(f"[{i}] 错误: 不允许嵌套 ptc")
+            jobs.append(("out", f"[{i}] 错误: 不允许嵌套 ptc"))
             continue
         raw = _ptc_args(item)
         if isinstance(raw, str):
@@ -190,22 +230,66 @@ def ptc(calls, stop_on_error: bool = False) -> str:
             try:
                 args_json = json.dumps(raw, ensure_ascii=False)
             except (TypeError, ValueError) as e:
-                out.append(f"[{i}] {name}: 错误: 参数无法序列化: {e}")
+                jobs.append(("out", f"[{i}] {name}: 错误: 参数无法序列化: {e}"))
                 continue
         if not name:
-            out.append(f"[{i}] 错误: 这一项缺少工具名(keys={sorted(item)}); "
-                       "每项必须是 {\"tool\": 名, \"arguments\": {...}}")
+            jobs.append(("out", f"[{i}] 错误: 这一项缺少工具名(keys={sorted(item)}); "
+                         "每项必须是 {\"tool\": 名, \"arguments\": {...}}"))
             continue
         if name not in _REGISTRY:
-            out.append(f"[{i}] {name}: 错误: 未知能力")
+            jobs.append(("out", f"[{i}] {name}: 错误: 未知能力"))
             continue
-        result = execute(name, args_json)
+        if name in blocked:
+            jobs.append(("out", f"[{i}] {name}: 错误: 当前模式不支持调用 {name}。"))
+            continue
+        jobs.append(("run", name, args_json))
+
+    out: list[str] = []
+    n = len(jobs)
+    idx = 0
+
+    def emit_run(k: int, name: str, result: str):
         # 不回显参数: 模型自己的 ptc 调用里已有, 回显纯属重复占上下文
-        out.append(f"[{i}] {name} -> {result}")
-        if stop_on_error and ("[错误]" in result or "[警告]" in result
-                              or result.startswith("错误:")):
-            out.append(f"(失败, 已按 stop_on_error 跳过剩余 {len(calls) - i} 个调用)")
+        out.append(f"[{k + 1}] {name} -> {result}")
+
+    while idx < n:
+        job = jobs[idx]
+        if job[0] == "out":
+            out.append(job[1])
+            idx += 1
+            continue
+        name = job[1]
+        # 连续的 bus 工具合成一批: 先全部登记, 一次下发, 再按 id 收齐。
+        if _is_bus(name) and _BUS_BATCH_RUNNER is not None:
+            group = []
+            while idx < n and jobs[idx][0] == "run" and _is_bus(jobs[idx][1]):
+                group.append((idx, jobs[idx][1], jobs[idx][2]))
+                idx += 1
+            stopped = False
+            for start in range(0, len(group), BUS_BATCH_MAX):
+                chunk = group[start:start + BUS_BATCH_MAX]
+                outs = _BUS_BATCH_RUNNER([(nm, _parse_args(aj)) for _, nm, aj in chunk])
+                for (k, nm, _aj), res in zip(chunk, outs):
+                    emit_run(k, nm, res)
+                if stop_on_error and any(_is_err(r) for r in outs):
+                    stopped = True
+                    break
+            if stopped:
+                skipped = n - idx
+                if skipped:
+                    out.append(f"(失败, 已按 stop_on_error 跳过剩余 {skipped} 个调用)")
+                break
+            continue
+        # 其余(有副作用/有顺序依赖)逐个串行执行。
+        result = execute(name, job[2])
+        emit_run(idx, name, result)
+        idx += 1
+        if stop_on_error and _is_err(result):
+            skipped = n - idx
+            if skipped:
+                out.append(f"(失败, 已按 stop_on_error 跳过剩余 {skipped} 个调用)")
             break
+
     text = "\n".join(out)
     if len(text) > result_limit:
         text = text[:result_limit] + f"\n...(结果过长, 已截断到 {result_limit} 字符)"
@@ -213,8 +297,9 @@ def ptc(calls, stop_on_error: bool = False) -> str:
 
 
 PTC_DESC = (
-    "批量调用多个工具: 一次提交多个调用, 按顺序执行后合并成一条返回, 省往返与上下文。"
-    "适合互不依赖的多步(查多人坐标/手持物品、连下多条 fill/tp/setblock); 有先后依赖时分开调。"
+    "批量调用多个工具: 一次提交多个调用, 合并成一条返回, 省往返与上下文。"
+    "查询类调用(坐标/手持/方块/扫描)会在同一批里合并成一次下发, 只等一趟往返, 优先用它。"
+    "有先后依赖的施工/状态变更仍按数组顺序串行执行。"
     "上限见模式注记, 超了会被拒; 不允许嵌套 ptc; 每项写成 {\"tool\": \"名\", \"arguments\": {...}}。"
 )
 
@@ -580,9 +665,12 @@ def tool_schemas(allow: set | None = None, mode_choices: list | None = None) -> 
     return out
 
 
-def register(name: str, schema: dict, handler):
-    """运行时注册新能力(bot 会注册依赖自身资源的能力, 如发消息)。"""
+def register(name: str, schema: dict, handler, concurrency: str = "serial"):
+    """运行时注册新能力(bot 会注册依赖自身资源的能力, 如发消息)。
+    concurrency="bus" 表示走服务端请求总线: 同一批 ptc 里的查询会合并成一次下发;
+    缺省 "serial"(有副作用/有顺序依赖, ptc 里逐个串行)。"""
     _REGISTRY[name] = (schema, handler)
+    _CONCURRENCY[name] = concurrency
 
 
 def execute(name: str, arguments_json: str) -> str:

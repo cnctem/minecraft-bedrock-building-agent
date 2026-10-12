@@ -45,13 +45,11 @@ RE_CHAT = re.compile(r"^<([^>]+)> (.*)$")
 # 行为包脚本桥: [Scripting] [VIKTOR-CHAT] 玩家名: 消息 (名字限定 ASCII, 避免误吃脚本报错行)
 RE_BRIDGE = re.compile(r"^\[Scripting\] \[VIKTOR-CHAT\] (.{1,32}?): (.*)$")
 RE_JOIN = re.compile(r"^Player connected: ([^,]+), xuid: (\d+)")
-RE_POS = re.compile(r"\[VIKTOR-POS\] (\S+) (-?[\d.]+) (-?[\d.]+) (-?[\d.]+) (\S+)")
-RE_INV = re.compile(r"\[VIKTOR-INV\] (\S+) (\d+) (\S+) (\d+)")
-RE_INV_DONE = re.compile(r"\[VIKTOR-INV\] (\S+) DONE (-?\d+)")
-RE_BLOCK = re.compile(r"\[VIKTOR-BLOCK\] (.*)$")
-RE_SCAN = re.compile(r"\[VIKTOR-SCAN\] (.*)$")
 RE_LEAVE = re.compile(r"^Player disconnected: ([^,]+), xuid:")
 RE_LIST = re.compile(r"^There are (\d+)/(\d+) players online")
+# 协议 v2: 行为包把请求 id 原样回显在每一行里, 供 ServerBus 按 id 路由
+BUS_ROUTE_RE = re.compile(r"\[VIKTOR-(POS|INV|BLOCK|SCAN)\] (r\d+)(?:[ \t](.*))?$")
+RE_HELLO = re.compile(r"\[VIKTOR-HELLO\] \S+ v2")
 
 # 控制面硬编码词: 完全匹配时直接中止正在运行的 Agent 任务(不走模型, 类似 Ctrl-C)
 FORCE_STOP_WORD = "强制停止"  # 控制面: 立即中止当前任务(连工具内部等待也打断)
@@ -76,6 +74,19 @@ CREATIVE_MODES = (MODE_CREATIVE, MODE_CREATIVE_MAX)
 PIN_MODES = (MODE_CREATIVE, MODE_CREATIVE_MAX, MODE_EXECUTE)  # 支持常加载: 创造家族 + 执行(施工)
 SCAN_STATED_SLICE = 16  # scan_blocks 向模型声明的切面单边上限(16×16×1)
 SCAN_MAX_SLICE = 20     # scan_blocks 程序实际允许(留一倍余量)
+# 走服务端请求总线的查询工具: name -> (kind, 超时配置项)
+BUS_TOOLS = {
+    "get_player_position": ("pos", "position_timeout_sec"),
+    "get_player_hand": ("inv", "inventory_timeout_sec"),
+    "get_block": ("block", "block_timeout_sec"),
+    "scan_blocks": ("scan", "scan_timeout_sec"),
+}
+BUS_TIMEOUT_TEXT = {
+    "get_player_position": "行为包脚本没有回应, 取不到坐标(可能脚本未加载)。",
+    "get_player_hand": "行为包脚本没有回应, 取不到手持物品(可能脚本未加载)。",
+    "get_block": "行为包脚本没有回应, 查不到方块(可能脚本未加载, 或区块未加载)。",
+    "scan_blocks": "行为包脚本没有回应, 扫描失败(可能脚本未加载, 或区块未加载)。",
+}
 ONESHOT_TRIGGER = re.compile(r"^1(?:[ \u3000]+|$)")  # "1 " / "1　" 开头, 或单一个 "1" = 一次性对话
 ONESHOT_FORCE_STOP = re.compile(r"^1[ \u3000]+强制停止$")  # 停止全部一次性对话
 
@@ -484,6 +495,17 @@ class ScreenBridge:
             check=False,
         )
 
+    def send_commands(self, cmds):
+        """一次 stuff 注入多条控制台命令(多条以回车分行), 整批只付一次 stdin 轮询延迟。"""
+        cmds = [c for c in cmds if c]
+        if not cmds:
+            return
+        payload = "\\r".join(c.replace("\\", "\\\\") for c in cmds) + "\\r"
+        subprocess.run(
+            ["screen", "-S", self.session, "-p", "0", "-X", "stuff", payload],
+            check=False,
+        )
+
     def sync_player_count(self) -> None:
         self.send_command("list")
 
@@ -522,6 +544,155 @@ class ScreenBridge:
             self.send_command(f'tellraw @a {{"rawtext":[{{"text":{payload}}}]}}')
             log(f"[{tag}] {chunk}")  # 记下真实发言, 便于事后排查
             time.sleep(0.4)
+
+
+class BusArgError(ValueError):
+    """bus 工具参数校验失败: 消息直接作为给模型的错误文本。"""
+
+
+class Req:
+    """一次服务端查询请求: 命令、回包缓存与完成事件。"""
+
+    __slots__ = ("id", "kind", "cmd", "args", "timeout", "lines", "done", "event", "sent_at")
+
+    def __init__(self, rid, kind, cmd, timeout, args):
+        self.id = rid
+        self.kind = kind
+        self.cmd = cmd
+        self.args = args
+        self.timeout = timeout
+        self.lines = []
+        self.done = False
+        self.event = threading.Event()
+        self.sent_at = 0.0
+
+
+def _bus_terminal(kind: str, body: str) -> bool:
+    # block 单行即终止; 其余靠脚本的 DONE 收尾
+    if kind == "block":
+        return True
+    return body.startswith("DONE")
+
+
+class ServerBus:
+    """服务端请求总线: 同一批 id 化请求一次下发, 回包按 id 路由。
+
+    背景: bedrock_server 每 ~0.8-1.0s 才把 stdin 积压行整批读走, 逐个下发要逐个等;
+    一批一起下发只付一次轮询延迟。回包靠 [VIKTOR-*] r<id> 前缀路由(见行为包协议 v2)。
+    """
+
+    def __init__(self, bridge, log_path: Path, reader_poll: float = 0.05):
+        self.bridge = bridge
+        self.log_path = Path(log_path)
+        self.reader_poll = reader_poll
+        self._lock = threading.Lock()
+        self._inflight: dict[str, Req] = {}
+        self._offset = 0
+        self._counter = 0
+        self._running = False
+        self._reader_thread: threading.Thread | None = None
+
+    def start(self):
+        if self._running:
+            return
+        self._running = True
+        try:
+            self._offset = self.log_path.stat().st_size
+        except FileNotFoundError:
+            self._offset = 0
+        self._reader_thread = threading.Thread(target=self._reader, daemon=True)
+        self._reader_thread.start()
+
+    def stop(self):
+        self._running = False
+        with self._lock:
+            reqs = list(self._inflight.values())
+        for r in reqs:
+            r.event.set()
+
+    def next_id(self) -> str:
+        with self._lock:
+            self._counter += 1
+            return f"r{self._counter}"
+
+    def submit_many(self, specs) -> list[Req]:
+        """specs: [(rid, kind, cmd, timeout, args)]; 登记后一次下发, 返回等长 Req。
+        命令由调用方预先构造(这样参数校验失败就不会占用 id/下发)。"""
+        if not specs:
+            return []
+        self.start()
+        reqs = [Req(rid, kind, cmd, timeout, args)
+                for rid, kind, cmd, timeout, args in specs]
+        with self._lock:
+            for r in reqs:
+                self._inflight[r.id] = r
+        try:
+            self.bridge.send_commands([r.cmd for r in reqs])
+        except Exception:
+            with self._lock:
+                for r in reqs:
+                    self._inflight.pop(r.id, None)
+            raise
+        now = time.time()
+        for r in reqs:
+            r.sent_at = now
+        return reqs
+
+    def wait(self, req: Req, abort: threading.Event) -> bool:
+        deadline = req.sent_at + req.timeout
+        while not req.done:
+            if abort.is_set():
+                self._drop(req.id)
+                return False
+            if time.time() >= deadline:
+                self._drop(req.id)
+                return False
+            req.event.wait(0.1)
+        return True
+
+    def _drop(self, rid: str):
+        with self._lock:
+            self._inflight.pop(rid, None)
+
+    def _route(self, line: str):
+        m = BUS_ROUTE_RE.search(line)
+        if not m:
+            return
+        kind, rid = m.group(1).lower(), m.group(2)
+        body = (m.group(3) or "").strip()
+        with self._lock:
+            req = self._inflight.get(rid)
+        if req is None or req.done:
+            return
+        req.lines.append(body)
+        if _bus_terminal(kind, body):
+            req.done = True
+            req.event.set()
+            self._drop(rid)
+
+    def _reader(self):
+        while self._running:
+            try:
+                if not self.log_path.exists():
+                    time.sleep(self.reader_poll)
+                    continue
+                size = self.log_path.stat().st_size
+                if size < self._offset:
+                    self._offset = 0  # 日志被截断/轮转
+                with open(self.log_path, "rb") as f:
+                    f.seek(self._offset)
+                    data = f.read()
+                if data:
+                    nl = data.rfind(b"\n")
+                    if nl >= 0:  # 只吃完整行, 半行留到下次
+                        self._offset += nl + 1
+                        for line in data[:nl + 1].decode("utf-8", "replace").splitlines():
+                            self._route(line)
+            except FileNotFoundError:
+                pass
+            except Exception:
+                pass
+            time.sleep(self.reader_poll)
 
 
 class Session:
@@ -632,16 +803,26 @@ class Bot:
     def __init__(self, cfg: dict):
         self.cfg = cfg
         self.bridge = ScreenBridge(cfg["screen_session"])
+        self.bus = ServerBus(self.bridge, SERVER_LOG_PATH,
+                             cfg.get("bus_reader_poll_sec", 0.05))
+        self.bus_enabled = False  # 启动握手(应对行为包未升级)后才置位
+        # bus 批量执行器: 同一批 ptc 查询一次性下发、按 id 收齐
+        capabilities.set_bus_batch_runner(self._run_bus_batch)
+        capabilities.set_bus_batch_max(cfg.get("bus_batch_max", 8))
         capabilities.register("send_chat_message", SEND_CHAT_SCHEMA, self._tool_send_message)
         capabilities.register("use_skill", capabilities.USE_SKILL_SCHEMA, self._tool_use_skill)
         capabilities.register("get_server_status", GET_STATUS_SCHEMA, self._tool_server_status)
         capabilities.register("run_server_command", RUN_COMMAND_SCHEMA, self._tool_run_command)
-        capabilities.register("get_player_position", GET_POSITION_SCHEMA, self._tool_get_position)
-        capabilities.register("get_player_hand", GET_HAND_SCHEMA, self._tool_get_hand)
+        capabilities.register("get_player_position", GET_POSITION_SCHEMA,
+                             self._tool_get_position, concurrency="bus")
+        capabilities.register("get_player_hand", GET_HAND_SCHEMA,
+                             self._tool_get_hand, concurrency="bus")
         capabilities.register("backup_world", BACKUP_SCHEMA, self._tool_backup_world)
         capabilities.register("set_mode", SET_MODE_SCHEMA, self._tool_set_mode)
-        capabilities.register("get_block", GET_BLOCK_SCHEMA, self._tool_get_block)
-        capabilities.register("scan_blocks", SCAN_BLOCKS_SCHEMA, self._tool_scan_blocks)
+        capabilities.register("get_block", GET_BLOCK_SCHEMA,
+                             self._tool_get_block, concurrency="bus")
+        capabilities.register("scan_blocks", SCAN_BLOCKS_SCHEMA,
+                             self._tool_scan_blocks, concurrency="bus")
         capabilities.register("pin_region", PIN_REGION_SCHEMA, self._tool_pin_region)
         capabilities.set_ptc_limits(cfg.get("ptc_max_calls", 24),
                                     cfg.get("ptc_result_limit", 30000),
@@ -655,7 +836,7 @@ class Bot:
         self.running = True
         self.last_api_call = 0.0
         self.rate_lock = threading.Lock()   # 仅用于 api_min_interval 限速(不再包住整轮)
-        self.tool_gate = threading.RLock()  # 串行化读 server.log 回包的工具, 防并发抢回包
+        self.console_gate = threading.RLock()  # 串行化“读任意控制台输出”的工具(指令/常加载/备份)
         self._tls = threading.local()       # 每个一次性线程一份请求上下文
         # 一次性对话(可并发)
         self.oneshot_max_concurrent = cfg.get("oneshot_max_concurrent", 4)
@@ -1199,99 +1380,225 @@ class Bot:
         return bool(s) and bool(re.fullmatch(
             r"[A-Za-z0-9 _\-\.]{1,20}(, *[A-Za-z0-9 _\-\.]{1,20})*", s))
 
-    def _tool_get_position(self, args: dict) -> str:
-        want = (args.get("player") or "").strip()
-        log_file = SERVER_LOG_PATH
-        try:
-            offset = log_file.stat().st_size
-        except FileNotFoundError:
-            return "无法读取服务器日志, 取不到坐标。"
-        self.bridge.send_command("scriptevent viktor:pos")
-        deadline = time.time() + self.cfg.get("position_timeout_sec", 4)
-        found: dict[str, str] = {}
-        empty_reported = False
-        while time.time() < deadline:
-            if self._abort().is_set():
-                break
+    # ---------- 服务端查询: 走请求总线(协议 v2) ----------
+    # 同一批 bus 查询先全部登记、再一次性下发, 只付一次 stdin 轮询延迟, 回包按 id 路由。
+    # 行为包需支持 viktor:hello 握手与 r<id> 回显(见 main.js); 未握手成功时 bus_enabled=False。
+
+    def _bus_cmd(self, name: str, rid: str, args: dict) -> str:
+        """构造带请求 id 的 scriptevent 命令; 参数非法抛 BusArgError(消息回给模型)。"""
+        if name == "get_player_position":
+            return f"scriptevent viktor:pos {rid}"
+        if name == "get_player_hand":
+            return f"scriptevent viktor:inv {rid}"
+        if name == "get_block":
             try:
-                with open(log_file, encoding="utf-8", errors="replace") as f:
-                    f.seek(offset)
-                    new = f.read()
-            except FileNotFoundError:
-                break
-            if "[VIKTOR-POS] (无玩家在线)" in new:
-                empty_reported = True
-                break
-            for line in new.splitlines():
-                m = RE_POS.search(line)
-                if m:
-                    found[m.group(1)] = f"{m.group(2)}, {m.group(3)}, {m.group(4)} ({m.group(5)})"
-            if found:
-                break
-            time.sleep(0.2)
+                x, y, z = (int(args[k]) for k in ("x", "y", "z"))
+            except (KeyError, TypeError, ValueError):
+                raise BusArgError("需要整数坐标 x y z。")
+            dim = (args.get("dimension") or "overworld").strip().lower()
+            return f"scriptevent viktor:block {rid} {x} {y} {z} {dim}"
+        if name == "scan_blocks":
+            return self._scan_cmd(rid, args)
+        raise BusArgError(f"错误: 未知的查询工具 {name}")
+
+    def _scan_cmd(self, rid: str, args: dict) -> str:
+        try:
+            x1, y1, z1, x2, y2, z2 = (int(args[k]) for k in
+                                      ("x1", "y1", "z1", "x2", "y2", "z2"))
+        except (KeyError, TypeError, ValueError):
+            raise BusArgError("需要整数坐标 x1 y1 z1 x2 y2 z2。")
+        dim = (args.get("dimension") or "overworld").strip().lower()
+        filt = re.sub(r"\s+", "", args.get("filter") or "").lower()
+        xs, ys, zs = sorted((x1, x2)), sorted((y1, y2)), sorted((z1, z2))
+        ex, ey, ez = xs[1] - xs[0] + 1, ys[1] - ys[0] + 1, zs[1] - zs[0] + 1
+        ext = sorted((ex, ey, ez))
+        if ext[0] != 1:
+            raise BusArgError(f"这不是 1 格厚的切面({ex}×{ey}×{ez})。请让其中一个轴只有 1 格。")
+        if ext[2] > SCAN_MAX_SLICE:
+            raise BusArgError(f"切面单边最多 {SCAN_STATED_SLICE} 格(程序上限 {SCAN_MAX_SLICE}), "
+                              f"当前 {ex}×{ey}×{ez}, 请分几次扫描。")
+        cmd = f"scriptevent viktor:scan {rid} {x1} {y1} {z1} {x2} {y2} {z2} {dim}"
+        if filt:
+            cmd += f" {filt}"
+        return cmd
+
+    def _bus_spec(self, name: str, args: dict):
+        """返回 (kind, timeout, args); 命令在拿到 rid 后再构造, 便于把校验错误回给模型。"""
+        kind, tkey = BUS_TOOLS[name]
+        return (kind, self.cfg.get(tkey, 5), args)
+
+    def _bus_call(self, name: str, args: dict) -> str:
+        """单个 bus 查询: 登记 -> 下发 -> 按 id 等回包 -> 渲染。"""
+        kind, timeout, a = self._bus_spec(name, args)
+        rid = self.bus.next_id()
+        try:
+            cmd = self._bus_cmd(name, rid, a)
+        except BusArgError as e:
+            return str(e)
+        req = self.bus.submit_many([(rid, kind, cmd, timeout, a)])[0]
+        if not self.bus.wait(req, self._abort()):
+            if self._abort().is_set():
+                return "已中止。"
+            return BUS_TIMEOUT_TEXT[name]
+        return self._bus_render(name, req, a)
+
+    def _run_bus_batch(self, jobs):
+        """capabilities 的批量执行器: jobs=[(name, args)]; 返回等长结果列表。
+        一次登记整批 -> 一次下发 -> 按 id 收齐, 共享一次服务端轮询延迟。"""
+        outs: list = [None] * len(jobs)
+        specs, meta = [], []
+        for i, (name, args) in enumerate(jobs):
+            kind, timeout, a = self._bus_spec(name, args)
+            rid = self.bus.next_id()
+            try:
+                cmd = self._bus_cmd(name, rid, a)
+            except BusArgError as e:
+                outs[i] = str(e)
+                continue
+            specs.append((rid, kind, cmd, timeout, a))
+            meta.append((i, name, a))
+        if specs:
+            reqs = self.bus.submit_many(specs)
+            for req, (i, name, a) in zip(reqs, meta):
+                if self.bus.wait(req, self._abort()):
+                    outs[i] = self._bus_render(name, req, a)
+                elif self._abort().is_set():
+                    outs[i] = "已中止。"
+                else:
+                    outs[i] = BUS_TIMEOUT_TEXT[name]
+        return outs
+
+    def _bus_render(self, name: str, req: Req, args: dict) -> str:
+        if name == "get_player_position":
+            return self._render_position(req, args)
+        if name == "get_player_hand":
+            return self._render_hand(req, args)
+        if name == "get_block":
+            return self._render_block(req, args)
+        return self._render_scan(req, args)
+
+    def _render_position(self, req: Req, args: dict) -> str:
+        found: dict[str, str] = {}
+        empty = False
+        for body in req.lines:
+            if not body or body == "DONE":
+                continue
+            if body.startswith("("):
+                empty = empty or ("无玩家在线" in body)
+                continue
+            parts = body.split()
+            if len(parts) >= 5:
+                found[parts[0]] = f"{parts[1]}, {parts[2]}, {parts[3]} ({parts[4]})"
         if not found:
-            if empty_reported:
+            if empty:
                 return "当前没有玩家在线, 取不到坐标。"
-            return "行为包脚本没有回应, 取不到坐标(可能脚本未加载)。"
+            return BUS_TIMEOUT_TEXT["get_player_position"]
         self.player_positions.update(found)
-        if self._abort().is_set():
-            return "已中止。"
+        want = (args.get("player") or "").strip()
         if want:
-            for name, pos in found.items():
-                if name.lower() == want.lower():
-                    return f"{name} 的坐标: {pos}"
+            for nm, pos in found.items():
+                if nm.lower() == want.lower():
+                    return f"{nm} 的坐标: {pos}"
             return f"玩家 {want} 不在线。当前在线: {', '.join(sorted(found))}"
         return "在线玩家坐标:\n" + "\n".join(f"{n}: {p}" for n, p in sorted(found.items()))
 
-    def _query_inventory(self) -> tuple[dict[str, dict], bool]:
-        """请求脚本上报物品栏。返回 ({玩家: {'slots': {槽: (物品,数量)}, 'selected': 槽}}, 有无人回应)。"""
-        log_file = SERVER_LOG_PATH
-        try:
-            offset = log_file.stat().st_size
-        except FileNotFoundError:
-            return {}, False
-        self.bridge.send_command("scriptevent viktor:inv")
-        timeout = self.cfg.get("inventory_timeout_sec", 5)
-        deadline = time.time() + timeout
-        out: dict[str, dict] = {}
-        empty_reported = False
-        while time.time() < deadline:
-            if self._abort().is_set():
+    def _render_hand(self, req: Req, args: dict) -> str:
+        data: dict[str, dict] = {}
+        empty = False
+        for body in req.lines:
+            if not body or body == "DONE":
+                continue
+            if body.startswith("("):
+                empty = empty or ("无玩家在线" in body)
+                continue
+            m = re.match(r"^(\S+) DONE (-?\d+)$", body)
+            if m:
+                rec = data.setdefault(m.group(1), {"slots": {}, "selected": -1})
+                rec["selected"] = int(m.group(2))
+                continue
+            parts = body.split()
+            if len(parts) >= 4:
+                rec = data.setdefault(parts[0], {"slots": {}, "selected": -1})
+                try:
+                    rec["slots"][int(parts[1])] = (parts[2].replace("minecraft:", ""), int(parts[3]))
+                except ValueError:
+                    pass
+        if not data:
+            if empty:
+                return "当前没有玩家在线, 取不到手持物品。"
+            return BUS_TIMEOUT_TEXT["get_player_hand"]
+        picked, err = self._pick_players(args, data)
+        if err:
+            return err
+        lines = []
+        for name, rec in sorted(picked.items()):
+            item = rec["slots"].get(rec["selected"])
+            if item:
+                lines.append(f"{name} 手持(槽{rec['selected']}): {item[0]} x{item[1]}")
+            else:
+                lines.append(f"{name} 空手")
+        return "\n".join(lines)[:600]
+
+    def _render_block(self, req: Req, args: dict) -> str:
+        x, y, z = (int(args[k]) for k in ("x", "y", "z"))
+        for body in req.lines:
+            if not body:
+                continue
+            if body.startswith("("):  # 脚本的提示/错误行, 例如区块未加载
+                return f"查不到方块: {body}"
+            parts = body.split(" ", 4)
+            if len(parts) < 5:
+                return f"脚本回包异常: {body}"
+            bdim, block = parts[3], parts[4].replace("minecraft:", "", 1)
+            return f"坐标 ({x}, {y}, {z}) [{bdim}] 的方块是: {block}"
+        return BUS_TIMEOUT_TEXT["get_block"]
+
+    def _render_scan(self, req: Req, args: dict) -> str:
+        x1, y1, z1, x2, y2, z2 = (int(args[k]) for k in
+                                  ("x1", "y1", "z1", "x2", "y2", "z2"))
+        dim = (args.get("dimension") or "overworld").strip().lower()
+        filt = re.sub(r"\s+", "", args.get("filter") or "").lower()
+        xs, ys, zs = sorted((x1, x2)), sorted((y1, y2)), sorted((z1, z2))
+        ex, ey, ez = xs[1] - xs[0] + 1, ys[1] - ys[0] + 1, zs[1] - zs[0] + 1
+        rows, done = [], None
+        for body in req.lines:
+            if body.startswith("DONE"):
+                done = body[4:].strip()
+                continue
+            parts = body.split(" ", 4)
+            if len(parts) >= 5 and all(p.lstrip("-").isdigit() for p in parts[:3]):
+                rows.append(parts)
+        if done is None:
+            return BUS_TIMEOUT_TEXT["scan_blocks"]
+        info = dict(re.findall(r"(\w+)=([^\s]+)", done))
+        if "error" in info:
+            return f"扫描失败: {info['error']}"
+        total, matched = info.get("total", "?"), info.get("matched", "?")
+        unloaded, other = info.get("unloaded", "0"), info.get("other", "")
+        label = f'匹配 "{filt}"' if filt else "非空"
+        head = (f"切面 {ex}×{ey}×{ez} [{dim}] 共 {total} 格: {label} {matched} 格, "
+                f"未加载 {unloaded} 格")
+        if other:
+            head += f"; 其他方块: {other}"
+        limit = self.cfg.get("scan_result_limit", 6000)
+        out = [head]
+        for p in rows:
+            out.append(f"({p[0]}, {p[1]}, {p[2]}) {p[4].replace('minecraft:', '', 1)}")
+            if len("\n".join(out)) > limit:
+                out.append(f"...(结果过长, 已截断; 共匹配 {matched} 格)")
                 break
-            try:
-                with open(log_file, encoding="utf-8", errors="replace") as f:
-                    f.seek(offset)
-                    new = f.read()
-            except FileNotFoundError:
-                break
-            out = {}
-            if "[VIKTOR-INV] (无玩家在线)" in new:
-                empty_reported = True
-                break
-            waited = {}
-            for line in new.splitlines():
-                if m := RE_INV_DONE.search(line):
-                    rec = out.setdefault(m.group(1), {"slots": {}, "selected": int(m.group(2))})
-                    rec["selected"] = int(m.group(2))
-                    waited[m.group(1)] = True
-                elif m := RE_INV.search(line):
-                    rec = out.setdefault(m.group(1), {"slots": {}, "selected": -1})
-                    rec["slots"][int(m.group(2))] = (m.group(3).replace("minecraft:", ""), int(m.group(4)))
-            if waited:
-                time.sleep(0.4)  # 宽限, 让剩余槽位行到齐
-                with open(log_file, encoding="utf-8", errors="replace") as f:
-                    f.seek(offset)
-                    new = f.read()
-                out = {}
-                for line in new.splitlines():
-                    if m := RE_INV_DONE.search(line):
-                        out.setdefault(m.group(1), {"slots": {}, "selected": int(m.group(2))})["selected"] = int(m.group(2))
-                    elif m := RE_INV.search(line):
-                        out.setdefault(m.group(1), {"slots": {}, "selected": -1})["slots"][int(m.group(2))] = (
-                            m.group(3).replace("minecraft:", ""), int(m.group(4)))
-                break
-            time.sleep(0.2)
-        return out, (not out) and empty_reported
+        return "\n".join(out)
+
+    def _require_bus(self) -> str:
+        if self.bus_enabled:
+            return ""
+        return ("行为包脚本未响应协议握手(viktor:hello)。"
+                "请确认已更新并重载 viktor_bridge 行为包(需支持 r<id> 回显)。")
+
+    def _tool_get_position(self, args: dict) -> str:
+        if err := self._require_bus():
+            return err
+        return self._bus_call("get_player_position", args or {})
 
     def _pick_players(self, args: dict, data: dict) -> tuple[dict, str]:
         """按 player 参数筛选玩家, 返回 (选中, 错误信息)。"""
@@ -1306,142 +1613,19 @@ class Bot:
         return {}, f"玩家 {want} 不在线。当前在线: {', '.join(sorted(data))}"
 
     def _tool_get_hand(self, args: dict) -> str:
-        data, empty = self._query_inventory()
-        if self._abort().is_set():
-            return "已中止。"
-        if empty:
-            return "当前没有玩家在线, 取不到手持物品。"
-        if not data:
-            return "行为包脚本没有回应, 取不到手持物品(可能脚本未加载)。"
-        picked, err = self._pick_players(args, data)
-        if err:
+        if err := self._require_bus():
             return err
-        lines = []
-        for name, rec in sorted(picked.items()):
-            item = rec["slots"].get(rec["selected"])
-            if item:
-                lines.append(f"{name} 手持(槽{rec['selected']}): {item[0]} x{item[1]}")
-            else:
-                lines.append(f"{name} 空手")
-        return "\n".join(lines)[:600]
+        return self._bus_call("get_player_hand", args or {})
 
     def _tool_get_block(self, args: dict) -> str:
-        """读坐标方块。基岩版无 `data get block`, 靠行为包脚本 `scriptevent viktor:block` 上报。"""
-        try:
-            x, y, z = (int(args[k]) for k in ("x", "y", "z"))
-        except (KeyError, TypeError, ValueError):
-            return "需要整数坐标 x y z。"
-        dim = (args.get("dimension") or "overworld").strip().lower()
-        log_file = SERVER_LOG_PATH
-        try:
-            offset = log_file.stat().st_size
-        except FileNotFoundError:
-            return "无法读取服务器日志, 查不到方块。"
-        self.bridge.send_command(f"scriptevent viktor:block {x} {y} {z} {dim}")
-        deadline = time.time() + self.cfg.get("block_timeout_sec", 5)
-        while time.time() < deadline:
-            if self._abort().is_set():
-                return "已中止。"
-            try:
-                with open(log_file, encoding="utf-8", errors="replace") as f:
-                    f.seek(offset)
-                    new = f.read()
-            except FileNotFoundError:
-                break
-            for line in new.splitlines():
-                m = RE_BLOCK.search(line)
-                if not m:
-                    continue
-                body = m.group(1).strip()
-                if body.startswith("("):  # 脚本的提示/错误行, 例如区块未加载
-                    return f"查不到方块: {body}"
-                parts = body.split(" ", 4)
-                if len(parts) < 5:
-                    return f"脚本回包异常: {body}"
-                # 必须核对坐标: 同一时段可能还有别处发出的方块查询, 不能认领别人的回包
-                try:
-                    if (int(parts[0]), int(parts[1]), int(parts[2])) != (x, y, z):
-                        continue
-                except ValueError:
-                    return f"脚本回包异常: {body}"
-                bdim, block = parts[3], parts[4].replace("minecraft:", "", 1)
-                return f"坐标 ({x}, {y}, {z}) [{bdim}] 的方块是: {block}"
-            time.sleep(0.2)
-        return "行为包脚本没有回应, 查不到方块(可能脚本未加载, 或区块未加载)。"
+        if err := self._require_bus():
+            return err
+        return self._bus_call("get_block", args or {})
 
     def _tool_scan_blocks(self, args: dict) -> str:
-        """批量扫一个 1 格厚矩形切面。靠行为包脚本 `scriptevent viktor:scan` 一次循环扫完,
-        比逐个 get_block 快得多; 默认报非空气方块, 给了 filter 只报类型含该关键字的方块。"""
-        try:
-            x1, y1, z1, x2, y2, z2 = (int(args[k]) for k in
-                                      ("x1", "y1", "z1", "x2", "y2", "z2"))
-        except (KeyError, TypeError, ValueError):
-            return "需要整数坐标 x1 y1 z1 x2 y2 z2。"
-        dim = (args.get("dimension") or "overworld").strip().lower()
-        filt = re.sub(r"\s+", "", args.get("filter") or "").lower()
-        xs, ys, zs = sorted((x1, x2)), sorted((y1, y2)), sorted((z1, z2))
-        ex, ey, ez = xs[1] - xs[0] + 1, ys[1] - ys[0] + 1, zs[1] - zs[0] + 1
-        ext = sorted((ex, ey, ez))
-        if ext[0] != 1:
-            return f"这不是 1 格厚的切面({ex}×{ey}×{ez})。请让其中一个轴只有 1 格。"
-        if ext[2] > SCAN_MAX_SLICE:
-            return (f"切面单边最多 {SCAN_STATED_SLICE} 格(程序上限 {SCAN_MAX_SLICE}), "
-                    f"当前 {ex}×{ey}×{ez}, 请分几次扫描。")
-        log_file = SERVER_LOG_PATH
-        try:
-            offset = log_file.stat().st_size
-        except FileNotFoundError:
-            return "无法读取服务器日志, 查不到方块。"
-        cmd = f"scriptevent viktor:scan {x1} {y1} {z1} {x2} {y2} {z2} {dim}"
-        if filt:
-            cmd += f" {filt}"
-        self.bridge.send_command(cmd)
-        deadline = time.time() + self.cfg.get("scan_timeout_sec", 15)
-        rows, done = [], None
-        while time.time() < deadline:
-            if self._abort().is_set():
-                return "已中止。"
-            try:
-                with open(log_file, encoding="utf-8", errors="replace") as f:
-                    f.seek(offset)
-                    new = f.read()
-            except FileNotFoundError:
-                break
-            for line in new.splitlines():
-                m = RE_SCAN.search(line)
-                if not m:
-                    continue
-                body = m.group(1).strip()
-                if body.startswith("DONE"):
-                    done = body[4:].strip()
-                else:
-                    parts = body.split(" ", 4)
-                    if len(parts) >= 5 and all(p.lstrip("-").isdigit() for p in parts[:3]):
-                        rows.append(parts)
-            if done is not None:
-                break
-            time.sleep(0.2)
-        if done is None:
-            return "行为包脚本没有回应, 扫描失败(可能脚本未加载, 或区块未加载)。"
-        info = dict(re.findall(r"(\w+)=([^\s]+)", done))
-        if "error" in info:
-            return f"扫描失败: {info['error']}"
-        total, matched = info.get("total", "?"), info.get("matched", "?")
-        unloaded, other = info.get("unloaded", "0"), info.get("other", "")
-        label = f'匹配 "{filt}"' if filt else "非空"
-        head = (f"切面 {ex}×{ey}×{ez} [{dim}] 共 {total} 格: {label} {matched} 格, "
-                f"未加载 {unloaded} 格")
-        if other:
-            head += f"; 其他方块: {other}"
-        limit = self.cfg.get("scan_result_limit", 6000)
-        out, shown = [head], 0
-        for p in rows:
-            out.append(f"({p[0]}, {p[1]}, {p[2]}) {p[4].replace('minecraft:', '', 1)}")
-            shown += 1
-            if len("\n".join(out)) > limit:
-                out.append(f"...(结果过长, 已截断; 共匹配 {matched} 格)")
-                break
-        return "\n".join(out)
+        if err := self._require_bus():
+            return err
+        return self._bus_call("scan_blocks", args or {})
 
     def _extract_command_output(self, text: str, cmd: str) -> list[str]:
         """从日志文本里抽出指令输出。ERROR/WARN 行必须保留并加标记——
@@ -1498,6 +1682,10 @@ class Bot:
             time.sleep(0.3)
 
     def _tool_run_command(self, args: dict) -> str:
+        with self.console_gate:
+            return self._run_command_locked(args)
+
+    def _run_command_locked(self, args: dict) -> str:
         cmd = re.sub(r"[\r\n]+", " ", args["command"].strip()).lstrip("/").strip()
         if not cmd:
             return "空指令, 未执行。"
@@ -1517,6 +1705,10 @@ class Bot:
     # ---------- 常加载区域 ----------
 
     def _tool_pin_region(self, args: dict) -> str:
+        with self.console_gate:
+            return self._pin_region_locked(args)
+
+    def _pin_region_locked(self, args: dict) -> str:
         """pin_region: 创造/执行模式下把施工区域设为常加载(ticking area)。
         生命周期 = 创造/执行模式: 离开这些模式(切回 normal 等)或会话结束时由 _unpin_all 移除。"""
         try:
@@ -1608,6 +1800,10 @@ class Bot:
         return False, offset
 
     def _tool_backup_world(self, args: dict) -> str:
+        with self.console_gate:
+            return self._backup_world_locked(args)
+
+    def _backup_world_locked(self, args: dict) -> str:
         """按 BDS 官方热备份流程打包存档: save hold -> 7z -> save resume。
         必须保证无论如何都 save resume, 否则服务器会一直不再存盘。"""
         seven = shutil.which("7z") or shutil.which("7zz")
@@ -2047,10 +2243,7 @@ class Bot:
                 elif self._soft_abort().is_set():
                     result = "(已到安全点停止)"
                 else:
-                    # 读 server.log 回包的工具(坐标/方块/扫描/指令/备份)必须全局串行,
-                    # 否则并发的一次性对话会互相抢到对方的回包而答错。RLock 允许 ptc 嵌套。
-                    with self.tool_gate:
-                        result = capabilities.execute(fname, tc["function"].get("arguments", "{}"))
+                    result = capabilities.execute(fname, tc["function"].get("arguments", "{}"))
                 log(f"[能力] {fname} -> {result}")
                 if fname == "send_chat_message" or (fname == "ptc" and self._ptc_speaks(tc)):
                     spoke = True
@@ -2155,12 +2348,48 @@ class Bot:
 
     # ---------- 主循环 ----------
 
+    # ---------- 主循环 ----------
+
+    def _probe_bridge(self) -> bool:
+        """协议握手: 发 `viktor:hello <nonce>`, 等行为包回 `[VIKTOR-HELLO] <nonce> v2`。
+        确认行为包支持 v2(id 回显)才启用请求总线; 否则 bus 查询会明确报错而非错领回包。
+        config 的 bus_protocol 可强制: "auto"(默认, 探测) / "v2"(跳过探测) / "off"(禁用)。"""
+        mode = (self.cfg.get("bus_protocol") or "auto").lower()
+        if mode == "v2":
+            return True
+        if mode == "off":
+            return False
+        log_file = SERVER_LOG_PATH
+        try:
+            offset = log_file.stat().st_size
+        except FileNotFoundError:
+            offset = 0
+        nonce = f"p{int(time.time() * 1000) % 100000000}"
+        for _ in range(3):
+            self.bridge.send_command(f"scriptevent viktor:hello {nonce}")
+            deadline = time.time() + 2.0
+            while time.time() < deadline:
+                try:
+                    with open(log_file, encoding="utf-8", errors="replace") as f:
+                        f.seek(offset)
+                        new = f.read()
+                except FileNotFoundError:
+                    new = ""
+                if RE_HELLO.search(new) and nonce in new:
+                    return True
+                time.sleep(0.1)
+        return False
+
     def tail_loop(self):
         log_file = SERVER_LOG_PATH
         log_file.touch(exist_ok=True)
         self.offset = log_file.stat().st_size  # 只处理新内容
         self._cleanup_stale_pins()  # 先清残留(不与 list 校准抢日志)
         self.bridge.sync_player_count()
+        self.bus_enabled = self._probe_bridge()
+        log("[协议] 行为包交互协议: "
+            + ("v2 (id 路由 + 批量下发)" if self.bus_enabled
+               else "未握手成功, 服务端查询将报错(请重载 viktor_bridge 行为包)"))
         # 平滑重启: 若指定 VIKTOR_RESTORE=<落盘会话路径>, 启动时自动灌回(静默, 不发聊天)
         restore = os.environ.get("VIKTOR_RESTORE")
         if restore:
@@ -2196,6 +2425,7 @@ class Bot:
     def stop(self):
         log("收到退出信号")
         self.running = False
+        self.bus.stop()
         with self.cv:
             self.cv.notify_all()
         self._end_session()
@@ -2426,95 +2656,93 @@ def self_test():
     # 能力测试: 指令执行(不再有玩家白名单判定, 只保留危险指令黑名单)
     r = bot2._tool_run_command({"command": "/stop"})
     assert "禁止列表" in r, r
-    # 能力测试: 玩家坐标(行为包脚本通道; 抑制真实脚本响应, 注入假输出)
-    import threading
-    orig_send = bot2.bridge.send_command
-    bot2.bridge.send_command = lambda cmd: None
+    # 能力测试: 服务端查询走请求总线(协议 v2)。
+    # 假应答: 从下发命令里取请求 id, 同步拼回带同一个 id 的行; bus 读线程按 id 路由。
+    import re as _re
+    bot2.bus_enabled = True
+    orig_send_commands = bot2.bridge.send_commands
+    _responders = {}
 
-    def fake_pos():
-        time.sleep(0.6)
-        with open(SERVER_LOG_PATH, "a", encoding="utf-8") as f:
-            f.write("[2026-10-10 18:29:00:000 INFO] [Scripting] [VIKTOR-POS] "
-                    "kirin9000S 660.4 67 -268.3 minecraft:overworld\n")
+    def _fake_send_commands(cmds):
+        for cmd in cmds:
+            m = _re.search(r"viktor:(\w+)(?: (r\d+))?", cmd)
+            if not m:
+                continue
+            fn = _responders.get(m.group(1))
+            if not fn:
+                continue
+            for line in fn(cmd, m.group(2) or ""):
+                with open(SERVER_LOG_PATH, "a", encoding="utf-8") as f:
+                    f.write(line + "\n")
 
-    threading.Thread(target=fake_pos, daemon=True).start()
+    bot2.bridge.send_commands = _fake_send_commands
+
+    _responders["pos"] = lambda cmd, rid: [
+        f"[2026-10-10 18:29:00:000 INFO] [Scripting] [VIKTOR-POS] {rid} "
+        "kirin9000S 660 67 -268 minecraft:overworld",
+        f"[2026-10-10 18:29:00:000 INFO] [Scripting] [VIKTOR-POS] {rid} DONE",
+    ]
     r = bot2._tool_get_position({"player": "kirin9000S"})
-    assert "kirin9000S 的坐标" in r and "660.4" in r, r
+    assert "kirin9000S 的坐标" in r and "660" in r, r
     print(r)
 
-    def fake_pos_empty():
-        time.sleep(0.6)
-        with open(SERVER_LOG_PATH, "a", encoding="utf-8") as f:
-            f.write("[2026-10-10 18:29:01:000 INFO] [Scripting] [VIKTOR-POS] (无玩家在线)\n")
-
-    threading.Thread(target=fake_pos_empty, daemon=True).start()
+    _responders["pos"] = lambda cmd, rid: [
+        f"[2026-10-10 18:29:01:000 INFO] [Scripting] [VIKTOR-POS] {rid} (无玩家在线)",
+        f"[2026-10-10 18:29:01:000 INFO] [Scripting] [VIKTOR-POS] {rid} DONE",
+    ]
     r = bot2._tool_get_position({"player": "Ghost"})
     assert "没有玩家在线" in r, r
     print(r)
-    # 能力测试: 手持物品解析(注入假输出)
 
-    def fake_inv():
-        time.sleep(0.6)
-        with open(SERVER_LOG_PATH, "a", encoding="utf-8") as f:
-            f.write("[2026-10-10 18:30:00:000 INFO] [Scripting] [VIKTOR-INV] TestPlayer 0 diamond 3\n")
-            f.write("[2026-10-10 18:30:00:000 INFO] [Scripting] [VIKTOR-INV] TestPlayer 5 iron_pickaxe 1\n")
-            f.write("[2026-10-10 18:30:00:000 INFO] [Scripting] [VIKTOR-INV] TestPlayer DONE 5\n")
-
-    threading.Thread(target=fake_inv, daemon=True).start()
+    # 能力测试: 手持物品解析(按 id 路由)
+    _responders["inv"] = lambda cmd, rid: [
+        f"[2026-10-10 18:30:00:000 INFO] [Scripting] [VIKTOR-INV] {rid} TestPlayer 0 diamond 3",
+        f"[2026-10-10 18:30:00:000 INFO] [Scripting] [VIKTOR-INV] {rid} TestPlayer 5 iron_pickaxe 1",
+        f"[2026-10-10 18:30:00:000 INFO] [Scripting] [VIKTOR-INV] {rid} TestPlayer DONE 5",
+        f"[2026-10-10 18:30:00:000 INFO] [Scripting] [VIKTOR-INV] {rid} DONE",
+    ]
     r = bot2._tool_get_hand({"player": "TestPlayer"})
     assert "iron_pickaxe x1" in r, r
     print(r)
 
-    # 能力测试: 读坐标方块(行为包脚本通道)
-    def fake_block():
-        time.sleep(0.6)
-        with open(SERVER_LOG_PATH, "a", encoding="utf-8") as f:
-            f.write("[2026-10-10 18:31:00:000 INFO] [Scripting] [VIKTOR-BLOCK] "
-                    "660 66 -269 minecraft:overworld minecraft:grass_block\n")
-
-    threading.Thread(target=fake_block, daemon=True).start()
+    # 能力测试: 读坐标方块
+    _responders["block"] = lambda cmd, rid: [
+        f"[2026-10-10 18:31:00:000 INFO] [Scripting] [VIKTOR-BLOCK] {rid} "
+        "660 66 -269 minecraft:overworld minecraft:grass_block",
+    ]
     r = bot2._tool_get_block({"x": 660, "y": 66, "z": -269})
     assert "grass_block" in r and "(660, 66, -269)" in r, r
     print(r)
 
-    def fake_block_err():
-        time.sleep(0.6)
-        with open(SERVER_LOG_PATH, "a", encoding="utf-8") as f:
-            f.write("[2026-10-10 18:31:01:000 INFO] [Scripting] [VIKTOR-BLOCK] "
-                    "(区块未加载或超出世界高度: 73 73 1)\n")
-
-    threading.Thread(target=fake_block_err, daemon=True).start()
+    _responders["block"] = lambda cmd, rid: [
+        f"[2026-10-10 18:31:01:000 INFO] [Scripting] [VIKTOR-BLOCK] {rid} "
+        "(区块未加载或超出世界高度: 73 73 1)",
+    ]
     r = bot2._tool_get_block({"x": 73, "y": 73, "z": 1})
     assert "区块未加载" in r, r
     print(r)
 
-    # 不回领别人的回包: 先写一行"别人查的坐标", 再写本次要的坐标
-    def fake_block_other():
-        time.sleep(0.5)
-        with open(SERVER_LOG_PATH, "a", encoding="utf-8") as f:
-            f.write("[2026-10-10 18:31:02:000 INFO] [Scripting] [VIKTOR-BLOCK] "
-                    "999 99 999 minecraft:overworld minecraft:bedrock\n")
-            time.sleep(0.4)
-            f.write("[2026-10-10 18:31:03:000 INFO] [Scripting] [VIKTOR-BLOCK] "
-                    "12 34 56 minecraft:overworld minecraft:obsidian\n")
-
-    threading.Thread(target=fake_block_other, daemon=True).start()
+    # id 路由: 别人的回包(不同 id)不会被认领
+    _responders["block"] = lambda cmd, rid: [
+        "[2026-10-10 18:31:02:000 INFO] [Scripting] [VIKTOR-BLOCK] r999999 "
+        "999 99 999 minecraft:overworld minecraft:bedrock",
+        f"[2026-10-10 18:31:03:000 INFO] [Scripting] [VIKTOR-BLOCK] {rid} "
+        "12 34 56 minecraft:overworld minecraft:obsidian",
+    ]
     r = bot2._tool_get_block({"x": 12, "y": 34, "z": 56})
     assert "obsidian" in r and "bedrock" not in r, r
     print(r)
     assert "需要整数坐标" in bot2._tool_get_block({"x": "a", "y": 1, "z": 2})
-    # 能力测试: 批量扫描切面(行为包脚本通道)
-    def fake_scan():
-        time.sleep(0.6)
-        with open(SERVER_LOG_PATH, "a", encoding="utf-8") as f:
-            f.write("[2026-10-10 18:32:00:000 INFO] [Scripting] [VIKTOR-SCAN] "
-                    "320 64 -460 minecraft:overworld minecraft:grass_block\n")
-            f.write("[2026-10-10 18:32:00:000 INFO] [Scripting] [VIKTOR-SCAN] "
-                    "321 64 -460 minecraft:overworld minecraft:grass_block\n")
-            f.write("[2026-10-10 18:32:00:000 INFO] [Scripting] [VIKTOR-SCAN] "
-                    "DONE total=4 matched=2 unloaded=0 other=air=2\n")
 
-    threading.Thread(target=fake_scan, daemon=True).start()
+    # 能力测试: 批量扫描切面
+    _responders["scan"] = lambda cmd, rid: [
+        f"[2026-10-10 18:32:00:000 INFO] [Scripting] [VIKTOR-SCAN] {rid} "
+        "320 64 -460 minecraft:overworld minecraft:grass_block",
+        f"[2026-10-10 18:32:00:000 INFO] [Scripting] [VIKTOR-SCAN] {rid} "
+        "321 64 -460 minecraft:overworld minecraft:grass_block",
+        f"[2026-10-10 18:32:00:000 INFO] [Scripting] [VIKTOR-SCAN] {rid} "
+        "DONE total=4 matched=2 unloaded=0 other=air=2",
+    ]
     rs = bot2._tool_scan_blocks({"x1": 320, "y1": 64, "z1": -460,
                                  "x2": 321, "y2": 64, "z2": -459, "filter": "grass"})
     assert "共 4 格" in rs and "grass_block" in rs and "air=2" in rs, rs
@@ -2524,7 +2752,29 @@ def self_test():
                                                "x2": 2, "y2": 2, "z2": 2})
     assert "分几次" in bot2._tool_scan_blocks({"x1": 0, "y1": 0, "z1": 0,
                                               "x2": 30, "y2": 0, "z2": 30})
-    bot2.bridge.send_command = orig_send
+
+    # 并发批测: ptc 里连续的多个 scan 只触发 1 次 send_commands(整批一次下发)
+    capabilities.set_bus_batch_runner(bot2._run_bus_batch)
+    _batches = []
+
+    def _counting_send(cmds):
+        _batches.append(list(cmds))
+        _fake_send_commands(cmds)
+
+    bot2.bridge.send_commands = _counting_send
+    capabilities.set_ptc_limit(10)
+    _ptc = json.dumps({"calls": [
+        {"tool": "scan_blocks", "arguments": {"x1": 0, "y1": 0, "z1": 0, "x2": 0, "y2": 0, "z2": 15, "filter": "grass"}},
+        {"tool": "scan_blocks", "arguments": {"x1": 0, "y1": 0, "z1": 16, "x2": 0, "y2": 0, "z2": 31, "filter": "grass"}},
+        {"tool": "scan_blocks", "arguments": {"x1": 0, "y1": 0, "z1": 32, "x2": 0, "y2": 0, "z2": 47, "filter": "grass"}},
+    ]})
+    _r = capabilities.execute("ptc", _ptc)
+    assert len(_batches) == 1 and len(_batches[0]) == 3, _batches
+    assert _r.count("切面") == 3, _r
+    print("PTC 查询批量下发自测 OK")
+
+    bot2.bridge.send_commands = orig_send_commands
+    bot2.bus_enabled = False
 
     # 指令执行: 输出必须包含 ERROR/WARN 行, 否则模型看不到失败会编造成功
     sample = ('[2026-10-10 22:11:52:487 ERROR] Syntax error: Unexpected "20"\n'

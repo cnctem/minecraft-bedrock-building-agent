@@ -34,6 +34,9 @@
   "creative_notice": "创造模式已开启: 我在深度思考, 可能要等一会儿, 请稍候。",
   "context_safety_tokens": 4096,
   "poll_interval_sec": 0.5,
+  "bus_protocol": "auto",
+  "bus_reader_poll_sec": 0.05,
+  "bus_batch_max": 8,
   "reply_chunk_len": 120,
   "reply_max_chunks": 3,
   "command_blocklist": [

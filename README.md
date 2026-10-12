@@ -135,7 +135,7 @@ python3 bot.py --test         # 解析逻辑自测
 | `pin_region(x1, z1, x2, z2)` | **仅创造/执行模式下可用**：把施工面设为常加载（ticking area，自动按 ≤100 区块切片）：防止玩家走开/离线后区块卸载导致 fill 失败。**生命周期 = 创造/执行模式**：离开这些模式（切回 normal 等）或会话结束时自动移除 |
 | `backup_world()` | 把当前存档热备份成 `.7z`（`save hold` → 7z → `save resume`） |
 | `set_mode(mode, reason?)` | 切换运行模式；可选目标按当前模式动态注入（普通↔创造/创造max；计划→执行；一次性无此工具） |
-| `ptc(calls, stop_on_error?)` | 批量工具调用：一次提交多条工具调用，串行执行后合并成一条结果（省往返与上下文） |
+| `ptc(calls, stop_on_error?)` | 批量工具调用：一次提交多条工具调用，合并成一条结果。连续的查询类调用（坐标/手持/方块/扫描）会合成一批一次性下发，只等一趟往返；施工/状态变更仍按顺序串行（省往返与上下文） |
 
 能力注册表在 `capabilities.py`，可运行时 `register()` 扩展。
 
@@ -181,14 +181,25 @@ python3 bot.py --test         # 解析逻辑自测
 BDS 控制台 **不回显玩家聊天**，所以用行为包 `viktor_bridge` 订阅事件并 `console.log`：
 
 - `world.beforeEvents.chatSend` → `[VIKTOR-CHAT] 玩家: 内容`
-- `scriptevent viktor:pos` → `[VIKTOR-POS] 玩家 x y z 维度`（整数方块坐标，与玩家屏幕一致）
-- `scriptevent viktor:inv` → `[VIKTOR-INV] 玩家 槽位 物品 数量`（末行 `DONE 手持槽位`）
-- `scriptevent viktor:block <x> <y> <z> [维度]` → `[VIKTOR-BLOCK] x y z 维度 方块ID [状态]`
-- `scriptevent viktor:scan <x1> <y1> <z1> <x2> <y2> <z2> [维度] [过滤]` → 逐行 `[VIKTOR-SCAN] x y z 维度 方块ID [状态]`，末行 `[VIKTOR-SCAN] DONE total=.. matched=.. unloaded=.. other=..`
+- **协议 v2**：bot 在事件参数最前面带一个请求 id `r<数字>`，脚本把该 id 原样回显在每一行里；bot 可一次下发整批请求、按 id 认领各自回包（见下文「服务端请求总线」）。不带 id 时保持旧格式，向后兼容。
+- `scriptevent viktor:pos [id]` → `[VIKTOR-POS] [id] 玩家 x y z 维度`（整数方块坐标，与玩家屏幕一致），末行 `[VIKTOR-POS] [id] DONE`
+- `scriptevent viktor:inv [id]` → `[VIKTOR-INV] [id] 玩家 槽位 物品 数量`（每人末行 `DONE 手持槽位`，全体末行 `[VIKTOR-INV] [id] DONE`）
+- `scriptevent viktor:block [id] <x> <y> <z> [维度]` → `[VIKTOR-BLOCK] [id] x y z 维度 方块ID [状态]`
+- `scriptevent viktor:scan [id] <x1> <y1> <z1> <x2> <y2> <z2> [维度] [过滤]` → 逐行 `[VIKTOR-SCAN] [id] x y z 维度 方块ID [状态]`，末行 `[VIKTOR-SCAN] [id] DONE total=.. matched=.. unloaded=.. other=..`。扫描用 `system.runJob` 周期性让出主线程，不再卡世界。
+- `scriptevent viktor:hello <nonce>` → `[VIKTOR-HELLO] <nonce> v2`：bot 启动时的协议握手，确认行为包装了新协议后才启用请求总线
 - `scriptevent viktor:ids` → 分块输出全部物品/方块 ID（`[VIKTOR-IDS] ITEMS/BLOCKS …`、末行 `DONE`），供离线重建 ID 速查表
 
 需要 `@minecraft/server` 的 **beta** 模块与 `level.dat` 里的实验开关。
 修改脚本后用控制台 `reload` 热重载，不必重启服务器。
+
+#### 服务端请求总线（降低查询延迟）
+
+`bedrock_server` 每隔约 0.8–1.0s 才把 stdin 里积压的控制台命令整批读走一次。因此逐个下发查询要逐个等 ~1s，
+而把一批 `r<id>` 请求一次 `stuff` 进去只付一次轮询延迟。`bot.py` 的 `ServerBus` 负责：登记 → 一次下发 →
+一个读线程 tail `server.log` 按 `[VIKTOR-*] r<id>` 路由 → 各请求按自己的 id 收齐。
+`ptc` 里连续的查询类调用会自动合成一批下发（每批上限 `bus_batch_max`）；
+指令执行/常加载/备份这类“读任意控制台输出、无法按 id 认领”的工具仍用 `console_gate` 串行。
+若行为包未升级（`viktor:hello` 无响应），查询工具会明确报错提示重载行为包，而不是错领回包。
 
 ### 指令安全
 
@@ -261,6 +272,9 @@ BDS 控制台 **不回显玩家聊天**，所以用行为包 `viktor_bridge` 订
 | `mc_server_dir` | 服务器目录（备份时定位世界存档） |
 | `command_blocklist` | 禁止执行的指令 |
 | `command_result_timeout_sec` / `position_timeout_sec` / `inventory_timeout_sec` / `block_timeout_sec` / `scan_timeout_sec` | 等待脚本/控制台回包的秒数 |
+| `bus_protocol` | 服务端请求总线协议：`auto`（默认，用 `viktor:hello` 探测）/ `v2`（跳过探测）/ `off`（禁用，查询报错） |
+| `bus_reader_poll_sec` | 总线读线程 tail `server.log` 的轮询间隔（默认 0.05） |
+| `bus_batch_max` | 一次下发给服务端的查询请求上限（默认 8），保护服务端主线程 |
 | `scan_result_limit` | `scan_blocks` 返回文本的字符上限（超出截断） |
 | `normal_effort` / `creative_effort` / `creative_max_effort` | 各模式的思考强度（low / high / max） |
 | `oneshot_effort` / `oneshot_max_reply_tokens` / `oneshot_max_tool_rounds` / `oneshot_max_concurrent` | 一次性对话的思考强度、输出上限、工具轮次上限与最大并发数（默认 low / 6000 / 4 / 4） |
