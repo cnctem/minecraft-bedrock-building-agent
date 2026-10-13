@@ -8,14 +8,26 @@ AI 人设：**维克托·米哈伊洛维奇·切布里科夫 (Viktor Chebrikov)*
 ## 架构
 
 ```
-玩家聊天 → bedrock_server → screen 日志(logs/server.log)
-                                  │ tail 解析
-                   bot.py → viktor/ 包(滚动上下文)
-                                  │
-                            DeepSeek API
-                                  │
-              screen -X stuff "tellraw @a ..." → 游戏内显示
+   ┌── 玩家聊天(行为包 viktor_bridge 桥接) / 进出服(BDS 原生日志) / 查询回包([VIKTOR-*] r<id>)
+   ▼
+bedrock_server ───► screen 日志(logs/server.log)
+   ▲                     │ tail 解析(viktor/bot_app.py)
+   │                     ▼
+   │            会话上下文(append-only, 前缀缓存)
+   │                     │
+   │          Agent 循环(viktor/bot_agent.py) ⇄ DeepSeek API
+   │                     │ function calling 工具执行
+   │          capabilities.py + viktor/bot_tools.py
+   │                     │
+   └── screen -X stuff ◄─┘
+       tellraw 回复 / 服务端指令 / scriptevent 查询
 ```
+
+- 上下文**只追加、不滚动**：不裁剪、不重排、不做滑动窗口；切模式/更新记忆只往日志尾部追加
+  系统注记，保持 DeepSeek 前缀缓存命中。超过输入预算时**整段清空重开会话**（旧会话已落盘，
+  可用「恢复会话」找回），不做滚动截断。
+- 查询类工具(坐标/手持/方块/扫描)经 `scriptevent` 交给行为包脚本执行，回包同样落进 `server.log`，
+  由 `ServerBus` 按请求 id 路由（见下文「服务端请求总线」）。
 
 零第三方依赖，只用 Python 3.11+ 标准库。
 
@@ -296,8 +308,7 @@ BDS 控制台 **不回显玩家聊天**，所以用行为包 `viktor_bridge` 订
 | `model` / `temperature` / `max_reply_tokens` / `api_timeout_sec` | DeepSeek 参数 |
 | `api_min_interval_sec` | 全局 API 最小间隔（保护缓存前缀顺序与限流）；每次尝试（含重试）都遵守 |
 | `api_max_attempts` / `api_retry_backoff_sec` | 单次 API 请求的最大尝试次数（默认 3）与指数退避基数秒（默认 1，上限 30s，尊重 `Retry-After`）。只对超时/429/5xx 等瞬态错误重试；400/401 等直接失败。全部尝试失败时回一条 `[系统]` 告诉玩家稍后重发 |
-| `max_context_messages` / `creative_max_context_messages` | 上下文按**消息条数**兜底截断的上限（现设 100 万 ≈ 取消；条数不等于 token） |
-| `context_window_tokens` / `context_safety_tokens` | 模型窗口（`deepseek-flash` 为 1M）与安全余量。输入预算 = 窗口 − 本轮输出上限 − 余量，从最新消息往回累加，超出就从 user 边界截断 |
+| `context_window_tokens` / `context_safety_tokens` | 模型窗口（`deepseek-flash` 为 1M）与安全余量。输入预算 = 窗口 − 本轮输出上限 − 余量；会话上下文**永不裁剪**，估算体积超出预算时整段清空并完整初始化（旧会话落盘，可「恢复会话」找回） |
 | `reply_chunk_len` / `reply_max_chunks` | 回复分片发送，防止过长 |
 | `mc_server_dir` | 服务器目录（备份时定位世界存档） |
 | `command_blocklist` | 禁止执行的指令 |
