@@ -10,7 +10,7 @@ AI 人设：**维克托·米哈伊洛维奇·切布里科夫 (Viktor Chebrikov)*
 ```
 玩家聊天 → bedrock_server → screen 日志(logs/server.log)
                                   │ tail 解析
-                            bot.py(滚动上下文)
+                   bot.py → viktor/ 包(滚动上下文)
                                   │
                             DeepSeek API
                                   │
@@ -18,6 +18,36 @@ AI 人设：**维克托·米哈伊洛维奇·切布里科夫 (Viktor Chebrikov)*
 ```
 
 零第三方依赖，只用 Python 3.11+ 标准库。
+
+## 代码结构
+
+`bot.py` 只是入口（命令行参数 + 启动），实现全部在 `viktor/` 包里，按职责分层，**依赖方向严格单向向下、无环**：
+
+```
+bot.py(入口) → viktor.selftest(--test)
+                   │
+        viktor.Bot = BotCoreMixin + BotControlMixin + BotToolsMixin
+                     + BotAgentMixin + BotAppMixin    ← 职责 mixin, 彼此不 import,
+                   │                                     只用 self.* 经 MRO 协作
+        session / bus / bridge / config / profiles
+                   │
+        paths / constants / prompts / schemas          ← 叶子层(不依赖项目内其它模块)
+```
+
+| 模块 | 职责 |
+|---|---|
+| `viktor/bot_core.py` | 构造、请求上下文(`_tls` 回落)、会话生命周期、待处理队列 |
+| `viktor/bot_control.py` | 控制词(停止/清空/计划模式/恢复会话)、一次性对话调度 |
+| `viktor/bot_tools.py` | 全部 `_tool_*` handler：聊天/查询(bus)/指令/常加载/备份/模式切换 |
+| `viktor/bot_agent.py` | 模式参数、DeepSeek function calling 循环、worker 与收尾汇报 |
+| `viktor/bot_app.py` | `logs/server.log` tail 解析、启动握手、主循环 |
+| `viktor/session.py` | `Session`(append-only 上下文) 与 `OneShotContext` |
+| `viktor/bus.py` / `viktor/bridge.py` | 服务端请求总线 / `screen` 注入与 `tellraw` |
+| `viktor/profiles.py` | 模式组合表：提示词 × 限制 × 工具白名单 |
+| `viktor/prompts.py` / `viktor/schemas.py` / `viktor/constants.py` / `viktor/paths.py` | 提示词 / 工具 schema / 常量 / 路径与日志(叶子层) |
+| `capabilities.py` | 能力注册表(工具注册、ptc、记忆、技能书、物品速查) |
+
+改一个方向的东西只需要动对应层：加工具 = `schemas.py` + `bot_tools.py`；调模式 = `profiles.py`；改提示词 = `prompts.py`。
 
 ## 会话与上下文机制
 
@@ -49,7 +79,7 @@ AI 人设：**维克托·米哈伊洛维奇·切布里科夫 (Viktor Chebrikov)*
 - **creative_max（创造max）**：仅当玩家明确要求“最好/最强/最大/max/不惜代价”这类最高规格时才切到。
   `effort=max`，且上述各项上限在 creative 基础上再翻倍（工具轮次 32→64 等），最慢最贵。
 
-模式由三张正交 profile 表组合而成（`bot.py` 里 `PROMPTS` / `LIMITS` / `TOOLS` + `Mode`/`MODES`）：
+模式由三张正交 profile 表组合而成（`viktor/profiles.py` 里 `PROMPTS` / `LIMITS` / `TOOLS` + `Mode`/`MODES`）：
 **提示词**决定行为、**限制**决定数值预算（effort、输出 token、工具轮次、ptc 批量）、**工具白名单**决定模型能看到哪些工具。
 `creative_max` = creative 的提示词 + 同一份 heavy 限制 ×2 + effort max；计划/执行模式就是共用 heavy 限制、只换提示词的例子。
 
@@ -195,7 +225,7 @@ BDS 控制台 **不回显玩家聊天**，所以用行为包 `viktor_bridge` 订
 #### 服务端请求总线（降低查询延迟）
 
 `bedrock_server` 每隔约 0.8–1.0s 才把 stdin 里积压的控制台命令整批读走一次。因此逐个下发查询要逐个等 ~1s，
-而把一批 `r<id>` 请求一次 `stuff` 进去只付一次轮询延迟。`bot.py` 的 `ServerBus` 负责：登记 → 一次下发 →
+而把一批 `r<id>` 请求一次 `stuff` 进去只付一次轮询延迟。`viktor/bus.py` 的 `ServerBus` 负责：登记 → 一次下发 →
 一个读线程 tail `server.log` 按 `[VIKTOR-*] r<id>` 路由 → 各请求按自己的 id 收齐。
 `ptc` 里连续的查询类调用会自动合成一批下发（每批上限 `bus_batch_max`）；
 指令执行/常加载/备份这类“读任意控制台输出、无法按 id 认领”的工具仍用 `console_gate` 串行。
@@ -299,6 +329,7 @@ BDS 控制台 **不回显玩家聊天**，所以用行为包 `viktor_bridge` 订
 - `logs/sessions/*.jsonl` — 每次会话的完整上下文存档
 - `memory.md` — 长期记忆（会话开始时注入为系统注记；人工直接改动在下一次会话生效，`update_memory` 则即时追加新注记），备份在 `logs/memory-backup/`
 - `capabilities.py` — 能力注册表
+- `viktor/` — 机器人实现包：入口组装(`__init__.py`) + 职责 mixin(`bot_*.py`) + 会话/总线/桥/模式/提示词/schema/常量/自测(详见“代码结构”)
 - `data/items.json` — 物品/方块 ID 速查表（`tools/build_items.py` 生成；含中文名、分类、别名）
 - `data/raw_ids.txt` — `scriptevent viktor:ids` 导出的原始 ID 清单（重建速查表的输入）
 - `data/item_aliases.json` — 手写的同义词/Java 名/口语别名
