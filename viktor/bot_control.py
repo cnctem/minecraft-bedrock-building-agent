@@ -1,9 +1,10 @@
-"""控制面: 停止/清空/压缩/计划模式/恢复会话/一次性对话等硬编码控制词(不走模型)。
+"""控制面: 停止/清空/压缩/状态/备份/计划模式/恢复会话/一次性对话等硬编码控制词(不走模型)。
 
 依赖方向: bot_control → session/profiles/constants/paths/capabilities; 不 import 其它 bot_* 模块。
 """
 import json
 import re
+import subprocess
 import threading
 from pathlib import Path
 
@@ -38,7 +39,7 @@ class BotControlMixin:
 
     def _on_force_stop(self, name: str):
         """玩家发来完全匹配的“强制停止”: 立即中止运行中的任务, 不经过模型。
-        连工具内部的轮询等待也一并打断。"""
+        连工具内部的轮询等待也一并打断; 备份不可中止(只回提示, 不置位任何标志)。"""
         with self.cv:
             busy = self.agent_busy or bool(self.pending)
             self.pending.clear()  # 尚未开始处理的消息也一并作废
@@ -46,6 +47,9 @@ class BotControlMixin:
             self.abort.set()
             log(f"[强制停止] {name} 要求强制停止, 已向运行中的任务发出中止信号")
             msg = "已强制停止当前任务。"
+        elif self._backup_running:
+            log(f"[强制停止] {name} 要求强制停止, 但备份不可中止")
+            msg = "备份正在进行中, 无法中止, 请稍候。"
         else:
             log(f"[强制停止] {name} 要求强制停止, 但当前没有运行中的任务")
             msg = "当前没有正在执行的任务。"
@@ -193,6 +197,81 @@ class BotControlMixin:
         self._apply_compact(msgs, stats)
         return stats
 
+    # ---------- 状态 / 备份(硬编码控制词, 不走模型) ----------
+
+    def _on_status(self, name: str):
+        """玩家发来完全匹配的“状态”: 播报服务器进程/负载与在线玩家(≤2 条 [系统])。
+        纯读操作, 任何时候(任务进行中/备份中)都可触发; 永不抛异常。"""
+        parts = []
+        try:
+            pids = subprocess.run(["pgrep", "-x", "bedrock_server"],
+                                  capture_output=True, text=True).stdout.split()
+            if pids:
+                out = subprocess.run(
+                    ["ps", "-o", "%cpu=,%mem=,rss=,etime=", "-p", pids[0]],
+                    capture_output=True, text=True).stdout.split()
+                if len(out) == 4:
+                    cpu, mem, rss, etime = out
+                    parts.append(f"bedrock_server(PID {pids[0]}): CPU {cpu}%, "
+                                 f"内存 {int(rss) // 1024}MB, 已运行 {etime}")
+            if not parts:
+                parts.append("警告: 找不到 bedrock_server 进程")
+        except Exception as e:
+            parts.append(f"警告: 进程状态读取失败({e})")
+        try:
+            with open("/proc/loadavg") as f:
+                parts.append("负载 " + "/".join(f.read().split()[:3]))
+        except Exception:
+            pass  # 读不到负载(如非 Linux)就不报, 不影响其余状态
+        players = sorted(self.players)
+        log(f"[状态] {name} 查询服务器状态: {'; '.join(parts)}; 在线 {len(players)} 人")
+        self._sys("; ".join(parts))
+        self._sys(f"在线玩家 {len(players)} 人" + (f": {', '.join(players)}" if players else ""))
+
+    def _on_backup(self, name: str):
+        """玩家发来完全匹配的“备份”: 触发存档热备份(后台线程执行, 不可中止)。
+        与「清空」同一并发规则: 有任务在跑(或队列有待处理消息)时无效——
+        只回一句提示; 已在备份中则提示稍候。控制词不进上下文。"""
+        with self.cv:
+            busy = self.agent_busy or bool(self.pending)
+        if self._backup_running:
+            self._sys("备份正在进行中, 请稍候。")
+            return
+        if busy:
+            log(f"[备份] {name} 要求备份, 但有任务在进行, 备份无效")
+            self._sys("现在有任务正在进行, 备份无效。请先发「停止」(做完当前这一步再停)"
+                      "或「强制停止」(立即中止), 停下来后再备份。")
+            return
+        log(f"[备份] {name} 触发存档热备份")
+        self._backup_running = True
+        threading.Thread(target=self._run_backup, daemon=True).start()
+
+    def _run_backup(self):
+        """备份工作线程: 播报开始 → save hold → 7z → save resume → 播报结果。
+        不可中止: 线程内装一枚永不置位的 abort 事件, 「强制停止」打断不了备份;
+        结束时复位 _backup_running 并唤醒 worker(备份期间消息只排队, 备份完再处理)。"""
+        self._tls.abort = threading.Event()  # 永不置位 = 备份不可中止
+        self._sys("正在备份存档, 服务器会卡几十秒, 请稍候…")
+        try:
+            with self.console_gate:
+                out = self._backup_world_locked({})
+        except Exception as e:
+            log(f"[备份] 出错: {e}")
+            out = f"出错: {e}"
+        finally:
+            try:
+                del self._tls.abort
+            except AttributeError:
+                pass
+            self._backup_running = False
+            with self.cv:
+                self.cv.notify_all()
+        if out.startswith("备份完成"):
+            self._sys(out)
+        else:
+            log(f"[备份] 未完成: {out}")
+            self._sys(f"备份失败: {out}")
+
     def _reset_session(self) -> int:
         """完整初始化: 结束当前会话(落盘、复位任何非普通模式)并开启一个全新会话。
         玩家发“清空”与“玩家数 0→1”走同一套初始化; 返回被丢弃的消息条数。"""
@@ -223,6 +302,16 @@ class BotControlMixin:
                         self.mode = name
                         break
                 break
+        # 技能目录可能在会话落盘后才变动: 恢复时若最新技能清单与旧的不同, 在末尾补一条。
+        # 只追加、不改前缀 -> 前缀缓存仍命中; 否则新增技能书要等到下次“清空/新会话”才可见。
+        note = capabilities.skills_note()
+        if note:
+            old = next((m.get("content") or "" for m in reversed(msgs)
+                        if m.get("role") == "system"
+                        and (m.get("content") or "").startswith("# 可用技能书(skill)")), "")
+            if old.strip() != note.strip():
+                self.session.add_system(note)
+                log("[恢复] 技能清单已更新, 末尾补注入一条")
         log(f"[恢复] 从 {p.name} 灌回 {len(msgs)} 条消息, 模式={MODES[self.mode].label}")
 
     def _on_restore_session(self, name: str):
@@ -304,6 +393,10 @@ class BotControlMixin:
         self._spawn_oneshot(name, body)
 
     def _spawn_oneshot(self, name: str, body: str) -> None:
+        if self._backup_running:
+            log(f"[一次性] {name} 触发被拒: 备份进行中")
+            self._sys("备份正在进行中, 请稍后再发一次性对话。")
+            return
         with self._oneshot_lock:
             if self._oneshot_active >= self.oneshot_max_concurrent:
                 full, active = True, self._oneshot_active

@@ -18,15 +18,6 @@ SEND_CHAT_SCHEMA = {
     },
 }
 
-GET_STATUS_SCHEMA = {
-    "type": "function",
-    "function": {
-        "name": "get_server_status",
-        "description": "查询 MC 服务器进程状态: CPU/内存占用、运行时长、系统负载、当前在线玩家。",
-        "parameters": {"type": "object", "properties": {}},
-    },
-}
-
 GET_POSITION_SCHEMA = {
     "type": "function",
     "function": {
@@ -122,19 +113,6 @@ SCAN_BLOCKS_SCHEMA = {
             },
             "required": ["x1", "y1", "z1", "x2", "y2", "z2"],
         },
-    },
-}
-
-BACKUP_SCHEMA = {
-    "type": "function",
-    "function": {
-        "name": "backup_world",
-        "description": (
-            "把当前世界存档打包成一个 .7z 备份文件, 返回文件路径与大小。"
-            "仅在玩家明确要求备份存档时调用。备份会把世界短暂写盘并压缩一遍, "
-            "期间服务器会停顿几十秒, 玩家会感到卡顿, 所以不要与其它改世界的指令同时做。"
-        ),
-        "parameters": {"type": "object", "properties": {}},
     },
 }
 

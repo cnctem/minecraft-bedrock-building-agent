@@ -3,7 +3,10 @@
 依赖方向: bot_core → bridge/bus/session/schemas/profiles/constants/paths; 不 import 其它 bot_* 模块。
 与其它职责模块只通过 self.* 方法协作(MRO 组合), 模块之间没有互相 import。
 """
+import json
+import os
 import threading
+import time
 
 import capabilities
 
@@ -14,11 +17,9 @@ from .constants import CREATIVE_MODES, MODE_NORMAL
 from .paths import log
 from .profiles import MODES
 from .schemas import (
-    BACKUP_SCHEMA,
     GET_BLOCK_SCHEMA,
     GET_HAND_SCHEMA,
     GET_POSITION_SCHEMA,
-    GET_STATUS_SCHEMA,
     PIN_REGION_SCHEMA,
     RUN_COMMAND_SCHEMA,
     SCAN_BLOCKS_SCHEMA,
@@ -42,13 +43,11 @@ class BotCoreMixin:
         capabilities.set_bus_batch_max(cfg.get("bus_batch_max", 8))
         capabilities.register("send_chat_message", SEND_CHAT_SCHEMA, self._tool_send_message)
         capabilities.register("use_skill", capabilities.USE_SKILL_SCHEMA, self._tool_use_skill)
-        capabilities.register("get_server_status", GET_STATUS_SCHEMA, self._tool_server_status)
         capabilities.register("run_server_command", RUN_COMMAND_SCHEMA, self._tool_run_command)
         capabilities.register("get_player_position", GET_POSITION_SCHEMA,
                              self._tool_get_position, concurrency="bus")
         capabilities.register("get_player_hand", GET_HAND_SCHEMA,
                              self._tool_get_hand, concurrency="bus")
-        capabilities.register("backup_world", BACKUP_SCHEMA, self._tool_backup_world)
         capabilities.register("set_mode", SET_MODE_SCHEMA, self._tool_set_mode)
         capabilities.register("get_block", GET_BLOCK_SCHEMA,
                              self._tool_get_block, concurrency="bus")
@@ -85,6 +84,26 @@ class BotCoreMixin:
         self._pinned: list[str] = []     # 本轮任务设置的常加载区域名(轮次结束自动移除)
         self.body_forward = False        # 正文转发开关(玩家用「正文开/关」切换; 仅显示, 不进上下文)
         self.tool_forward = False        # 工具转发开关(玩家用「工具开/关」切换; 仅显示, 不进上下文)
+        self._backup_running = False     # 「备份」控制词的后台热备份是否在跑(期间不开新任务)
+
+    def _write_state(self) -> None:
+        """原子写一份忙碌/空闲快照到 paths.STATE_PATH, 供外部脚本判断「停止状态」。
+        busy 沿用「清空」的判定: agent_busy or 队列有待处理消息。"""
+        with self.cv:
+            state = {
+                "pid": os.getpid(),
+                "busy": self.agent_busy or bool(self.pending),
+                "pending": len(self.pending),
+                "backup": self._backup_running,
+                "mode": self.mode,
+                "updated": time.time(),
+            }
+        tmp = paths.STATE_PATH.with_suffix(".tmp")
+        try:
+            tmp.write_text(json.dumps(state), encoding="utf-8")
+            os.replace(tmp, paths.STATE_PATH)
+        except OSError:
+            pass  # 状态文件写失败不影响主流程
 
     # ---------- 请求上下文(主对话 + 并发一次性线程) ----------
     # 工具 handler 经由下面这几个 helper 读取“当前请求”的状态, 主线程回落到 self.*,

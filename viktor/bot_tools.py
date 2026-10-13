@@ -1,4 +1,4 @@
-"""能力工具 handler: 聊天/技能/服务端查询(bus)/控制台指令/常加载/备份/模式切换。
+"""能力工具 handler 与服务端操作: 聊天/技能/查询(bus)/控制台指令/常加载/备份执行。
 
 依赖方向: bot_tools → bus/constants/profiles/paths/capabilities; 不 import 其它 bot_* 模块。
 """
@@ -473,13 +473,10 @@ class BotToolsMixin:
             time.sleep(0.3)
         return False, offset
 
-    def _tool_backup_world(self, args: dict) -> str:
-        with self.console_gate:
-            return self._backup_world_locked(args)
-
     def _backup_world_locked(self, args: dict) -> str:
         """按 BDS 官方热备份流程打包存档: save hold -> 7z -> save resume。
-        必须保证无论如何都 save resume, 否则服务器会一直不再存盘。"""
+        由「备份」控制词在后台线程调用(持有 console_gate); 无论如何都保证 save resume,
+        否则服务器会一直不再存盘。"""
         seven = shutil.which("7z") or shutil.which("7zz")
         if not seven:
             return "系统里找不到 7z 命令, 无法备份(需要先 sudo apt install 7zip)。"
@@ -580,31 +577,9 @@ class BotToolsMixin:
             # 从普通进入创造: 第一轮是长思考, 玩家会干等几十秒没反馈。
             # 这是程序行为, 不依赖模型自觉: 开关一翻就直接播报(升档不重复播报)。
             if not was_creative and self.cfg.get("notify_creative_mode", True):
-                self._sys(self.cfg.get("creative_notice",
-                                       "创造模式已开启: 我在深度思考, 可能要等一会儿, 请稍候。"))
+                self._sys("创造模式已开启: 我在深度思考, 可能要等一会儿, 请稍候。")
             return (f"已进入{MODES[mode].label}模式: 从下一次请求起思考强度 {p['effort']}, "
                     "并启用创造工作方式(更长输出、更多工具轮次、更大上下文)。"
                     "完成后记得用 set_mode 切回 normal。")
         log(f"[模式] 切换到 {MODES[mode].label} (原因: {reason or '未说明'})")
         return f"已切换到 {MODES[mode].label} 模式。"
-
-    def _tool_server_status(self, args: dict) -> str:
-        parts = []
-        pids = subprocess.run(["pgrep", "-x", "bedrock_server"],
-                              capture_output=True, text=True).stdout.split()
-        if pids:
-            out = subprocess.run(
-                ["ps", "-o", "%cpu=,%mem=,rss=,etime=", "-p", pids[0]],
-                capture_output=True, text=True).stdout.split()
-            if len(out) == 4:
-                cpu, mem, rss, etime = out
-                parts.append(f"bedrock_server(PID {pids[0]}): CPU {cpu}%(启动以来平均), "
-                             f"内存 {int(rss) // 1024}MB, 已运行 {etime}")
-        else:
-            parts.append("警告: 找不到 bedrock_server 进程")
-        with open("/proc/loadavg") as f:
-            parts.append("系统负载(1/5/15分钟): " + " ".join(f.read().split()[:3]))
-        players = sorted(self.players)
-        parts.append(f"在线玩家 {len(players)} 人" +
-                     (f": {', '.join(players)}" if players else ""))
-        return "\n".join(parts)

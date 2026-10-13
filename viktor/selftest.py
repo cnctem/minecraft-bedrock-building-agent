@@ -390,6 +390,102 @@ def self_test():
     bot2.bridge.say_as_viktor = orig_say_c
     print("压缩自测 OK")
 
+    # ===== 状态 / 备份控制词自测 =====
+    # 两个工具已下线: 模型侧不可见, 改由程序控制词提供
+    tnames = set(capabilities.registered_names())
+    assert not ({"get_server_status", "backup_world"} & tnames), sorted(tnames)
+    assert not ({"get_server_status", "backup_world"} & bot2._allowed_tools()), "工具白名单不应含已下线工具"
+
+    # 「状态」: ≤2 条 [系统]、任务进行中也可查、不进队列/上下文
+    orig_say_st = bot2.bridge.say_as_viktor
+    stsay = []
+    bot2.bridge.say_as_viktor = lambda text, *a, **k: stsay.append(text)
+    bot2.agent_busy = True
+    bot2.pending.clear()
+    bot2.process_line("[2026-10-10 18:44:00:000 INFO] [Scripting] [VIKTOR-CHAT] Tester: 状态")
+    bot2.agent_busy = False
+    assert 1 <= len(stsay) <= 2 and any("在线玩家" in x for x in stsay), stsay
+    assert not bot2.pending, "「状态」不应进队列/上下文"
+    # 非完全匹配 → 普通聊天
+    stsay.clear()
+    bot2.process_line("[2026-10-10 18:44:01:000 INFO] [Scripting] [VIKTOR-CHAT] Tester: 状态一下")
+    assert bot2.pending == [("Tester", "状态一下")], bot2.pending
+    bot2.pending.clear()
+    bot2.bridge.say_as_viktor = orig_say_st
+    print("状态词自测 OK")
+
+    # 「备份」守卫: 忙时拒绝(不启动); 备份中重复触发提示; 备份中「强制停止」无法中止
+    orig_say_bk = bot2.bridge.say_as_viktor
+    bksay = []
+    bot2.bridge.say_as_viktor = lambda text, *a, **k: bksay.append(text)
+    bot2._backup_running = False
+    bot2.agent_busy = True
+    bot2.process_line("[2026-10-10 18:45:00:000 INFO] [Scripting] [VIKTOR-CHAT] Tester: 备份")
+    assert not bot2._backup_running and bksay and "备份无效" in bksay[0], bksay
+    bot2.agent_busy = False
+    bot2._backup_running = True
+    bksay.clear()
+    bot2.process_line("[2026-10-10 18:45:01:000 INFO] [Scripting] [VIKTOR-CHAT] Tester: 备份")
+    assert bksay and "正在进行中" in bksay[0], bksay
+    bot2.abort.clear()
+    bksay.clear()
+    bot2.process_line("[2026-10-10 18:45:02:000 INFO] [Scripting] [VIKTOR-CHAT] Tester: 强制停止")
+    assert not bot2.abort.is_set() and bksay and "无法中止" in bksay[0], (bot2.abort.is_set(), bksay)
+    # 备份期间一次性对话被拒
+    bksay.clear()
+    bot2._spawn_oneshot("Tester", "随便做点什么")
+    assert bksay and "备份正在进行中" in bksay[0], bksay
+    assert not bot2._active_oneshots and bot2._oneshot_active == 0
+    bot2._backup_running = False
+
+    # 备份执行: 打桩, 成功 → 开始+完成两条 [系统]; 失败 → 备份失败: …
+    orig_bk_locked = bot2._backup_world_locked
+    bksay.clear()
+    bot2._backup_world_locked = lambda args: "备份完成: /tmp/x.7z (1MB, 用时 1 秒)。世界写入已恢复。"
+    bot2._run_backup()
+    assert len(bksay) == 2 and "请稍候" in bksay[0] and "备份完成" in bksay[1], bksay
+    assert not bot2._backup_running, "备份结束应复位 _backup_running"
+    bksay.clear()
+    bot2._backup_world_locked = lambda args: "系统里找不到 7z 命令, 无法备份。"
+    bot2._run_backup()
+    assert bksay and bksay[-1].startswith("备份失败: "), bksay
+    bot2._backup_world_locked = orig_bk_locked
+
+    # 备份期间 worker 不开新任务: 消息排队, 备份结束(notify)后继续处理
+    import threading as _th2
+    import time as _time
+    bot2.session = Session(2001)
+    bot2.session.add_system(memory_note())
+    bot2.running = True
+    bot2._nudge = False
+    bot2._backup_running = True
+    bot2.pending.clear()
+    bot2.pending.append(("A", "任务"))
+    orig_post_hold = bot2._post
+    bot2._post = lambda messages, params: (
+        {"role": "assistant", "content": None, "reasoning_content": "想",
+         "tool_calls": [
+            {"id": "hs1", "type": "function",
+             "function": {"name": "stay_silent", "arguments": "{}"}}]}, "tool_calls")
+    wt = _th2.Thread(target=bot2._worker, daemon=True)
+    wt.start()
+    _time.sleep(0.4)
+    assert bot2.pending == [("A", "任务")], "备份期间不应开新任务"
+    bot2._backup_running = False
+    with bot2.cv:
+        bot2.cv.notify_all()
+    _time.sleep(0.6)
+    assert not bot2.pending, "备份结束后应继续处理积压消息"
+    assert any(m.get("content") == "A: 任务" for m in bot2.session.messages), bot2.session.messages
+    bot2.running = False
+    with bot2.cv:
+        bot2.cv.notify_all()
+    wt.join(timeout=2)
+    bot2._post = orig_post_hold
+    bot2.bridge.say_as_viktor = orig_say_bk
+    print("备份词自测 OK")
+
+
 
     # 能力测试: 玩家进出记录查询(用临时日志)
     tmp_log = Path("/tmp/viktor-serverlog-test.log")
@@ -410,11 +506,6 @@ def self_test():
     finally:
         capabilities.SERVER_LOG = orig_log
         tmp_log.unlink(missing_ok=True)
-
-    # 能力测试: 服务器状态(bot 注册, 能读到真实进程)
-    r = bot2._tool_server_status({})
-    assert "bedrock_server" in r and "在线玩家" in r, r
-    print(r)
 
     # 能力测试: 指令执行(不再有玩家白名单判定, 只保留危险指令黑名单)
     r = bot2._tool_run_command({"command": "/stop"})
@@ -610,7 +701,7 @@ def self_test():
     r = bot2._tool_set_mode({"mode": MODE_CREATIVE, "reason": "测试"})
     assert "已进入创造模式" in r and bot2.creative_mode, r
     # 创造模式第一轮是长思考, 必须由程序立刻提醒玩家等待(不依赖模型自觉)
-    assert csaid == [bot2.cfg["creative_notice"]], f"开启创造模式应立刻提醒玩家等待: {csaid}"
+    assert len(csaid) == 1 and "创造模式已开启" in csaid[0], f"开启创造模式应立刻提醒玩家等待: {csaid}"
     csaid.clear()
     # 重复切同一模式: 不重复播报
     bot2._tool_set_mode({"mode": MODE_CREATIVE, "reason": "重复开启"})
@@ -723,6 +814,58 @@ def self_test():
         "插话应写入上下文"
     bot2.agent_busy = False
     print("任务中插话自测 OK")
+
+    # 多工具调用 + 状态注记: 注记必须排在**全部** tool 响应之后。
+    # 插在中间会拆散 assistant(tool_calls)/tool 的相邻配对, DeepSeek 回 400
+    # "insufficient tool messages following tool_calls message"(2026-10-13 实机踩到)。
+    if not bot2.session:
+        bot2.players.add("T")
+        bot2._start_session()
+    bot2.agent_busy = True
+    bot2.abort.clear()
+    bot2.soft_abort.clear()
+    bot2.pending.clear()
+    pair_calls = {"n": 0}
+    payloads: list[list[dict]] = []
+    orig_say_pair = bot2.bridge.say_as_viktor
+    bot2.bridge.say_as_viktor = lambda text, *a, **k: None  # 测试期间不要真发言
+
+    def fake_post_pair(messages, params):
+        payloads.append([dict(m) for m in messages])
+        pair_calls["n"] += 1
+        if pair_calls["n"] == 1:
+            return ({"role": "assistant", "content": None, "tool_calls": [
+                {"id": "n1", "type": "function", "function": {"name": "ptc", "arguments": json.dumps(
+                    {"calls": [{"tool": "set_mode", "arguments": {
+                        "mode": MODE_CREATIVE_MAX, "reason": "自测"}}]}, ensure_ascii=False)}},
+                {"id": "n2", "type": "function", "function": {
+                    "name": "get_player_activity", "arguments": "{\"minutes\": 1}"}}]},
+                "tool_calls")
+        return ({"role": "assistant", "content": "好的。"}, "stop")
+
+    orig_post_pair = bot2._post
+    bot2._post = fake_post_pair
+    bot2.call_api()
+    bot2._post = orig_post_pair
+    bot2.agent_busy = False
+    assert pair_calls["n"] == 2, pair_calls
+    for msgs in payloads[1:]:  # 第 1 次是本轮开头, 第 2 次才带上工具往返
+        for idx, m in enumerate(msgs):
+            ids = [c.get("id") for c in (m.get("tool_calls") or [])]
+            if not ids:
+                continue
+            followers = []
+            for f in msgs[idx + 1:]:
+                if f.get("role") != "tool":
+                    break
+                followers.append(f.get("tool_call_id"))
+            assert all(t in followers for t in ids), \
+                f"tool_calls {ids} 后面只跟了 {followers} —— 状态注记插错位置了"
+    assert any(m.get("role") == "system" and "模式" in (m.get("content") or "")
+               for m in bot2.session.messages), "切模式应留下系统注记"
+    bot2._tool_set_mode({"mode": MODE_NORMAL, "reason": "自测复位"})
+    bot2.bridge.say_as_viktor = orig_say_pair
+    print("状态注记排在 tool 响应之后自测 OK")
 
     # 保持安静: 调用 stay_silent 后立即收尾, 既不追发一轮, 也不兜底播报
     said_s = []
@@ -954,7 +1097,7 @@ def self_test():
     assert psaid and "计划模式" in psaid[-1] and "退出计划" in psaid[-1], psaid
     # 计划模式工具: 黑名单挡住 MC 命令/改世界; 查询/说话/ptc/set_mode 保留
     ptools = bot2._allowed_tools(MODE_PLAN)
-    assert not ({"run_server_command", "pin_region", "backup_world"} & ptools), ptools
+    assert not ({"run_server_command", "pin_region"} & ptools), ptools
     assert {"get_player_position", "scan_blocks", "get_block",
             "send_chat_message", "ptc", "set_mode"} <= ptools, ptools
     # 计划/执行: effort high, 其余对齐创造max(heavy ×2)
@@ -1016,7 +1159,11 @@ def self_test():
     saved_sess, saved_mode = bot2.session, bot2.mode
     bot2.resume_session(str(rp))
     assert bot2.mode == MODE_PLAN, bot2.mode
-    assert bot2.session.messages[-1]["content"] == "计划定稿"
+    assert any(m.get("content") == "计划定稿" for m in bot2.session.messages)
+    # 恢复时若技能清单与旧会话不同, 末尾补注一条(append-only, 不破坏前缀缓存)
+    _sk = [m for m in bot2.session.messages if m.get("role") == "system"
+           and (m.get("content") or "").startswith("# 可用技能书(skill)")]
+    assert _sk and "mc-interior" in _sk[-1]["content"], _sk
     assert all("reasoning_content" in m for m in bot2.session.messages
                if m["role"] == "assistant"), "恢复时应给 assistant 补 reasoning_content"
     bot2.session, bot2.mode = saved_sess, saved_mode
@@ -1169,7 +1316,9 @@ def self_test():
     bot2.pending.clear()
     bot2._on_restore_session("Tester")
     assert any("已恢复" in t for t in rs), rs
-    assert bot2.session.messages[-1]["content"] == "好的", bot2.session.messages[-1]
+    assert any(m.get("content") == "好的" for m in bot2.session.messages)
+    assert bot2.session.messages[-1].get("role") == "system" \
+        and bot2.session.messages[-1]["content"].startswith("# 可用技能书"), bot2.session.messages[-1]
     bot2.bridge.say_as_viktor = orig_say_rs
     rdump.unlink(missing_ok=True)
     print("恢复会话自测 OK")
@@ -1196,6 +1345,18 @@ def self_test():
     assert r.startswith("# 技能书:") and "weirdo_direction" in r, r[:150]
     r = capabilities.execute("use_skill", '{"name":"mc-commands","file":"references/block-states.md"}')
     assert "pillar_axis" in r, r[:150]
+    assert "mc-shapes" in note, note
+    r = capabilities.execute("use_skill", '{"name":"mc-shapes","file":"references/circle-tables.md"}')
+    assert "0,5 1,5 2,5 3,4 4,3 5,0" in r, r[:150]
+    assert "mc-interior" in note, note
+    r = capabilities.execute("use_skill", '{"name":"mc-interior","file":"references/furniture.md"}')
+    assert "weirdo_direction" in r and "barrel" in r, r[:150]
+    assert "mc-architecture" in note, note
+    r = capabilities.execute("use_skill", '{"name":"mc-architecture","file":"references/structure.md"}')
+    assert "梁柱" in r and "飞扶壁" in r, r[:150]
+    assert "mc-terrain" in note, note
+    r = capabilities.execute("use_skill", '{"name":"mc-terrain","file":"references/vegetation.md"}')
+    assert "云杉" in r and "树冠" in r, r[:150]
     r = capabilities.execute("use_skill", '{"name":"mc-commands","file":"../SKILL.md"}')
     assert "没有附带资料" in r, r
     r = capabilities.execute("use_skill", '{"name":"nonexistent"}')

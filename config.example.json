@@ -31,7 +31,6 @@
   "context_window_tokens": 1048576,
   "notify_context_clear": true,
   "notify_creative_mode": true,
-  "creative_notice": "创造模式已开启: 我在深度思考, 可能要等一会儿, 请稍候。",
   "context_safety_tokens": 4096,
   "poll_interval_sec": 0.5,
   "bus_protocol": "auto",

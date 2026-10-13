@@ -175,6 +175,10 @@ class BotAgentMixin:
         return delay
 
     def _post(self, messages: list[dict], params: dict) -> tuple[dict, str]:
+        # 发送前兜底: assistant(tool_calls)/tool 配对只要破损(被截断/被中途插入别的消息),
+        # DeepSeek 就回 400 "insufficient tool messages following tool_calls message",
+        # 而且之后每次请求都会 400; 先按同口径修好配对再发。
+        messages = Session._sanitize(messages)
         cfg = self.cfg
         payload = self._build_payload(messages, params)
         url = cfg["api_base"].rstrip("/") + "/chat/completions"
@@ -322,6 +326,7 @@ class BotAgentMixin:
             session.messages.append(msg)
             messages.append(msg)
             silent = False
+            pending_notes: list[str] = []
             for tc in calls:
                 fname = tc["function"]["name"]
                 if fname == "stay_silent":
@@ -339,12 +344,16 @@ class BotAgentMixin:
                 tool_msg = {"role": "tool", "tool_call_id": tc["id"], "content": result}
                 session.messages.append(tool_msg)
                 messages.append(tool_msg)
-                # 状态变更(切模式/更新记忆)作为追加式系统注记写在 tool 响应之后,
-                # 只往日志尾部加, 不改动 system 前缀 -> 缓存不失效, 历史也不会前后矛盾。
-                for note in self._state_notes(result, before_mode):
-                    note_msg = {"role": "system", "content": note}
-                    session.messages.append(note_msg)
-                    messages.append(note_msg)
+                # 状态变更(切模式/更新记忆)先攒着, 等**全部** tool 响应追加完再统一写注记:
+                # 同一 assistant 消息带多条 tool_calls 时, 注记插在中间会拆散
+                # assistant(tool_calls)/tool 的相邻配对, API 直接 400。
+                pending_notes.extend(self._state_notes(result, before_mode))
+            # 注记作为追加式系统消息写在所有 tool 响应之后, 只往日志尾部加,
+            # 不改动 system 前缀 -> 缓存不失效, 历史也不会前后矛盾。
+            for note in pending_notes:
+                note_msg = {"role": "system", "content": note}
+                session.messages.append(note_msg)
+                messages.append(note_msg)
             # 已明确保持安静: 立即收尾, 不再追发一轮。否则模型会在正文里补一句
             # 解释, 被 _finish_turn 当作“未调用工具的正文”兜底播报出去, 等于没闭嘴。
             if silent and not spoke:
@@ -390,7 +399,9 @@ class BotAgentMixin:
     def _worker(self):
         while self.running:
             with self.cv:
-                while self.running and not self.pending and not self._nudge:
+                # 「备份」期间不开新任务: 消息继续入队, 备份结束(_run_backup 会 notify)再处理
+                while self.running and (self._backup_running
+                                        or (not self.pending and not self._nudge)):
                     self.cv.wait(timeout=1)
                 # 积压多条时合并成一次请求(所有消息已在上下文中, 一次回复即可)
                 batch, self.pending = self.pending[:], []

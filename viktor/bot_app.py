@@ -10,6 +10,7 @@ import time
 
 from . import paths
 from .constants import (
+    BACKUP_WORD,
     BODY_OFF_WORD,
     BODY_ON_WORD,
     CLEAR_WORD,
@@ -29,6 +30,7 @@ from .constants import (
     RE_LIST,
     RESTORE_WORD,
     SOFT_STOP_WORD,
+    STATUS_WORD,
     TOOL_OFF_WORD,
     TOOL_ON_WORD,
 )
@@ -104,6 +106,12 @@ class BotAppMixin:
             if stripped == COMPACT_WORD:
                 self._on_compact(name)
                 return
+            if stripped == STATUS_WORD:
+                self._on_status(name)
+                return
+            if stripped == BACKUP_WORD:
+                self._on_backup(name)
+                return
             if stripped == PLAN_WORD:
                 self._on_plan_mode(name)
                 return
@@ -165,6 +173,7 @@ class BotAppMixin:
         log_file = paths.SERVER_LOG_PATH
         log_file.touch(exist_ok=True)
         self.offset = log_file.stat().st_size  # 只处理新内容
+        self._write_state()
         self._cleanup_stale_pins()  # 先清残留(不与 list 校准抢日志)
         self.bridge.sync_player_count()
         self.bus_enabled = self._probe_bridge()
@@ -196,6 +205,7 @@ class BotAppMixin:
                 pass
             except Exception as e:
                 log(f"[tail 错误] {e}")
+            self._write_state()  # 刷新忙碌/空闲快照(供重启守卫等外部脚本)
             time.sleep(self.cfg["poll_interval_sec"])
 
     def run(self):

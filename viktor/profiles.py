@@ -73,13 +73,13 @@ EFFORT_KEYS = {
 TOOLS = {
     "all": None,
     "oneshot": {"only": {
-        "send_chat_message", "update_memory", "get_player_activity", "get_server_status",
+        "send_chat_message", "update_memory", "get_player_activity",
         "get_player_position", "get_player_hand",
-        "run_server_command", "get_block", "scan_blocks", "ptc", "backup_world",
+        "run_server_command", "get_block", "scan_blocks", "ptc",
         "find_items", "use_skill",
     }},
     # 计划模式: 黑名单, 不让它执行 MC 命令/动世界(查询、说话、记忆、ptc 仍在)
-    "no_commands": {"except": {"run_server_command", "pin_region", "backup_world"}},
+    "no_commands": {"except": {"run_server_command", "pin_region"}},
 }
 
 # 模式表: 只组合上面的 profile。next_modes = set_mode 允许切到的目标(其它模式对模型“不可知”);

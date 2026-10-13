@@ -15,6 +15,7 @@ LOG_PATH = LOG_DIR / "bot.log"  # 自测会指到临时文件, 避免假记录�
 SERVER_LOG_PATH = LOG_DIR / "server.log"  # 同上: 自测写入的假回包行不能被线上读到
 SESSION_DIR = LOG_DIR / "sessions"
 ONESHOT_DIR = LOG_DIR / "oneshot"  # 每次一次性对话单独落盘, 便于并发时排障
+STATE_PATH = LOG_DIR / "agent.state"  # 忙碌/空闲状态快照, 供外部脚本(重启守卫)读取
 
 
 def log(msg: str):
