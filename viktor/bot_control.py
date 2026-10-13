@@ -1,4 +1,4 @@
-"""控制面: 停止/清空/计划模式/恢复会话/一次性对话等硬编码控制词(不走模型)。
+"""控制面: 停止/清空/压缩/计划模式/恢复会话/一次性对话等硬编码控制词(不走模型)。
 
 依赖方向: bot_control → session/profiles/constants/paths/capabilities; 不 import 其它 bot_* 模块。
 """
@@ -13,6 +13,7 @@ from . import paths
 from .constants import MODE_NORMAL, MODE_ONESHOT, MODE_PLAN, ONESHOT_TRIGGER
 from .paths import log
 from .profiles import MODES
+from .prompts import COMPACT_NOTE
 from .session import OneShotContext, Session, memory_note
 
 
@@ -142,6 +143,55 @@ class BotControlMixin:
         n = self._reset_session()
         log(f"[清空] {name} 要求清空上下文, 已完整初始化新会话(丢弃 {n} 条消息)")
         self._sys(f"上下文已清空(丢弃 {n} 条消息)。发送「恢复会话」可找回刚才的对话。")
+
+    def _on_compact(self, name: str):
+        """玩家发来完全匹配的“压缩”: 把上下文压缩成对话记录(只保留玩家消息与游戏内发言),
+        旧会话落盘留档、开新会话。与「清空」同一并发规则: 有任务在跑(或队列有待处理消息)
+        时压缩无效——不中止任务、不改上下文, 只回一句提示。控制词不进上下文。"""
+        with self.cv:
+            busy = self.agent_busy or bool(self.pending)
+        if busy:
+            log(f"[压缩] {name} 要求压缩, 但有任务在进行, 压缩无效")
+            self._sys("现在有任务正在进行, 压缩无效。请先发「停止」(做完当前这一步再停)"
+                      "或「强制停止」(立即中止), 停下来后再压缩。")
+            return
+        stats = self._compact_session()
+        log(f"[压缩] {name} 要求压缩上下文: 保留玩家消息 {stats['kept_user']} 条、"
+            f"发言 {stats['kept_speech']} 条, 移除 {stats['dropped']} 条过程记录")
+        self._sys(f"上下文已压缩(保留 {stats['kept_user']} 条玩家消息 / "
+                  f"{stats['kept_speech']} 条发言; 移除 {stats['dropped']} 条过程记录)。")
+
+    def _build_compact_messages(self) -> tuple[list[dict], dict]:
+        """组装压缩后的新会话消息: 记忆/技能书/当前模式三条开场注记 + 保留的对话 + 压缩注记。
+        只组装不提交(自动溢出时先用它试算体积)。"""
+        kept, stats = Session.compact(self.session.messages)
+        msgs: list[dict] = [{"role": "system", "content": memory_note()}]
+        skills = capabilities.skills_note()
+        if skills:
+            msgs.append({"role": "system", "content": skills})
+        msgs.append({"role": "system", "content": self._mode_note()})
+        msgs.extend(kept)
+        msgs.append({"role": "system", "content": COMPACT_NOTE})
+        return msgs, stats
+
+    def _apply_compact(self, msgs: list[dict], stats: dict) -> None:
+        """压缩落盘 + 换新会话: 旧会话 dump 成 compact-*.jsonl 留档(不参与“恢复会话”),
+        新会话获得新 id 并装载压缩后的消息。模式/常加载/玩家名单/队列都不动。"""
+        old = self.session
+        if old is not None:
+            old.dump(tag="compact")
+            log(f"=== 会话 #{old.id} 结束(压缩留档: 保留玩家消息 {stats['kept_user']} 条、"
+                f"发言 {stats['kept_speech']} 条, 移除 {stats['dropped']} 条过程记录) ===")
+        self.session_counter += 1
+        self.session = Session(self.session_counter)
+        self.session.messages = msgs
+        log(f"=== 会话 #{self.session.id} 开始(由压缩重建, 消息 {len(msgs)} 条) ===")
+
+    def _compact_session(self) -> dict:
+        """压缩当前会话(组装 + 提交), 返回统计。仅供“压缩”控制词直接调用。"""
+        msgs, stats = self._build_compact_messages()
+        self._apply_compact(msgs, stats)
+        return stats
 
     def _reset_session(self) -> int:
         """完整初始化: 结束当前会话(落盘、复位任何非普通模式)并开启一个全新会话。

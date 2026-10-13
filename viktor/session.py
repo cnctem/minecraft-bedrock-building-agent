@@ -3,6 +3,7 @@
 依赖方向: session → paths, prompts, capabilities; 不 import bot_*。
 """
 import json
+import re
 import threading
 from datetime import datetime
 from pathlib import Path
@@ -21,7 +22,8 @@ def memory_note() -> str:
 
 
 class Session:
-    """一次会话: 从有人进服到服务器清零。上下文 append-only 以保证缓存命中。"""
+    """一次会话: 从有人进服到服务器清零。上下文平时 append-only 以保证缓存命中;
+    唯一的重写路径是 compact()(压缩): 只留玩家消息与游戏内发言, 有损、会打破前缀缓存。"""
 
     def __init__(self, session_id: int):
         self.id = session_id
@@ -94,6 +96,112 @@ class Session:
         if dropped:
             log(f"[上下文] 发送前修复了 {dropped} 条不成对的 tool 消息(否则 API 会 400)")
         return out
+
+    # ---------- 压缩(compact) ----------
+    # 只保留"对话记录": 玩家消息 + 维克托的游戏内发言(send_chat_message, 含 ptc 内嵌)。
+    # 工具调用/结果、普通正文、思考内容、旧系统注记全部丢弃; 由调用方负责重新注入
+    # 记忆/技能书/模式注记与压缩完成注记, 并开新会话。
+
+    @staticmethod
+    def _rewrite_ptc_call(tc: dict) -> dict | None:
+        """ptc 调用若夹带 send_chat_message, 重写成只含这些子调用的调用; 否则返回 None。"""
+        fn = tc.get("function") or {}
+        raw = fn.get("arguments")
+        try:
+            args = json.loads(raw) if isinstance(raw, str) else (raw or {})
+        except (TypeError, ValueError):
+            return None
+        calls = args.get("calls") if isinstance(args, dict) else None
+        if not isinstance(calls, list):
+            return None
+        kept = [c for c in calls if isinstance(c, dict)
+                and capabilities._ptc_name(c) == "send_chat_message"]
+        if not kept:
+            return None
+        new_fn = dict(fn)
+        new_fn["arguments"] = json.dumps({"calls": kept}, ensure_ascii=False)
+        return {**tc, "function": new_fn}
+
+    @staticmethod
+    def _rewrite_ptc_result(content: str) -> str:
+        """ptc 结果只保留 send_chat_message 的行并重新编号; 没有对应行则返回空串。"""
+        lines = []
+        for line in (content or "").splitlines():
+            m = re.match(r"^\[\d+\]\s*send_chat_message -> (.*)$", line)
+            if m:
+                lines.append(f"[{len(lines) + 1}] send_chat_message -> {m.group(1)}")
+        return "\n".join(lines)
+
+    @staticmethod
+    def compact(messages: list[dict]) -> tuple[list[dict], dict]:
+        """把上下文压缩成对话记录, 返回 (保留的消息, 统计)。
+
+        保留: 全部 user 消息; assistant 里 send_chat_message 直接调用(及其 tool 结果)、
+        ptc 中夹带的 send_chat_message(参数与结果重写成只含这些子调用)。
+        丢弃: 其他工具调用与结果、assistant 普通正文与思考、旧 system 注记、孤儿 tool。
+
+        保留的 assistant(tool_calls) 统一 content=None、reasoning_content=""
+        (DeepSeek 思考模式要求该字段存在, 空串可用); 某个该保留的调用缺对应 tool 结果时,
+        整条 assistant 消息丢弃(与 _sanitize 同口径, 保证配对严格)。
+        """
+        out: list[dict] = []
+        kept_user = kept_speech = 0
+        i, n = 0, len(messages)
+        while i < n:
+            m = messages[i]
+            role = m.get("role")
+            if role == "user":
+                out.append(m)
+                kept_user += 1
+                i += 1
+                continue
+            calls = m.get("tool_calls") if role == "assistant" else None
+            if calls:
+                followers: list[dict] = []
+                j = i + 1
+                while j < n and messages[j].get("role") == "tool":
+                    followers.append(messages[j])
+                    j += 1
+                have = {f.get("tool_call_id") for f in followers}
+                kept_calls, kept_tools, speech = [], [], 0
+                broken = False
+                for tc in calls:
+                    fn = tc.get("function") or {}
+                    name = fn.get("name")
+                    cid = tc.get("id")
+                    if name == "send_chat_message":
+                        if cid not in have:
+                            broken = True
+                            break
+                        kept_calls.append(tc)
+                        kept_tools.append(next(f for f in followers
+                                               if f.get("tool_call_id") == cid))
+                        speech += 1
+                    elif name == "ptc":
+                        rw = Session._rewrite_ptc_call(tc)
+                        follower = next((f for f in followers
+                                         if f.get("tool_call_id") == cid), None)
+                        if rw is None or follower is None:
+                            continue
+                        result = Session._rewrite_ptc_result(follower.get("content") or "")
+                        if not result:
+                            continue
+                        kept_calls.append(rw)
+                        kept_tools.append({**follower, "content": result})
+                        speech += len(json.loads(rw["function"]["arguments"])["calls"])
+                if broken:
+                    kept_calls, kept_tools, speech = [], [], 0
+                if kept_calls:
+                    out.append({"role": "assistant", "content": None,
+                                "tool_calls": kept_calls, "reasoning_content": ""})
+                    out.extend(kept_tools)
+                    kept_speech += speech
+                i = j
+                continue
+            i += 1  # 普通正文/思考/旧 system 注记/孤儿 tool: 一律丢弃
+        stats = {"kept_user": kept_user, "kept_speech": kept_speech,
+                 "dropped": len(messages) - len(out)}
+        return out, stats
 
     def build_request_messages(self) -> list[dict]:
         """全局常量 system 前缀 + append-only 日志, 不做任何裁剪。

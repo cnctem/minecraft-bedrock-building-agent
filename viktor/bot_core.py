@@ -150,7 +150,7 @@ class BotCoreMixin:
     def _reset_on_rejoin(self, name: str):
         """玩家数 0→1: 完整初始化会话(与“清空”同一套 _reset_session)。
         若此时有任务在跑: 不初始化也不挂起初始化, 只发一条提示告知任务在进行,
-        并介绍可用的控制词(停止/强制停止/清空)。玩家全部离开期间会话不结束,
+        并介绍可用的控制词(停止/强制停止/压缩/清空)。玩家全部离开期间会话不结束,
         任务可以跨离线期继续做。"""
         if not self.session:
             self._start_session()
@@ -164,7 +164,7 @@ class BotCoreMixin:
             self._say_later(
                 "欢迎回来。我手头还有任务在进行。"
                 "要我停就发「停止」(做完当前这一步再停)或「强制停止」(立即中止); "
-                "想清空上下文, 请先停下再发「清空」。", system=True)
+                "想压缩或清空上下文, 请先停下再发「压缩」或「清空」。", system=True)
             return
         n = self._reset_session()
         log(f"[清空] {name} 进服(0→1), 已完整初始化新会话(丢弃 {n} 条消息)")

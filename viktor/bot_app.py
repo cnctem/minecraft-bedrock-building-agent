@@ -13,6 +13,7 @@ from .constants import (
     BODY_OFF_WORD,
     BODY_ON_WORD,
     CLEAR_WORD,
+    COMPACT_WORD,
     EXIT_PLAN_WORD,
     FORCE_STOP_WORD,
     NO_STOP_WORD,
@@ -99,6 +100,9 @@ class BotAppMixin:
                 return
             if stripped == CLEAR_WORD:
                 self._on_clear(name)
+                return
+            if stripped == COMPACT_WORD:
+                self._on_compact(name)
                 return
             if stripped == PLAN_WORD:
                 self._on_plan_mode(name)

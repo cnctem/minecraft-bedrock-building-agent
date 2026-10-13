@@ -110,7 +110,7 @@ def self_test():
                 sess.messages.append({"role": "tool", "tool_call_id": f"c{i}", "content": "ok"})
 
         # 已取消滚动截断: 上下文永不裁剪(裁剪会破坏缓存前缀, 还会从 tool 对中间切开 400),
-        # 超预算时由 _maybe_clear_for_size() 整段清空
+        # 超预算时由 _maybe_compact_for_size() 压缩; 压缩后仍超预算才整段清空
         s = Session(99)
         s.add_user("a")
         _fake_pairs(s, 60)
@@ -119,7 +119,7 @@ def self_test():
         assert len(msgs) == len(s.messages) + 1, "不应再做滚动截断"
         assert msgs[1]["content"] == "a: a" or "a" in msgs[1]["content"], msgs[1]
 
-        # 超预算 → 整段清空(而不是截断); _maybe_clear_for_size 的行为在“清空词自测”里验
+        # 超预算不再截断(而是压缩/清空); _maybe_compact_for_size 的行为在下面自测
         s3 = Session(97)
         _fake_pairs(s3, 20)
         s3.add_user("汉" * 5000)
@@ -200,19 +200,196 @@ def self_test():
     bot2.process_line("[2026-10-10 18:41:05:000 INFO] [Scripting] [VIKTOR-CHAT] 路人甲: 清空一下")
     assert any(p == "路人甲" for p, _ in bot2.pending), "非完全匹配应走正常流程"
     bot2.pending.clear()
-    # 超预算自动清空也复用完整初始化(不截断, 纯程序判断)
+    # 超预算兜底: 压缩后仍超(玩家消息本身就超预算) → 整段清空, 复用完整初始化
     bot2.cfg["context_window_tokens"] = 1000  # 预算降到 4096 下限
     bot2.session.add_user("B: " + "汉" * 20000)
     bot2.mode = MODE_CREATIVE
     old_sid = bot2.session.id
     assert Session._est_tokens(bot2.session.messages) > bot2._input_token_budget()
-    assert bot2._maybe_clear_for_size()
-    assert all(m["role"] == "system" for m in bot2.session.messages), "超预算应整段清空(只剩系统注记)"
+    assert bot2._maybe_compact_for_size()
+    assert all(m["role"] == "system" for m in bot2.session.messages), "兜底应整段清空(只剩系统注记)"
     assert bot2.session.id != old_sid and bot2.mode == MODE_NORMAL, "超长清空也应完整初始化"
     bot2.cfg["context_window_tokens"] = 1048576
-    assert not bot2._maybe_clear_for_size(), "未超预算不应清空"
+    assert not bot2._maybe_compact_for_size(), "未超预算不应清空/压缩"
     bot2.bridge.say_as_viktor = orig_say
     print("清空词自测 OK")
+
+    # ===== 压缩(compact)自测 =====
+
+    # Session.compact 纯函数: 只留玩家消息与游戏内发言(send_chat_message 直接 + ptc 内嵌),
+    # 其余工具调用/结果、普通正文、思考、旧系统注记全部丢弃, 且保持 tool 配对
+    def _mk_tc(cid, name, args):
+        return {"id": cid, "type": "function",
+                "function": {"name": name, "arguments": json.dumps(args, ensure_ascii=False)}}
+
+    cs = Session(555)
+    cs.add_system(memory_note())
+    cs.add_user("A: 你好")
+    cs.messages.append({"role": "assistant", "content": None, "reasoning_content": "想查坐标",
+                        "tool_calls": [_mk_tc("c1", "get_player_position", {"player": "A"})]})
+    cs.messages.append({"role": "tool", "tool_call_id": "c1", "content": "A 的坐标: 1, 2, 3"})
+    cs.add_assistant("玩家看不到的正文")
+    cs.messages.append({"role": "assistant", "content": "顺便说一句", "reasoning_content": "想",
+                        "tool_calls": [_mk_tc("c2", "get_block", {"x": 1, "y": 2, "z": 3}),
+                                       _mk_tc("c3", "send_chat_message", {"text": "已经看过现场了"})]})
+    cs.messages.append({"role": "tool", "tool_call_id": "c2", "content": "石头"})
+    cs.messages.append({"role": "tool", "tool_call_id": "c3", "content": "已发送到游戏内聊天。"})
+    cs.messages.append({"role": "assistant", "content": None, "reasoning_content": "想",
+                        "tool_calls": [_mk_tc("c4", "ptc", {"calls": [
+                            {"tool": "scan_blocks", "arguments": {"x1": 0, "y1": 0, "z1": 0,
+                                                                  "x2": 0, "y2": 0, "z2": 15}},
+                            {"tool": "send_chat_message", "arguments": {"text": "扫描完了"}}]})]})
+    cs.messages.append({"role": "tool", "tool_call_id": "c4",
+                        "content": "[1] scan_blocks -> DONE total=16\n"
+                                   "[2] send_chat_message -> 已发送到游戏内聊天。"})
+    cs.add_user("A: 继续")
+    kept, stats = Session.compact(cs.messages)
+    assert stats["kept_user"] == 2 and stats["kept_speech"] == 2, stats
+    assert stats["dropped"] == len(cs.messages) - len(kept), stats
+    # 保留顺序: user / 发言(c3) / ptc 重写(c4) / user, 旧注记与工具噪音都没有
+    assert kept[0]["content"] == "A: 你好", kept[0]
+    assert [m["role"] for m in kept] == ["user", "assistant", "tool", "assistant", "tool", "user"], \
+        [m["role"] for m in kept]
+    assert not any(m.get("role") == "system" for m in kept), "旧系统注记应被丢弃"
+    dumped = json.dumps(kept, ensure_ascii=False)
+    assert "玩家看不到的正文" not in dumped and "顺便说一句" not in dumped and "想查坐标" not in dumped
+    assert "石头" not in dumped and "A 的坐标" not in dumped, dumped
+    assert kept[1]["content"] is None and kept[1]["reasoning_content"] == ""
+    assert [c["id"] for c in kept[1]["tool_calls"]] == ["c3"], kept[1]
+    kept_ptc = kept[3]["tool_calls"][0]
+    assert kept_ptc["function"]["name"] == "ptc", kept_ptc
+    assert json.loads(kept_ptc["function"]["arguments"])["calls"] == [
+        {"tool": "send_chat_message", "arguments": {"text": "扫描完了"}}], kept_ptc
+    assert kept[4]["content"] == "[1] send_chat_message -> 已发送到游戏内聊天。", kept[4]
+    # 配对严格: _sanitize 不应再丢弃任何东西
+    assert len(Session._sanitize(kept)) == len(kept)
+    # 缺 tool 结果的 send_chat_message 消息整体丢弃(与 _sanitize 同口径)
+    broken = [{"role": "user", "content": "A: 在吗"},
+              {"role": "assistant", "content": None,
+               "tool_calls": [_mk_tc("b1", "send_chat_message", {"text": "在"})]}]
+    kept_b, stats_b = Session.compact(broken)
+    assert [m["content"] for m in kept_b] == ["A: 在吗"] and stats_b["kept_speech"] == 0, kept_b
+
+    # 「压缩」控制词: 空闲生效(旧会话落盘 compact-*, 模式不变, loaded_skills 清空)
+    orig_say_c = bot2.bridge.say_as_viktor
+    bot2.bridge.say_as_viktor = lambda text, *a, **k: sent.append(text)
+    bot2.agent_busy = False
+    bot2.pending.clear()
+    bot2.mode = MODE_CREATIVE
+    if not bot2.session:
+        bot2.players.add("T")
+        bot2._start_session()
+    bot2.session.messages.clear()
+    bot2.session.add_system(memory_note())
+    bot2.session.add_system(bot2._mode_note())
+    bot2.session.add_user("A: 查一下这块")
+    bot2.session.messages.append({"role": "assistant", "content": None, "reasoning_content": "想",
+                                  "tool_calls": [_mk_tc("k1", "get_block", {"x": 0, "y": 1, "z": 0})]})
+    bot2.session.messages.append({"role": "tool", "tool_call_id": "k1", "content": "minecraft:stone"})
+    bot2.session.add_assistant("工具细节正文")
+    bot2.session.loaded_skills.add("mc-commands/")
+    old_sid = bot2.session.id
+    sent.clear()
+    bot2.process_line("[2026-10-10 18:42:00:000 INFO] [Scripting] [VIKTOR-CHAT] 路人甲: 压缩")
+    assert bot2.session.id != old_sid, "压缩应换新会话"
+    assert bot2.mode == MODE_CREATIVE, "压缩不应复位模式"
+    assert not bot2.session.loaded_skills, "压缩后技能正文已丢, 应允许重新载入"
+    cmsgs = bot2.session.messages
+    assert cmsgs[0]["content"].startswith("# 你的长期记忆"), cmsgs[0]["content"][:40]
+    assert cmsgs[2]["content"].startswith("# 当前模式: "), cmsgs[2]["content"][:40]
+    assert cmsgs[-1]["content"].startswith("# 上下文已压缩"), cmsgs[-1]["content"][:40]
+    assert any(m.get("content") == "A: 查一下这块" for m in cmsgs), "玩家消息应保留"
+    cflat = json.dumps(cmsgs, ensure_ascii=False)
+    assert "工具细节正文" not in cflat and "minecraft:stone" not in cflat, cflat
+    assert sent and "已压缩" in sent[0], sent
+    assert list(paths.SESSION_DIR.glob("compact-*.jsonl")), "旧会话应落盘 compact-*"
+    # 忙时压缩无效(与「清空」同规则)
+    bot2.agent_busy = True
+    sid_busy = bot2.session.id
+    sent.clear()
+    bot2.process_line("[2026-10-10 18:42:01:000 INFO] [Scripting] [VIKTOR-CHAT] 路人甲: 压缩")
+    assert bot2.session.id == sid_busy and sent and "压缩无效" in sent[0], sent
+    bot2.agent_busy = False
+    # 非完全匹配 → 走普通聊天
+    bot2.pending.clear()
+    bot2.process_line("[2026-10-10 18:42:02:000 INFO] [Scripting] [VIKTOR-CHAT] 路人甲: 压缩一下")
+    assert any(p == "路人甲" for p, _ in bot2.pending), bot2.pending
+    bot2.pending.clear()
+    bot2.mode = MODE_NORMAL
+
+    # 自动压缩: 工具噪音撑爆预算 → 压缩(玩家的消息保留, 不清空); notify 开关生效
+    bot2.cfg["context_window_tokens"] = 1000  # 预算 4096
+    bot2.session = Session(777)
+    bot2.session.add_system(memory_note())
+    bot2.session.add_system(bot2._mode_note())
+    bot2.session.add_user("A: 大扫描")
+    bot2.session.messages.append({"role": "assistant", "content": None, "reasoning_content": "想",
+                                  "tool_calls": [_mk_tc("s1", "scan_blocks",
+                                                        {"x1": 0, "y1": 0, "z1": 0,
+                                                         "x2": 0, "y2": 0, "z2": 15})]})
+    bot2.session.messages.append({"role": "tool", "tool_call_id": "s1", "content": "x" * 8000})
+    old_sid = bot2.session.id
+    sent.clear()
+    assert bot2._maybe_compact_for_size()
+    assert bot2.session.id != old_sid, "自动压缩应换新会话"
+    assert any(m.get("content") == "A: 大扫描" for m in bot2.session.messages), "玩家消息应保留"
+    assert not any(m.get("role") == "tool" for m in bot2.session.messages), "工具结果应被压缩掉"
+    assert bot2.session.messages[-1]["content"].startswith("# 上下文已压缩")
+    assert sent and "已压缩" in sent[-1], sent
+    # 通知开关关闭 → 不再播报(仍是压缩路径: 玩家消息本身很短, 超限来自工具噪音)
+    bot2.cfg["notify_context_clear"] = False
+    bot2.session.add_user("A: 再看一次")
+    bot2.session.messages.append({"role": "assistant", "content": None,
+                                  "tool_calls": [_mk_tc("s2", "scan_blocks",
+                                                        {"x1": 0, "y1": 0, "z1": 0,
+                                                         "x2": 0, "y2": 0, "z2": 15})]})
+    bot2.session.messages.append({"role": "tool", "tool_call_id": "s2", "content": "y" * 8000})
+    sent.clear()
+    assert bot2._maybe_compact_for_size()
+    assert sent == [], sent
+    bot2.cfg["notify_context_clear"] = True
+    bot2.cfg["context_window_tokens"] = 1048576
+
+    # 工具轮次中途溢出: 安全点压缩后本轮继续跑完(重建 messages、换新会话)
+    bot2.cfg["context_window_tokens"] = 1000
+    bot2.session = Session(888)
+    bot2.session.add_system(memory_note())
+    bot2.session.add_system(bot2._mode_note())
+    bot2.session.add_user("T: 干活")
+    bot2.mode = MODE_NORMAL
+    seq_mid = [0]
+
+    def fake_post_compact(messages, params):
+        seq_mid[0] += 1
+        if seq_mid[0] == 1:
+            return ({"role": "assistant", "content": None, "tool_calls": [
+                {"id": "h1", "type": "function",
+                 "function": {"name": "find_items", "arguments": '{"query":"stone"}'}}]},
+                "tool_calls")
+        return {"role": "assistant", "content": "做完了", "tool_calls": None}, "stop"
+
+    orig_exec_mid = capabilities.execute
+    capabilities.execute = lambda name, args: "z" * 8000
+    orig_post_midc = bot2._post
+    bot2._post = fake_post_compact
+    bot2.abort.clear(); bot2.soft_abort.clear(); bot2.pending.clear()
+    try:
+        reply_mid, spoke_mid = bot2.call_api()
+    finally:
+        bot2._post = orig_post_midc
+        capabilities.execute = orig_exec_mid
+        bot2.cfg["context_window_tokens"] = 1048576
+    assert reply_mid == "做完了" and seq_mid[0] == 2, (reply_mid, seq_mid)
+    assert bot2.session.id != 888, "轮次间超预算应压缩换新会话"
+    assert any(m.get("content") == "T: 干活" for m in bot2.session.messages)
+    assert not any("z" * 100 in json.dumps(m, ensure_ascii=False)
+                   for m in bot2.session.messages), "巨型工具结果应被压缩掉"
+    assert bot2.session.messages[-1]["content"].startswith("# 上下文已压缩")
+    # 压缩后的上下文仍严格配对、可直接继续追加
+    assert len(bot2.session.build_request_messages()) == len(bot2.session.messages) + 1
+    bot2.bridge.say_as_viktor = orig_say_c
+    print("压缩自测 OK")
+
 
     # 能力测试: 玩家进出记录查询(用临时日志)
     tmp_log = Path("/tmp/viktor-serverlog-test.log")

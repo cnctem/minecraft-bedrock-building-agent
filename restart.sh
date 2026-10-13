@@ -33,7 +33,7 @@ if [ "${#pids[@]}" -gt 0 ]; then
         echo "错误: bot 未在 15s 内退出; 如需强杀: kill -KILL $pid" >&2
         exit 1
     fi
-    latest=$(ls -t logs/sessions/*.jsonl 2>/dev/null | head -1 || true)
+    latest=$(ls -t logs/sessions/session-*.jsonl 2>/dev/null | head -1 || true)
     if [ -n "$latest" ]; then
         dump="$REPO/$latest"
         echo "已落盘会话: $dump"

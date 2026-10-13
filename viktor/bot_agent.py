@@ -98,21 +98,31 @@ class BotAgentMixin:
                                     params["ptc_stated"])
         capabilities.set_blocked_tools(capabilities.registered_names() - self._allowed_tools())
 
-    def _maybe_clear_for_size(self) -> bool:
-        """纯程序判断: 估算上下文超过输入预算就整段清空, 返回是否清空过。
-        不走模型、不询问玩家, 与“清空”控制词走同一套清空逻辑。
+    def _maybe_compact_for_size(self) -> bool:
+        """纯程序判断: 估算上下文超过输入预算就压缩(只留玩家消息与游戏内发言),
+        返回是否重建过上下文。压缩后仍超预算(例如玩家消息本身太长)才整段清空兜底,
+        沿用与“清空”同一套完整初始化。不走模型、不询问玩家。
         一次性对话的 ephemeral 上下文很短, 且绝不能清主会话, 直接跳过。"""
-        if self._oneshot():
+        if self._oneshot() or not self.session:
             return False
         used = Session._est_tokens(self.session.messages)
         budget = self._input_token_budget()
         if used <= budget:
             return False
-        n = self._reset_session()
-        log(f"[清空] 上下文约 {used} 估算 token 超过预算 {budget}, "
-            f"已完整初始化新会话(丢弃 {n} 条消息)")
+        msgs, stats = self._build_compact_messages()
+        if Session._est_tokens(msgs) > budget:
+            n = self._reset_session()
+            log(f"[清空] 上下文约 {used} 估算 token 超过预算 {budget}, 压缩后仍超限, "
+                f"已完整初始化新会话(丢弃 {n} 条消息)")
+            if self.cfg.get("notify_context_clear", True):
+                self._sys("上下文太长, 我已清空重开。发送「恢复会话」可找回上一段对话。")
+            return True
+        self._apply_compact(msgs, stats)
+        log(f"[压缩] 上下文约 {used} 估算 token 超过预算 {budget}, 已自动压缩"
+            f"(保留玩家消息 {stats['kept_user']} 条、发言 {stats['kept_speech']} 条, "
+            f"移除 {stats['dropped']} 条过程记录)")
         if self.cfg.get("notify_context_clear", True):
-            self._sys("上下文太长, 我已清空重开。发送「恢复会话」可找回上一段对话。")
+            self._sys("上下文太长, 我已压缩对话(保留玩家消息与我说过的话)。")
         return True
 
     def _input_token_budget(self) -> int:
@@ -232,7 +242,7 @@ class BotAgentMixin:
         “停止”(软停止)只在轮次开头与两次工具调用之间生效(安全点), 不打断工具内部等待。"""
         oneshot = self._oneshot()
         if not oneshot:
-            self._maybe_clear_for_size()
+            self._maybe_compact_for_size()
         session = self._session()
         messages = session.build_request_messages()
         spoke = False
@@ -265,6 +275,11 @@ class BotAgentMixin:
                         messages.append(m)
                     log(f"[介入] 任务进行中注入 {len(mid)} 条新消息: "
                         + "; ".join(f"{p}: {c}" for p, c in mid))
+                # 安全点再查一次体积: 长任务中途上下文增长超预算就地压缩(清空兜底会换新会话),
+                # 然后按新会话重建本次请求的 messages。
+                if self._maybe_compact_for_size():
+                    session = self._session()
+                    messages = session.build_request_messages()
             msg, finish = self._post(messages, params)
             # 思维链只记日志; 但带 tool_calls 的 assistant 消息必须把 reasoning_content
             # 一并回传 —— DeepSeek 思考模式的要求, 否则(尤其在 _sanitize 修复配对后)会 400
