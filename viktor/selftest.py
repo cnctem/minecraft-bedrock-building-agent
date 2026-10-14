@@ -912,6 +912,29 @@ def self_test():
     assert max(393216, bot2.cfg["retry_max_reply_tokens"]) == 393216
     print("截断重试自测 OK", budgets)
 
+    # 额度已达重试上限(如 creative_max=32768)时, 抬高无空间: 必须直接放弃重试、告知玩家,
+    # 绝不能把等价的请求再发一次白烧一整轮生成。
+    budgets_nc = []
+    said_nc = []
+    orig_say_nc = bot2.bridge.say_as_viktor
+    bot2.bridge.say_as_viktor = lambda text, *a, **k: said_nc.append(text)
+
+    def fake_post_noheadroom(messages, params):
+        budgets_nc.append(params["max_tokens"])
+        return {"role": "assistant", "content": "", "tool_calls": None}, "length"
+
+    bot2._tls.mode = MODE_CREATIVE_MAX
+    bot2._post = fake_post_noheadroom
+    bot2.abort.clear()
+    reply_nc, spoke_nc = bot2.call_api()
+    bot2._post = orig_post
+    bot2.bridge.say_as_viktor = orig_say_nc
+    cap = bot2.cfg["retry_max_reply_tokens"]
+    assert budgets_nc == [2 * bot2.cfg["creative_max_reply_tokens"]], budgets_nc
+    assert budgets_nc[0] >= cap, budgets_nc
+    assert spoke_nc is True and said_nc, (spoke_nc, said_nc)
+    print("截断但无抬高空间不重试自测 OK", budgets_nc)
+
     # 工具轮次用尽: 给模型一次"无工具"收尾汇报的机会(不再由程序替它发消息)
     bot2.mode = MODE_NORMAL
     bot2.session = Session(999)

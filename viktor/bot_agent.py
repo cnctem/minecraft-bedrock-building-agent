@@ -9,7 +9,7 @@ import urllib.request
 
 import capabilities
 
-from .constants import MODE_EXECUTE, MODE_NORMAL, PIN_MODES, RETRYABLE_HTTP
+from .constants import CREATIVE_MODES, MODE_EXECUTE, MODE_NORMAL, PIN_MODES, RETRYABLE_HTTP
 from .paths import log
 from .profiles import EFFORT_KEYS, LIMIT_DEFAULTS, LIMIT_KEYS, MODES, PROMPTS, TOOLS, Mode
 from .session import Session
@@ -297,19 +297,30 @@ class BotAgentMixin:
                 # finish=length: 思考 token 与正文/工具调用共用 max_tokens, 复杂规划
                 # 会把额度烧在思考上, 导致正文为空、工具调用为空——玩家看到沉默。
                 if finish == "length" and budget_retries < 1:
-                    budget_retries += 1
+                    # 抬高额度要有实际空间才重试: 若当前额度已达到(或超过)重试上限,
+                    # 再发一次请求与刚才完全等价, 只会把同一份额度再烧一遍, 纯浪费一整轮生成。
+                    raised = max(params["max_tokens"],
+                                 self.cfg.get("retry_max_reply_tokens", 32768))
+                    if raised > params["max_tokens"]:
+                        budget_retries += 1
+                        log(f"[API] 输出被 max_tokens={params['max_tokens']} 截断, "
+                            f"抬高到 {raised} 重试")
+                        continue
                     log(f"[API] 输出被 max_tokens={params['max_tokens']} 截断, "
-                        f"抬高到 {max(params['max_tokens'], self.cfg.get('retry_max_reply_tokens', 32768))} 重试")
-                    continue
+                        f"但已达重试上限 {raised} 无法再抬高, 不再重试")
                 content = msg.get("content") or ""
                 if finish == "length":
                     # 重试后仍被截断: 有正文就发正文(截断也好过全无), 一字未吐就说明情况
                     if not content.strip():
-                        log("[API] 抬高额度后仍无正文, 告知玩家")
-                        msg_txt = ("这次一次性请求内容较多, 我没能一次算完, 请拆成更小的请求重发。"
-                                   if oneshot else
-                                   "这件事我一遍想不完, 刚才没能给出答复。请拆小一点再说, "
-                                   "或者让我开创造模式慢慢做。")
+                        log(f"[API] 截断后仍无正文(重试 {budget_retries} 次), 告知玩家")
+                        if oneshot:
+                            msg_txt = "这次一次性请求内容较多, 我没能一次算完, 请拆成更小的请求重发。"
+                        elif self._mode() in CREATIVE_MODES:
+                            msg_txt = ("这件事我一遍想不完, 刚才没能给出答复。请把它拆成更小的步骤, "
+                                       "一次让我只做一段, 我再接着往下干。")
+                        else:
+                            msg_txt = ("这件事我一遍想不完, 刚才没能给出答复。请拆小一点再说, "
+                                       "或者让我开创造模式慢慢做。")
                         self._sys(msg_txt)
                         return "(输出被截断且无正文, 已告知玩家拆分需求)", True
                 if self.body_forward and content.strip():
