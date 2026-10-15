@@ -1413,10 +1413,10 @@ def self_test():
         assert not bot2.body_forward and not bot2.tool_forward
         assert all("正文开" not in (m.get("content") or "") for m in bot2.session.messages), \
             "控制词不应进上下文"
-        # 工具预览取“工具命令”前 20 字
+        # 工具预览取“工具命令”前 40 字
         pv = Bot._tool_preview({"function": {"name": "run_server_command",
-             "arguments": json.dumps({"command": "fill 1 2 3 4 5 6 stone"})}})
-        assert pv.startswith("fill") and len(pv) == 20, pv
+             "arguments": json.dumps({"command": "fill 1 2 3 4 5 6 7 8 9 stone 0 replace air"})}})
+        assert pv.startswith("fill") and len(pv) == 40, pv
         # 转发只走 say_side, 不进上下文
         bot2.body_forward = bot2.tool_forward = True
         n0 = len(bot2.session.messages)

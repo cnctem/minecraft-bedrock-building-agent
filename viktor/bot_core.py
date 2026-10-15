@@ -83,7 +83,7 @@ class BotCoreMixin:
         self.mode = MODE_NORMAL          # 主对话当前模式(见 MODES); 一次性线程各自用 MODE_ONESHOT
         self._pinned: list[str] = []     # 本轮任务设置的常加载区域名(轮次结束自动移除)
         self.body_forward = False        # 正文转发开关(玩家用「正文开/关」切换; 仅显示, 不进上下文)
-        self.tool_forward = False        # 工具转发开关(玩家用「工具开/关」切换; 仅显示, 不进上下文)
+        self.tool_forward = True         # 工具转发开关(默认开; 玩家用「工具开/关」切换; 仅显示, 不进上下文)
         self._backup_running = False     # 「备份」控制词的后台热备份是否在跑(期间不开新任务)
 
     def _write_state(self) -> None:
@@ -143,9 +143,9 @@ class BotCoreMixin:
             self.session.add_system(skills)
         # 初始模式(normal)注记, 紧跟在 system prompt 之后、第一条用户消息之前
         self.session.add_system(self._mode_note())
-        # 转发开关随会话初始化复位(默认关)
+        # 转发开关随会话初始化复位(正文默认关, 工具默认开)
         self.body_forward = False
-        self.tool_forward = False
+        self.tool_forward = True
         log(f"=== 会话 #{self.session.id} 开始 (玩家: {sorted(self.players)}) ===")
 
     def _end_session(self):

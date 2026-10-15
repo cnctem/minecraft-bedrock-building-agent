@@ -90,7 +90,7 @@ class BotControlMixin:
 
     @staticmethod
     def _tool_preview(tc: dict) -> str:
-        """工具转发预览(前20字): run_server_command 给命令; ptc 给子工具名; 其余给 名+参数。"""
+        """工具转发预览(前40字): run_server_command 给命令; ptc 给子工具名; 其余给 名+参数。"""
         fn = tc.get("function") or {}
         name = fn.get("name") or "?"
         raw = fn.get("arguments") or ""
@@ -106,10 +106,10 @@ class BotControlMixin:
             body = "ptc " + ",".join(s for s in subs if s)
         else:
             body = f"{name} {raw}".strip() if raw else name
-        return re.sub(r"\s+", " ", body).strip()[:20]
+        return re.sub(r"\s+", " ", body).strip()[:40]
 
     def _forward_tool(self, tc: dict):
-        """工具转发(开关): 每次工具调用以 [工具]+前20字 发到聊天, 仅供观察, 不进上下文。"""
+        """工具转发(开关): 每次工具调用以 [工具]+前40字 发到聊天, 仅供观察, 不进上下文。"""
         if self.tool_forward:
             preview = self._tool_preview(tc)
             if preview:
