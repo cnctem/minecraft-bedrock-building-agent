@@ -66,9 +66,13 @@ class BotAgentMixin:
         text = PROMPTS.get(m.prompt, "")
         if text:
             parts.append(text)
-        parts.append(
-            f"本模式能力参数(随模式刷新): 批量工具调用(ptc)单次最多 {p['ptc_stated']} 条; "
-            f"单次任务最多 {p['tool_rounds']} 轮工具调用; 单条回复输出上限 {p['max_tokens']} tokens。")
+        caps = [f"批量工具调用(ptc)单次最多 {p['ptc_stated']} 条"]
+        # 只有一次性模式明示工具轮次(闭式任务, 无收尾机会, 靠它克制冗余调用);
+        # 交互模式有收尾汇报, 不透露轮次, 免得模型为凑/省轮次而多想。
+        if m.reveal_rounds:
+            caps.append(f"单次任务最多 {p['tool_rounds']} 轮工具调用(用完即止, 没有补救机会)")
+        caps.append(f"单条回复输出上限 {p['max_tokens']} tokens")
+        parts.append("本模式能力参数(随模式刷新): " + "; ".join(caps) + "。")
         return "\n\n".join(parts)
 
     def _allowed_tools(self, mode: str | None = None) -> set:
@@ -279,6 +283,11 @@ class BotAgentMixin:
                         messages.append(m)
                     log(f"[介入] 任务进行中注入 {len(mid)} 条新消息: "
                         + "; ".join(f"{p}: {c}" for p, c in mid))
+                    # 安全点注入新的玩家消息 = 新的一次任务: 把工具轮次计数与上限一并重置,
+                    # 让新请求拿到一份完整预算(插入后重新开始计数), 而不是接着旧任务扣。
+                    # 一次性对话是闭式任务, 不走这条路(它的轮次上限始终是硬顶)。
+                    rounds = 0
+                    round_cap = params["tool_rounds"]
                 # 安全点再查一次体积: 长任务中途上下文增长超预算就地压缩(清空兜底会换新会话),
                 # 然后按新会话重建本次请求的 messages。
                 if self._maybe_compact_for_size():

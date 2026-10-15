@@ -19,11 +19,12 @@ class Mode:
     三个维度互相独立、可复用: 计划/执行模式提示词不同但可共用 heavy 限制;
     creative_max 只是 heavy 限制 ×2 再换 max 思考强度; 一次性则换一张工具白名单。"""
     __slots__ = ("prompt", "limits", "tools", "effort", "scale", "label",
-                 "next_modes", "reset_to")
+                 "next_modes", "reset_to", "reveal_rounds")
 
     def __init__(self, prompt: str, limits: str, tools: str = "all",
                  effort: str = "normal", scale: int = 1, label: str = "",
-                 next_modes: tuple = (), reset_to: str = MODE_NORMAL):
+                 next_modes: tuple = (), reset_to: str = MODE_NORMAL,
+                 reveal_rounds: bool = False):
         self.prompt = prompt
         self.limits = limits
         self.tools = tools
@@ -32,6 +33,9 @@ class Mode:
         self.label = label
         self.next_modes = tuple(next_modes)
         self.reset_to = reset_to
+        # 模式注记是否向模型明示“工具轮次”上限。交互模式(有收尾汇报机会)一律不明示,
+        # 免得模型为凑轮次而多想/缩手缩脚; 一次性是闭式任务(无补救机会), 必须明示。
+        self.reveal_rounds = reveal_rounds
 
 
 # 提示词 profile: 只放"行为", 不含任何数字(数字随模式注记刷新)
@@ -95,6 +99,7 @@ MODES = {
                             next_modes=(MODE_EXECUTE,)),
     MODE_EXECUTE:      Mode("execute",  "heavy",   "all",         "creative",     label="执行", scale=2,
                             next_modes=(MODE_NORMAL,)),
-    MODE_ONESHOT:      Mode("oneshot",  "oneshot", "oneshot",  "oneshot",      label="一次性"),
+    MODE_ONESHOT:      Mode("oneshot",  "oneshot", "oneshot",  "oneshot",      label="一次性",
+                            reveal_rounds=True),
 }
 

@@ -1004,6 +1004,47 @@ def self_test():
     assert reply3 == "正常收尾" and seq3[0] == 5, (reply3, seq3[0])
     print("轮次上限切模式自测 OK")
 
+    # 安全点注入新的玩家消息: 刷新一轮工具轮次预算(插入后重新开始计数)
+    bot2.mode = MODE_NORMAL
+    bot2.session = Session(7777)
+    bot2.session.add_system(memory_note())
+    bot2.session.add_user("Tester: 造塔")
+    bot2._tls.session = bot2.session
+    bot2._tls.mode = MODE_NORMAL
+    bot2._tls.abort = bot2.abort
+    bot2._tls.soft_abort = bot2.soft_abort
+    bot2.cfg["max_tool_rounds"] = 2
+    reset_seq = [0]
+
+    def fake_post_reset(messages, params):
+        reset_seq[0] += 1
+        if reset_seq[0] == 1:
+            # 第 1 轮工具往返中途玩家发来新消息: 下一个安全点会被注入 -> 重置轮次
+            bot2.pending.append(("Tester", "顺便把门也开个口"))
+        if reset_seq[0] <= 3:
+            return {"role": "assistant", "content": "", "tool_calls": [
+                {"id": f"R{reset_seq[0]}", "type": "function",
+                 "function": {"name": "find_items", "arguments": '{"query":"stone","limit":1}'}}]}, "tool_calls"
+        return {"role": "assistant", "content": "收尾", "tool_calls": None}, "stop"
+
+    orig_reset = bot2._post
+    bot2._post = fake_post_reset
+    bot2.abort.clear(); bot2.soft_abort.clear(); bot2.pending.clear()
+    try:
+        reply_reset, _ = bot2.call_api()
+    finally:
+        bot2._post = orig_reset
+        bot2.cfg["max_tool_rounds"] = 8
+        bot2.mode = MODE_NORMAL
+        for attr in ("session", "mode", "abort", "soft_abort", "oneshot"):
+            if hasattr(bot2._tls, attr):
+                delattr(bot2._tls, attr)
+    # 不重置的话上限 2 轮就撞到收尾; 注入后重新计数, 跑满 3 轮工具才进收尾(post 共 4 次)
+    assert reply_reset == "收尾" and reset_seq[0] == 4, (reply_reset, reset_seq[0])
+    assert any("顺便把门" in (m.get("content") or "") for m in bot2.session.messages), \
+        "注入的玩家消息应写进上下文"
+    print("安全点注入刷新轮次自测 OK")
+
     # API 错误有界退避重试: 可重试的 503 重试后成功; 400 不重试直接抛错
     import io as _io
     import urllib.error as _ue
@@ -1096,6 +1137,9 @@ def self_test():
     sp = bot2._mode_note(MODE_CREATIVE)
     assert "创造模式" in sp and "先规划后施工" in sp
     assert "施工后必复检" in sp and "发现问题主动修复" in sp
+    # 交互模式(有收尾汇报)不明示工具轮次, 免得模型为凑/省轮次而多想
+    assert "轮工具调用" not in sp and "工具轮次" not in sp, sp
+    assert "轮工具调用" not in bot2._mode_note(MODE_NORMAL)
     # 创造模式结束后 ptc 上限应回落
     bot2._apply_mode_limits(bot2._mode_params())
     _m, _r, _st = capabilities.get_ptc_limits()
@@ -1248,6 +1292,8 @@ def self_test():
     osp = bot2._mode_note(MODE_ONESHOT)
     assert "一次性对话模式" in osp and "必须一次性做完" in osp
     assert "创造模式(当前已开启)" not in osp
+    # 一次性是闭式任务(无收尾机会): 必须明示工具轮次上限, 提醒别做冗余操作
+    assert "轮工具调用" in osp and "用完即止" in osp, osp
     # 完整一次性执行: 独立 context, 多轮工具(查位置→写记忆→说话), 主对话不受影响
     tsess = bot2.session
     tmsg_before = list(tsess.messages)
