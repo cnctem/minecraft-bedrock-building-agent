@@ -189,6 +189,7 @@ class BotControlMixin:
         self.session_counter += 1
         self.session = Session(self.session_counter)
         self.session.messages = msgs
+        self._context_warn_level = 0  # 压缩后上下文变短, 占用提醒档位复位
         log(f"=== 会话 #{self.session.id} 开始(由压缩重建, 消息 {len(msgs)} 条) ===")
 
     def _compact_session(self) -> dict:

@@ -9,7 +9,8 @@ import urllib.request
 
 import capabilities
 
-from .constants import CREATIVE_MODES, MODE_EXECUTE, MODE_NORMAL, PIN_MODES, RETRYABLE_HTTP
+from .constants import (CONTEXT_WARN_START_PCT, CONTEXT_WARN_STEP_PCT, CREATIVE_MODES,
+                        MODE_EXECUTE, MODE_NORMAL, PIN_MODES, RETRYABLE_HTTP)
 from .paths import log
 from .profiles import EFFORT_KEYS, LIMIT_DEFAULTS, LIMIT_KEYS, MODES, PROMPTS, TOOLS, Mode
 from .session import Session
@@ -111,6 +112,7 @@ class BotAgentMixin:
             return False
         used = Session._est_tokens(self.session.messages)
         budget = self._input_token_budget()
+        self._maybe_warn_context_size(used)
         if used <= budget:
             return False
         msgs, stats = self._build_compact_messages()
@@ -128,6 +130,24 @@ class BotAgentMixin:
         if self.cfg.get("notify_context_clear", True):
             self._sys("上下文太长, 我已压缩对话(保留玩家消息与我说过的话)。")
         return True
+
+    def _maybe_warn_context_size(self, used: int) -> None:
+        """上下文占用每跨过一档(70% 起、步长 10%)就用 [系统] 提醒玩家一次, 同一档只提一次。
+        分母是模型窗口(context_window_tokens, 默认 1M); 压缩/清空/新会话后档位复位,
+        之后会重新从 70% 起提醒。只提醒, 不改变任何执行行为。"""
+        window = self.cfg.get("context_window_tokens", 1048576)
+        if window <= 0:
+            return
+        pct = int(used * 100 / window)
+        level = (pct // CONTEXT_WARN_STEP_PCT) * CONTEXT_WARN_STEP_PCT
+        # 只提醒 70~90 这几档: 到 100% 就直接压缩(压缩本身会回一条 [系统]), 不再重复提醒。
+        if (level < CONTEXT_WARN_START_PCT or level >= 100
+                or level <= self._context_warn_level):
+            return
+        self._context_warn_level = level
+        log(f"[上下文] 估算 {used} token / 窗口 {window} (~{level}%), 已用 [系统] 提醒玩家")
+        self._sys(f"对话上下文已占用约 {level}%, 接近上限时我会自动压缩对话"
+                  f"(保留玩家消息与我说过的话), 当前任务不受影响。")
 
     def _input_token_budget(self) -> int:
         """输入能占多少 token: 模型窗口 − 本轮最大输出 − 安全余量。

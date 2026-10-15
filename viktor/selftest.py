@@ -390,6 +390,34 @@ def self_test():
     bot2.bridge.say_as_viktor = orig_say_c
     print("压缩自测 OK")
 
+    # 上下文占用提醒: 70% 起, 每跨 10% 一档提一次(同档不重复); 压缩/新会话后复位
+    war = []
+    orig_say_w = bot2.bridge.say_as_viktor
+    bot2.bridge.say_as_viktor = lambda text, *a, **k: war.append(text)
+    bot2.cfg["context_window_tokens"] = 1_000_000
+    bot2._context_warn_level = 0
+    bot2._maybe_warn_context_size(699_000)      # 69% -> 不提醒
+    assert war == [], war
+    bot2._maybe_warn_context_size(705_000)      # 70% -> 第一档
+    assert len(war) == 1 and "70%" in war[0], war
+    bot2._maybe_warn_context_size(790_000)      # 79% -> 仍 70 档, 不重复
+    assert len(war) == 1, war
+    bot2._maybe_warn_context_size(800_000)      # 80% -> 再提
+    bot2._maybe_warn_context_size(950_000)      # 95% -> 90 档
+    assert len(war) == 3 and "80%" in war[1] and "90%" in war[2], war
+    bot2._maybe_warn_context_size(990_000)      # 同 90 档不重复
+    bot2._maybe_warn_context_size(1_050_000)    # 超 100% -> 由压缩接管, 不提醒
+    assert len(war) == 3, war
+    # 压缩后档位复位: 重新从 70% 起提醒
+    bot2.session = Session(43210)
+    bot2._apply_compact([{"role": "system", "content": "x"}],
+                        {"kept_user": 0, "kept_speech": 0, "dropped": 0})
+    assert bot2._context_warn_level == 0
+    bot2._maybe_warn_context_size(705_000)
+    assert len(war) == 4, war
+    bot2.bridge.say_as_viktor = orig_say_w
+    print("上下文占用提醒自测 OK")
+
     # ===== 状态 / 备份控制词自测 =====
     # 两个工具已下线: 模型侧不可见, 改由程序控制词提供
     tnames = set(capabilities.registered_names())

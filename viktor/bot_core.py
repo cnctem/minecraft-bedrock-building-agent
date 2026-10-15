@@ -82,6 +82,7 @@ class BotCoreMixin:
         self._nudge = False              # 置位 = 唤醒 worker 但不带用户消息(计划模式主动引导用)
         self.mode = MODE_NORMAL          # 主对话当前模式(见 MODES); 一次性线程各自用 MODE_ONESHOT
         self._pinned: list[str] = []     # 本轮任务设置的常加载区域名(轮次结束自动移除)
+        self._context_warn_level = 0     # 上下文占用提醒已报到哪一档(70 起; 压缩/新会话后复位)
         self.body_forward = False        # 正文转发开关(玩家用「正文开/关」切换; 仅显示, 不进上下文)
         self.tool_forward = True         # 工具转发开关(默认开; 玩家用「工具开/关」切换; 仅显示, 不进上下文)
         self._backup_running = False     # 「备份」控制词的后台热备份是否在跑(期间不开新任务)
@@ -146,6 +147,7 @@ class BotCoreMixin:
         # 转发开关随会话初始化复位(正文默认关, 工具默认开)
         self.body_forward = False
         self.tool_forward = True
+        self._context_warn_level = 0  # 新会话上下文占用从零开始, 提醒档位复位
         log(f"=== 会话 #{self.session.id} 开始 (玩家: {sorted(self.players)}) ===")
 
     def _end_session(self):
