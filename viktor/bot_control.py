@@ -315,6 +315,23 @@ class BotControlMixin:
                 log("[恢复] 技能清单已更新, 末尾补注入一条")
         log(f"[恢复] 从 {p.name} 灌回 {len(msgs)} 条消息, 模式={MODES[self.mode].label}")
 
+    @staticmethod
+    def _dump_has_conversation(path: Path) -> bool:
+        """落盘文件里是否有实际对话(user/assistant)。历史遗留的空会话(只有系统注记)不参与恢复。"""
+        try:
+            for line in path.read_text(encoding="utf-8").splitlines():
+                if not line.strip():
+                    continue
+                try:
+                    role = json.loads(line).get("role")
+                except ValueError:
+                    continue
+                if role in ("user", "assistant"):
+                    return True
+        except OSError:
+            return False
+        return False
+
     def _on_restore_session(self, name: str):
         """硬编码控制词"恢复会话": 把最近一次落盘的会话灌回(程序处理, 不走模型)。"""
         with self.cv:
@@ -322,8 +339,9 @@ class BotControlMixin:
         if busy:
             self._sys("现在有任务在进行, 请先「停止」或等它做完, 再恢复会话。")
             return
-        dumps = sorted(paths.SESSION_DIR.glob("session-*.jsonl"),
-                       key=lambda p: p.stat().st_mtime, reverse=True)
+        dumps = [p for p in sorted(paths.SESSION_DIR.glob("session-*.jsonl"),
+                                   key=lambda p: p.stat().st_mtime, reverse=True)
+                 if self._dump_has_conversation(p)]
         if not dumps:
             self._sys("没有可恢复的历史会话。")
             return

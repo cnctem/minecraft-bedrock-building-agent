@@ -211,13 +211,24 @@ class Session:
         return [{"role": "system", "content": SYSTEM_PROMPT}] \
             + self._sanitize(self.messages)
 
+    def has_conversation(self) -> bool:
+        """是否含实际对话(玩家消息/发言)。只有系统注记(记忆/技能书/模式)的会话没有落盘价值。"""
+        return any(m.get("role") in ("user", "assistant") for m in self.messages)
+
     def dump(self, directory: Path | None = None, tag: str = "session"):
+        """把会话落盘为 jsonl。只有系统注记、没有实际对话的会话不落盘——
+        否则“玩家进服后立刻退出/重启”会留下空会话文件, 污染 logs/sessions/,
+        还会被“恢复会话”当成最近一段误选。返回落盘路径, 跳过时返回 None。"""
+        if not self.has_conversation():
+            log(f"[会话] #{self.id} 只有系统注记、无对话内容, 跳过落盘")
+            return None
         directory = directory or paths.SESSION_DIR
         directory.mkdir(parents=True, exist_ok=True)
         name = self.started.strftime(f"{tag}-%Y%m%d-%H%M%S") + f"-s{self.id}.jsonl"
         with open(directory / name, "w", encoding="utf-8") as f:
             for m in self.messages:
                 f.write(json.dumps(m, ensure_ascii=False) + "\n")
+        return directory / name
 
 
 class OneShotContext:

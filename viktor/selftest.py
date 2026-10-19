@@ -1461,6 +1461,24 @@ def self_test():
     rdump.unlink(missing_ok=True)
     print("恢复会话自测 OK")
 
+    # 仅系统注记的空会话不落盘(否则会污染 sessions/ 并被“恢复”误选)
+    esess = Session(9999)
+    esess.add_system(memory_note())
+    _before = set(paths.SESSION_DIR.glob("session-*.jsonl"))
+    assert esess.dump() is None, "只有系统注记的会话不应落盘"
+    assert set(paths.SESSION_DIR.glob("session-*.jsonl")) == _before, "不应新增空会话文件"
+    esess.add_user("Bob: 你好")
+    _p = esess.dump()
+    assert _p is not None and _p.exists(), "有对话的会话应正常落盘"
+    assert bot2._dump_has_conversation(_p), "有 user 的 dump 应算有对话"
+    _emptyp = paths.SESSION_DIR / "session-20000101-000000-s0.jsonl"
+    _emptyp.write_text(json.dumps({"role": "system", "content": "x"}) + "\n",
+                       encoding="utf-8")
+    assert not bot2._dump_has_conversation(_emptyp), "只有 system 的历史 dump 应被跳过"
+    _p.unlink(missing_ok=True)
+    _emptyp.unlink(missing_ok=True)
+    print("空会话不落盘自测 OK")
+
     # 物品/方块 ID 速查(数据来自 data/items.json)
     r = capabilities.execute("find_items", '{"query":"混凝土","limit":40}')
     assert "white_concrete" in r and "白色混凝土" in r, r
