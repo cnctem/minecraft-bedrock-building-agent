@@ -20,8 +20,8 @@ from .constants import (
     PIN_MODES,
     PIN_NAME,
     RE_LINE,
-    SCAN_MAX_SLICE,
-    SCAN_STATED_SLICE,
+    SCAN_MAX_CELLS,
+    SCAN_STATED_CELLS,
 )
 from .paths import log
 from .profiles import MODES
@@ -88,9 +88,10 @@ class BotToolsMixin:
         ext = sorted((ex, ey, ez))
         if ext[0] != 1:
             raise BusArgError(f"这不是 1 格厚的切面({ex}×{ey}×{ez})。请让其中一个轴只有 1 格。")
-        if ext[2] > SCAN_MAX_SLICE:
-            raise BusArgError(f"切面单边最多 {SCAN_STATED_SLICE} 格(程序上限 {SCAN_MAX_SLICE}), "
-                              f"当前 {ex}×{ey}×{ez}, 请分几次扫描。")
+        cells = ex * ey * ez
+        if cells > SCAN_MAX_CELLS:
+            raise BusArgError(f"单层切面总格数最多 {SCAN_STATED_CELLS} 格(程序上限 {SCAN_MAX_CELLS}), "
+                              f"当前 {ex}×{ey}×{ez}={cells} 格, 请分几次扫描。")
         cmd = f"scriptevent viktor:scan {rid} {x1} {y1} {z1} {x2} {y2} {z2} {dim}"
         if filt:
             cmd += f" {filt}"

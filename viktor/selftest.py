@@ -634,6 +634,19 @@ def self_test():
                                                "x2": 2, "y2": 2, "z2": 2})
     assert "分几次" in bot2._tool_scan_blocks({"x1": 0, "y1": 0, "z1": 0,
                                               "x2": 30, "y2": 0, "z2": 30})
+    # 新口径: 1 格厚 + 单层总格数 ≤256(程序放行 ≤300), 可拉 1×1×256 长条
+    from .bus import BusArgError
+    assert "viktor:scan" in bot2._scan_cmd("r1", {"x1": 0, "y1": 0, "z1": 0,
+                                                  "x2": 0, "y2": 0, "z2": 255})   # 1×1×256
+    assert "viktor:scan" in bot2._scan_cmd("r2", {"x1": 0, "y1": 0, "z1": 0,
+                                                  "x2": 15, "y2": 0, "z2": 15})  # 16×16×1
+    assert "viktor:scan" in bot2._scan_cmd("r3", {"x1": 0, "y1": 0, "z1": 0,
+                                                  "x2": 16, "y2": 0, "z2": 15})  # 272 格(余量内)
+    try:
+        bot2._scan_cmd("r4", {"x1": 0, "y1": 0, "z1": 0, "x2": 0, "y2": 0, "z2": 300})
+        raise AssertionError("301 格应被拒")
+    except BusArgError as e:
+        assert "总格数最多 256" in str(e), e
 
     # 并发批测: ptc 里连续的多个 scan 只触发 1 次 send_commands(整批一次下发)
     capabilities.set_bus_batch_runner(bot2._run_bus_batch)

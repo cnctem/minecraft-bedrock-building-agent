@@ -41,8 +41,8 @@ MODE_EXECUTE = "execute"  # 未来: 只执行既定计划
 MODE_ONESHOT = "oneshot"  # 只能由 "1 ..." 触发, set_mode 进不去/出不来/不可知
 CREATIVE_MODES = (MODE_CREATIVE, MODE_CREATIVE_MAX)
 PIN_MODES = (MODE_CREATIVE, MODE_CREATIVE_MAX, MODE_EXECUTE)  # 支持常加载: 创造家族 + 执行(施工)
-SCAN_STATED_SLICE = 16  # scan_blocks 向模型声明的切面单边上限(16×16×1)
-SCAN_MAX_SLICE = 20     # scan_blocks 程序实际允许(留一倍余量)
+SCAN_STATED_CELLS = 256  # scan_blocks 向模型声明的单层总格数上限(1 格厚, 总格数 ≤256)
+SCAN_MAX_CELLS = 300     # 程序实际允许(留余量; 行为包兜底同值)
 CONTEXT_WARN_START_PCT = 70  # 上下文占用提醒起始档(第一次; 分母是模型窗口, 默认 1M)
 CONTEXT_WARN_STEP_PCT = 10   # 之后每跨过这么多百分点再提醒一次(70/80/90...)
 # 走服务端请求总线的查询工具: name -> (kind, 超时配置项)

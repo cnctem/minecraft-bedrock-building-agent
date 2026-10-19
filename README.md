@@ -174,7 +174,7 @@ python3 bot.py --test         # 解析逻辑自测
 | `get_player_position(player?)` | 在线玩家实时坐标（行为包脚本，无指令可查）。返回整数**方块坐标**（向下取整），与玩家屏幕左上角显示的坐标完全一致 |
 | `get_player_hand(player?)` | 在线玩家手持物品 |
 | `get_block(x, y, z, dimension?)` | 读坐标上的方块类型与状态（行为包脚本；基岩版无 `/data`） |
-| `scan_blocks(x1..z2, dimension?, filter?)` | 批量扫一个 1 格厚切面（≤16×16×1，厚轴可为 X/Y/Z）：默认回非空气方块，给 `filter` 则回类型含该关键字的方块并附未匹配类型统计 |
+| `scan_blocks(x1..z2, dimension?, filter?)` | 批量扫一个 1 格厚切面（**单层总格数 ≤256**；厚轴可为 X/Y/Z，所以除 16×16×1 外也能拉 1×1×256 的长条）：默认回非空气方块，给 `filter` 则回类型含该关键字的方块并附未匹配类型统计 |
 | `find_items(query?, category?, limit?)` | 查基岩版物品/方块 ID 速查表（唯一权威来源）。`query` 支持中文/英文/ID 片段子串匹配，`category` 限定分类，不传参数返回分类总览。结果 id 可直接用于 `give`/`fill`/`setblock` |
 | `use_skill(name, file?, force?)` | 按需载入一本技能书（skill）的正文；`file` 展开其附带资料。系统在会话开头只列出技能名与适用场景，正文用时才载入 |
 | `search_wiki(query, lang?, limit?)` | 在 Minecraft Wiki 搜条目（默认中文 wiki，`lang="en"` 切英文），返回候选标题（含重定向提示）与摘要；再用 `read_wiki_page` 读正文。查配方/掉落/生成/机制等游戏事实 |
