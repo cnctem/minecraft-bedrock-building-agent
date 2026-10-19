@@ -78,7 +78,7 @@ TOOLS = {
     "all": None,
     "oneshot": {"only": {
         "send_chat_message", "update_memory", "get_player_activity",
-        "get_player_position", "get_player_hand",
+        "get_player_position", "get_player_hand", "search_wiki", "read_wiki_page",
         "run_server_command", "get_block", "scan_blocks", "ptc",
         "find_items", "use_skill",
     }},

@@ -11,7 +11,7 @@ from pathlib import Path
 
 import capabilities
 
-from . import paths
+from . import paths, wiki
 from .bus import BusArgError, Req
 from .constants import (
     BUS_TIMEOUT_TEXT,
@@ -300,6 +300,33 @@ class BotToolsMixin:
         if err := self._require_bus():
             return err
         return self._bus_call("scan_blocks", args or {})
+
+    # ---------- Minecraft Wiki 查询(HTTP, 实时抓取) ----------
+    # 定位是施工辅助: 查事实与数值(配方/掉落/生成/机制/数据值)。ID 用 find_items,
+    # 施工手法用技能书。两个工具都是纯查询, 在 ptc 里默认并行。
+
+    def _wiki_lang(self, args: dict) -> str:
+        lang = (args.get("lang") or self.cfg.get("wiki_default_lang", "zh")).strip().lower()
+        return lang if lang in wiki.WIKI_SITES else "zh"
+
+    def _tool_search_wiki(self, args: dict) -> str:
+        return wiki.search(
+            args.get("query", ""),
+            lang=self._wiki_lang(args),
+            limit=args.get("limit", 8),
+            timeout=self.cfg.get("wiki_timeout_sec", 15),
+            user_agent=self.cfg.get("wiki_user_agent", ""),
+        )
+
+    def _tool_read_wiki_page(self, args: dict) -> str:
+        return wiki.read_page(
+            args.get("title", ""),
+            section=args.get("section") or "",
+            lang=self._wiki_lang(args),
+            max_chars=self.cfg.get("wiki_max_chars", 12000),
+            timeout=self.cfg.get("wiki_timeout_sec", 15),
+            user_agent=self.cfg.get("wiki_user_agent", ""),
+        )
 
     def _extract_command_output(self, text: str, cmd: str) -> list[str]:
         """从日志文本里抽出指令输出。ERROR/WARN 行必须保留并加标记——

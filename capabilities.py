@@ -12,6 +12,7 @@ AI 决定调用时由 bot 执行 handler 并把结果回传, 然后 AI 再生成
 import json
 import re
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -100,7 +101,7 @@ GET_ACTIVITY_SCHEMA = {
 
 # ---------- PTC: 批量工具调用 ----------
 # 一次提交多个工具调用, 合并成一条结果返回。
-# 串行约束只针对"有先后依赖 / 有副作用"的工具(施工指令、状态变更);
+# 执行端按工具的并发类别(见 _CONCURRENCY)调度: 无副作用的调用默认并行,
 # 查询类工具(get_player_position / get_block / scan_blocks ...)走 bot 的服务端请求总线:
 # 同一批里的查询会先全部登记、再一次性下发, 只付一次 stdin 轮询延迟, 再按请求 id 收齐。
 MAX_PTC_CALLS = 24          # 程序实际放行数(留一倍余量)
@@ -108,8 +109,18 @@ STATED_PTC_CALLS = 12       # 提示词/报错向模型声明的数(口头限制
 PTC_RESULT_LIMIT = 30000  # 合并结果的字符上限, 防止一条工具结果撑爆上下文
 BUS_BATCH_MAX = 8         # 一次下发给服务端的 bus 请求上限(保护服务端主线程)
 
-# 并发类别: name -> "bus" | "serial"(缺省即 serial)。由 register(...) 声明。
-_CONCURRENCY: dict[str, str] = {}
+# 并发类别: "parallel"(缺省) | "bus" | "serial", 由 register(...) 声明。
+# - parallel: 与相邻的 parallel 调用并行执行(纯查询/HTTP, 无副作用), 只等最慢一个;
+# - bus: 服务端请求总线, 同批合并成一次下发;
+# - serial: 有副作用/有顺序依赖/非线程安全, 逐个按数组顺序执行; 它天然是屏障——
+#   前后不会与它并发, 保证"先写后读"这类顺序语义不被并行打乱。
+# 由此, HTTP 查询(wiki)与只读查询默认并行; MC 指令/改状态/写记忆在执行端排队。
+_CONCURRENCY: dict[str, str] = {
+    "update_memory": "serial",
+    "stay_silent": "serial",
+    "get_player_activity": "parallel",
+    "find_items": "parallel",
+}
 
 # bot 注入的"批量执行器": 接 [(name, args_dict), ...], 返回等长结果列表。
 # 未注入时 bus 工具退化为逐个串行 execute(), 便于自测/无服务器场景。
@@ -187,8 +198,16 @@ def _ptc_args(item: dict):
     return {}
 
 
+def _conc(name: str) -> str:
+    return _CONCURRENCY.get(name, "parallel")
+
+
 def _is_bus(name: str) -> bool:
-    return _CONCURRENCY.get(name) == "bus"
+    return _conc(name) == "bus"
+
+
+def _is_parallel(name: str) -> bool:
+    return _conc(name) == "parallel"
 
 
 def _parse_args(args_json: str) -> dict:
@@ -202,6 +221,29 @@ def _parse_args(args_json: str) -> dict:
 def _is_err(result: str) -> bool:
     return ("[错误]" in result or "[警告]" in result
             or result.startswith("错误:"))
+
+
+def _run_parallel(chunk: list, blocked: set) -> list[str]:
+    """并行执行一组可并行调用, 返回与 chunk 等长的结果(按原顺序)。
+    子线程要复制主线程的会话级设置(工具黑名单/ptc 上限), 否则 execute() 里的二次校验会失效。"""
+    snap = (set(blocked), getattr(_LOCAL, "max_calls", None),
+            getattr(_LOCAL, "result_limit", None), getattr(_LOCAL, "stated_calls", None))
+
+    def _one(item):
+        _, name, args_json = item
+        _LOCAL.blocked = set(snap[0])
+        if snap[1]:
+            _LOCAL.max_calls = snap[1]
+        if snap[2]:
+            _LOCAL.result_limit = snap[2]
+        if snap[3]:
+            _LOCAL.stated_calls = snap[3]
+        return execute(name, args_json)
+
+    if len(chunk) == 1:
+        return [_one(chunk[0])]
+    with ThreadPoolExecutor(max_workers=min(4, len(chunk))) as ex:
+        return list(ex.map(_one, chunk))
 
 
 def ptc(calls, stop_on_error: bool = False) -> str:
@@ -259,6 +301,21 @@ def ptc(calls, stop_on_error: bool = False) -> str:
             idx += 1
             continue
         name = job[1]
+        # 连续的 parallel 工具(纯查询/HTTP)并行执行: 只等最慢一个。
+        if _is_parallel(name):
+            group = []
+            while idx < n and jobs[idx][0] == "run" and _is_parallel(jobs[idx][1]):
+                group.append((idx, jobs[idx][1], jobs[idx][2]))
+                idx += 1
+            results = _run_parallel(group, blocked)
+            for (k, nm, _aj), res in zip(group, results):
+                emit_run(k, nm, res)
+            if stop_on_error and any(_is_err(r) for r in results):
+                skipped = n - idx
+                if skipped:
+                    out.append(f"(失败, 已按 stop_on_error 跳过剩余 {skipped} 个调用)")
+                break
+            continue
         # 连续的 bus 工具合成一批: 先全部登记, 一次下发, 再按 id 收齐。
         if _is_bus(name) and _BUS_BATCH_RUNNER is not None:
             group = []
@@ -280,7 +337,7 @@ def ptc(calls, stop_on_error: bool = False) -> str:
                     out.append(f"(失败, 已按 stop_on_error 跳过剩余 {skipped} 个调用)")
                 break
             continue
-        # 其余(有副作用/有顺序依赖)逐个串行执行。
+        # 其余(有副作用/有顺序依赖)逐个串行执行, 作为屏障隔开前后并发。
         result = execute(name, job[2])
         emit_run(idx, name, result)
         idx += 1
@@ -298,8 +355,9 @@ def ptc(calls, stop_on_error: bool = False) -> str:
 
 PTC_DESC = (
     "批量调用多个工具: 一次提交多个调用, 合并成一条返回, 省往返与上下文。"
-    "查询类调用(坐标/手持/方块/扫描)会在同一批里合并成一次下发, 只等一趟往返, 优先用它。"
-    "有先后依赖的施工/状态变更仍按数组顺序串行执行。"
+    "互不依赖的调用(查询/读资料等)会并行执行, 只等最慢一个; 有副作用或需按序的"
+    "(执行指令、改状态)仍按数组顺序串行执行, 并隔开前后并发。"
+    "有先后依赖、要先看结果再决定下一步时, 请分几次调用, 不要塞进同一批。"
     "上限见模式注记, 超了会被拒; 不允许嵌套 ptc; 每项写成 {\"tool\": \"名\", \"arguments\": {...}}。"
 )
 
@@ -313,7 +371,7 @@ PTC_SCHEMA = {
             "properties": {
                 "calls": {
                     "type": "array",
-                    "description": "要执行的调用列表, 按数组顺序串行执行",
+                    "description": "要执行的调用列表; 无副作用的调用并行执行, 有副作用的按数组顺序串行",
                     "items": {
                         "type": "object",
                         "properties": {
@@ -665,10 +723,11 @@ def tool_schemas(allow: set | None = None, mode_choices: list | None = None) -> 
     return out
 
 
-def register(name: str, schema: dict, handler, concurrency: str = "serial"):
+def register(name: str, schema: dict, handler, concurrency: str = "parallel"):
     """运行时注册新能力(bot 会注册依赖自身资源的能力, 如发消息)。
-    concurrency="bus" 表示走服务端请求总线: 同一批 ptc 里的查询会合并成一次下发;
-    缺省 "serial"(有副作用/有顺序依赖, ptc 里逐个串行)。"""
+    concurrency="parallel"(缺省): 同批 ptc 里与其他 parallel 调用并行;
+    "bus": 走服务端请求总线, 同批合并成一次下发;
+    "serial": 有副作用/有顺序依赖/非线程安全, 按数组顺序逐个执行并充当屏障。"""
     _REGISTRY[name] = (schema, handler)
     _CONCURRENCY[name] = concurrency
 

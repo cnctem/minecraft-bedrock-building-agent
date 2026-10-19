@@ -9,7 +9,7 @@ from pathlib import Path
 
 import capabilities
 
-from . import Bot, paths
+from . import Bot, paths, wiki
 from .bridge import ScreenBridge
 from .config import load_config
 from .constants import (
@@ -720,6 +720,47 @@ def self_test():
     assert "已保持安静" in _r and "UNIQUE_ARG" not in _r, _r
     assert "stay_silent -> " in _r, _r
     print("PTC 自测 OK")
+
+    # PTC 并发模型: 默认并行 + serial 屏障(执行端排队)
+    import time as _time
+    events = []
+
+    def _tool_h(nm, dur):
+        def h(_a):
+            events.append(("start", nm))
+            _time.sleep(dur)
+            events.append(("end", nm))
+            return f"ok:{nm}"
+        return h
+
+    def _reg_c(nm, dur, conc):
+        capabilities.register(nm, {"type": "function",
+                                   "function": {"name": nm, "parameters": {}}},
+                              _tool_h(nm, dur), concurrency=conc)
+
+    _reg_c("_p1", 0.3, "parallel")
+    _reg_c("_p2", 0.3, "parallel")
+    _reg_c("_s1", 0.1, "serial")
+    try:
+        t0 = _time.time()
+        r = capabilities.execute("ptc", json.dumps({"calls": [
+            {"tool": "_p1", "arguments": {}}, {"tool": "_p2", "arguments": {}}]}))
+        dt = _time.time() - t0
+        assert "ok:_p1" in r and "ok:_p2" in r, r
+        assert dt < 0.55, f"parallel 调用未并行(耗时 {dt:.2f}s)"
+        # serial 是屏障: 它的前一组先结束, 后一组才开始
+        events.clear()
+        capabilities.execute("ptc", json.dumps({"calls": [
+            {"tool": "_p1", "arguments": {}},
+            {"tool": "_s1", "arguments": {}},
+            {"tool": "_p2", "arguments": {}}]}))
+        assert events.index(("end", "_s1")) < events.index(("start", "_p2")), events
+        assert events.index(("end", "_p1")) < events.index(("start", "_s1")), events
+        print("PTC 并行 + serial 屏障自测 OK")
+    finally:
+        for _nm in ("_p1", "_p2", "_s1"):
+            capabilities._REGISTRY.pop(_nm, None)
+            capabilities._CONCURRENCY.pop(_nm, None)
 
     # 能力测试: 创造模式(权限/等待提醒/参数切换/payload/思维链剥离/会话复位)
     assert "set_mode" in [s["function"]["name"] for s in capabilities.tool_schemas()]
@@ -1459,6 +1500,36 @@ def self_test():
     r = capabilities.execute("use_skill", '{"name":"nonexistent"}')
     assert "没有名为" in r, r
     print("技能书自测 OK")
+
+    # wiki: HTML 清洗(丢 infobox/保留表格与配方网格) + 章节切分(离线, 不联网)
+    _w = (
+        '<div class="mw-parser-output">'
+        '<table class="infobox"><tr><td>硬度</td><td>3</td></tr></table>'
+        '<p>钻石（Diamond）是<b>稀有</b>物品。</p>'
+        '<h2>获取</h2><p>挖掘钻石矿石获得。</p>'
+        '<table class="wikitable"><tr><th>材料</th><th>配方</th></tr><tr><td>钻石块</td>'
+        '<td><span class="mcui mcui-Crafting_Table">'
+        '<span class="mcui-row"><span class="invslot"></span>'
+        '<span class="invslot"><span class="invslot-item" title="钻石块"></span></span></span>'
+        '<span class="mcui-output"><span class="invslot">'
+        '<span class="invslot-item" title="钻石"></span>'
+        '<span class="invslot-stacksize">9</span></span></span>'
+        '<span class="searchaux">[[|]]</span></span></td></tr></table>'
+        '<h2>数据值</h2><p>ID 为 diamond。</p></div>')
+    _t = wiki.html_to_text(_w)
+    assert "硬度" not in _t, "infobox 应被丢弃"
+    assert "钻石（Diamond）是稀有物品。" in _t, _t
+    assert "[[|]]" not in _t, "searchaux 应被丢弃"
+    assert "【配方】" in _t and "[钻石块]" in _t and "→ 钻石 x9" in _t, _t
+    assert [h[2] for h in wiki._headings(_t)] == ["获取", "数据值"], wiki._headings(_t)
+    _sec, _name = wiki._slice_section(_t, "获取")
+    assert _name == "获取" and "挖掘钻石矿石" in _sec and "数据值" not in _sec, _sec
+    assert wiki.first_paragraph("| x |\n\n钻石（Diamond）是稀有物品。", min_len=10) \
+        == "钻石（Diamond）是稀有物品。"
+    # 工具已注册且对模型可见
+    assert {"search_wiki", "read_wiki_page"} <= capabilities.registered_names()
+    assert {"search_wiki", "read_wiki_page"} <= bot2._allowed_tools(), "应全模式可用"
+    print("wiki 清洗/章节/注册自测 OK")
 
     # 转发开关: 正文开/关、工具开/关(控制词不进上下文; 转发只显示、不进上下文)
     fwd = []

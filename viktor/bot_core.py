@@ -21,8 +21,10 @@ from .schemas import (
     GET_HAND_SCHEMA,
     GET_POSITION_SCHEMA,
     PIN_REGION_SCHEMA,
+    READ_WIKI_PAGE_SCHEMA,
     RUN_COMMAND_SCHEMA,
     SCAN_BLOCKS_SCHEMA,
+    SEARCH_WIKI_SCHEMA,
     SEND_CHAT_SCHEMA,
     SET_MODE_SCHEMA,
 )
@@ -41,19 +43,28 @@ class BotCoreMixin:
         # bus 批量执行器: 同一批 ptc 查询一次性下发、按 id 收齐
         capabilities.set_bus_batch_runner(self._run_bus_batch)
         capabilities.set_bus_batch_max(cfg.get("bus_batch_max", 8))
-        capabilities.register("send_chat_message", SEND_CHAT_SCHEMA, self._tool_send_message)
-        capabilities.register("use_skill", capabilities.USE_SKILL_SCHEMA, self._tool_use_skill)
-        capabilities.register("run_server_command", RUN_COMMAND_SCHEMA, self._tool_run_command)
+        capabilities.register("send_chat_message", SEND_CHAT_SCHEMA, self._tool_send_message,
+                             concurrency="serial")
+        capabilities.register("use_skill", capabilities.USE_SKILL_SCHEMA, self._tool_use_skill,
+                             concurrency="serial")
+        capabilities.register("run_server_command", RUN_COMMAND_SCHEMA, self._tool_run_command,
+                             concurrency="serial")
         capabilities.register("get_player_position", GET_POSITION_SCHEMA,
                              self._tool_get_position, concurrency="bus")
         capabilities.register("get_player_hand", GET_HAND_SCHEMA,
                              self._tool_get_hand, concurrency="bus")
-        capabilities.register("set_mode", SET_MODE_SCHEMA, self._tool_set_mode)
+        capabilities.register("set_mode", SET_MODE_SCHEMA, self._tool_set_mode,
+                             concurrency="serial")
         capabilities.register("get_block", GET_BLOCK_SCHEMA,
                              self._tool_get_block, concurrency="bus")
         capabilities.register("scan_blocks", SCAN_BLOCKS_SCHEMA,
                              self._tool_scan_blocks, concurrency="bus")
-        capabilities.register("pin_region", PIN_REGION_SCHEMA, self._tool_pin_region)
+        capabilities.register("pin_region", PIN_REGION_SCHEMA, self._tool_pin_region,
+                             concurrency="serial")
+        capabilities.register("search_wiki", SEARCH_WIKI_SCHEMA, self._tool_search_wiki,
+                             concurrency="parallel")
+        capabilities.register("read_wiki_page", READ_WIKI_PAGE_SCHEMA, self._tool_read_wiki_page,
+                             concurrency="parallel")
         capabilities.set_ptc_limits(cfg.get("ptc_max_calls", 24),
                                     cfg.get("ptc_result_limit", 30000),
                                     cfg.get("ptc_stated_calls", 12))
