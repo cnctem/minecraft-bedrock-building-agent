@@ -17,6 +17,7 @@ from .constants import (
     COMPACT_WORD,
     EXIT_PLAN_WORD,
     FORCE_STOP_WORD,
+    IGNORE_TRIGGER,
     NO_STOP_WORD,
     ONESHOT_FORCE_STOP,
     ONESHOT_TRIGGER,
@@ -85,6 +86,10 @@ class BotAppMixin:
             name, content = chat.group(1), chat.group(2)
             log(f"<{name}> {content}")
             stripped = content.strip()
+            # 静默消息: "0 ..." 只给玩家看, 程序直接丢弃——不进队列/不进上下文/
+            # 不唤醒会话/不回复, 模型完全不知道这条消息存在。
+            if IGNORE_TRIGGER.match(stripped):
+                return
             # 一次性对话: "1 ..." 截获, 完全不进主对话、也不开启主会话(完全隔离)
             if ONESHOT_FORCE_STOP.match(stripped):
                 self._on_oneshot_force_stop(name)

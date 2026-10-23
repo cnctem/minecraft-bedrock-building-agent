@@ -1561,6 +1561,36 @@ def self_test():
     assert bot2.session is tsess and bot2.session.messages == tmsg_before
     print("一次性对话自测 OK")
 
+    # ===== 静默消息("0 ...")自测 =====
+    # "0 ..." 是玩家之间的普通聊天: 不进队列/不写上下文/不发言/不唤醒会话
+    osaid.clear()
+    bot2.pending.clear()
+    bot2.agent_busy = False
+    _mute_before = list(bot2.session.messages)
+    for _line in ("0 我先去挖矿, 别跟来", "0", "0\u3000全角空格也算"):
+        bot2.process_line(
+            f"[2026-10-10 18:55:00:000 INFO] [Scripting] [VIKTOR-CHAT] Tester: {_line}")
+    assert bot2.pending == [] and not bot2.agent_busy, (bot2.pending, bot2.agent_busy)
+    assert bot2.session.messages == _mute_before, "静默消息不应写主上下文"
+    assert osaid == [], osaid
+    assert spawned == [("Tester", "记住我现在的位置")], "静默消息不应触发一次性"
+    # 没有会话时也不该因为静默消息开会话(与一次性一致: 完全隔离)
+    _saved_sess = bot2.session
+    bot2.session = None
+    bot2.players.clear()
+    bot2.process_line("[2026-10-10 18:55:01:000 INFO] [Scripting] [VIKTOR-CHAT] Tester: 0 只是聊天")
+    assert bot2.session is None, "静默消息不应开启主会话"
+    bot2.session = _saved_sess
+    bot2.players.add("Tester")
+    # 前缀必须是 "0" + 空格(或单一个 0): "0x"/"0号..." 照旧交给模型
+    bot2.pending.clear()
+    for _line in ("0x 你好", "0号矿洞在哪"):
+        bot2.process_line(
+            f"[2026-10-10 18:55:02:000 INFO] [Scripting] [VIKTOR-CHAT] Tester: {_line}")
+    assert bot2.pending == [("Tester", "0x 你好"), ("Tester", "0号矿洞在哪")], bot2.pending
+    bot2.pending.clear()
+    print("静默消息自测 OK")
+
     # [系统] 前缀: 程序生成的提示带 [系统] 且不带 <维克托>; 模型发言带 <维克托> 不带 [系统]
     sys_out = []
     orig_send_cmd = bot2.bridge.send_command
