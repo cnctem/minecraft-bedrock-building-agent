@@ -5,6 +5,7 @@
   "normal_effort": "low",
   "creative_effort": "high",
   "creative_max_effort": "max",
+  "chat_dialog_window_sec": 180,
   "temperature": 0.7,
   "max_reply_tokens": 6000,
   "retry_max_reply_tokens": 32768,

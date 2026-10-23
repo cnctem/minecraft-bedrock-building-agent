@@ -17,6 +17,11 @@ from .profiles import MODES
 from .prompts import COMPACT_NOTE
 from .session import OneShotContext, Session, memory_note
 
+# 工具转发里永远不外显的“对话类”调用:
+# send_chat_message 的内容本身就是游戏内发言(再转一遍“[工具] send_chat_message …”是重复),
+# stay_silent 只是内部决定(显示出来反而暴露“维克托刚判断不该说话”, 纯噪音)。
+_NO_FORWARD_TOOLS = frozenset({"send_chat_message", "stay_silent"})
+
 
 class BotControlMixin:
     """控制词 / 计划模式 / 恢复会话 / 一次性对话。"""
@@ -90,9 +95,12 @@ class BotControlMixin:
 
     @staticmethod
     def _tool_preview(tc: dict) -> str:
-        """工具转发预览(前40字): run_server_command 给命令; ptc 给子工具名; 其余给 名+参数。"""
+        """工具转发预览(前40字): run_server_command 给命令; ptc 给子工具名; 其余给 名+参数。
+        发言/沉默类调用不外显: 直接调用返回空; ptc 里把它们过滤掉, 只剩它们也不外显。"""
         fn = tc.get("function") or {}
         name = fn.get("name") or "?"
+        if name in _NO_FORWARD_TOOLS:
+            return ""
         raw = fn.get("arguments") or ""
         try:
             args = json.loads(raw) if isinstance(raw, str) else (raw or {})
@@ -103,7 +111,10 @@ class BotControlMixin:
         elif name == "ptc" and isinstance(args, dict):
             subs = [capabilities._ptc_name(c) for c in (args.get("calls") or [])
                     if isinstance(c, dict)]
-            body = "ptc " + ",".join(s for s in subs if s)
+            subs = [s for s in subs if s and s not in _NO_FORWARD_TOOLS]
+            if not subs:
+                return ""
+            body = "ptc " + ",".join(subs)
         else:
             body = f"{name} {raw}".strip() if raw else name
         return re.sub(r"\s+", " ", body).strip()[:40]
@@ -295,6 +306,8 @@ class BotControlMixin:
         self.session_counter += 1
         self.session = Session(self.session_counter)
         self.session.messages = msgs
+        # 重启后别把“正在对话”误判成冷启动: 从历史里找回最近一次对谁说过话(时间用 mtime 近似)
+        self._seed_dialog_from(msgs, p.stat().st_mtime)
         for m in reversed(msgs):
             if m.get("role") == "system" and (m.get("content") or "").startswith("# 当前模式: "):
                 label = m["content"].split("\n", 1)[0].split(": ", 1)[1].strip()

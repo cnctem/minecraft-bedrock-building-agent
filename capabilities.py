@@ -687,7 +687,8 @@ STAY_SILENT_SCHEMA = {
     "type": "function",
     "function": {
         "name": "stay_silent",
-        "description": "保持安静, 不向游戏内聊天栏发送任何消息。",
+        "description": ("不接话时调用的唯一方式。玩家之间的闲聊、明确在跟别人说话、"
+                        "已经道别之后的对话, 都调它。调用后本回合立即结束, 不要再补任何消息。"),
         "parameters": {"type": "object", "properties": {}},
     },
 }

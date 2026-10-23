@@ -3,6 +3,7 @@
 依赖方向: bot_agent → session/profiles/constants/paths/capabilities; 不 import 其它 bot_* 模块。
 """
 import json
+import re
 import time
 import urllib.error
 import urllib.request
@@ -29,6 +30,137 @@ class BotAgentMixin:
             return False
         return any((c.get("tool") or c.get("name")) == "send_chat_message"
                    for c in calls if isinstance(c, dict))
+
+    @staticmethod
+    def _spoken_text(tc: dict) -> str:
+        """取出一次工具调用里“真正说出口”的最后一句文本(直接 send_chat_message,
+        或 ptc 内嵌的最后一条)。用于记录「对话状态」: 对话是否还在、结尾是不是提问。"""
+        fn = tc.get("function") or {}
+        try:
+            args = json.loads(fn.get("arguments") or "{}")
+        except (TypeError, ValueError):
+            return ""
+        if not isinstance(args, dict):
+            return ""
+        if fn.get("name") == "send_chat_message":
+            return str(args.get("text") or "")
+        texts = []
+        for item in (args.get("calls") or []):
+            if not isinstance(item, dict) or capabilities._ptc_name(item) != "send_chat_message":
+                continue
+            a = capabilities._ptc_args(item)
+            if isinstance(a, str):
+                try:
+                    a = json.loads(a or "{}")
+                except ValueError:
+                    a = {}
+            if isinstance(a, dict) and a.get("text"):
+                texts.append(str(a["text"]))
+        return texts[-1] if texts else ""
+
+    _QUESTION_RE = re.compile(
+        r"(?:[?？]|吗|呢|么|好不好|对不对|行不行|要不要|可不可以|怎么样)[\s。.!！~～]*$")
+
+    @classmethod
+    def _asks_question(cls, text: str) -> bool:
+        """这句话是不是以提问收尾(用于对话状态: 你刚问过, 对方的短回答就是答案)。"""
+        lines = [ln.strip() for ln in (text or "").strip().splitlines() if ln.strip()]
+        if not lines:
+            return False
+        last = lines[-1]
+        if "?" in last or "？" in last:
+            return True
+        return bool(cls._QUESTION_RE.search(last))
+
+    @staticmethod
+    def _fmt_ago(sec: float) -> str:
+        sec = max(0, int(sec))
+        if sec < 60:
+            return f"{sec} 秒前"
+        if sec < 3600:
+            return f"{sec // 60} 分钟前"
+        return f"{sec / 3600:.1f} 小时前"
+
+    # ---------- 对话状态(判断“该不该接话”的依据) ----------
+
+    def _describe_dialog(self, player: str, now: float) -> str:
+        entry = self._dialog.get(player)
+        if not entry:
+            return f"- 你在这段对话里还没对 {player} 说过话"
+        ts, asked = entry
+        age = now - ts
+        q = "那次有提问" if asked else "那次没提问"
+        win = self.dialog_window_sec
+        if age > win:
+            span = f"{int(win // 60)} 分钟" if win >= 60 else f"{int(win)} 秒"
+            return (f"- 你对 {player} 最后一次发言: {self._fmt_ago(age)}, {q}"
+                    f"(已超出 {span}的对话窗口)")
+        return f"- 你对 {player} 最后一次发言: {self._fmt_ago(age)}, {q}"
+
+    def _dialog_note(self, batch: list[tuple[str, str]]) -> str:
+        """回合开头的「对话状态」注记: 玩家不带称呼时该不该接话, 靠这份事实记录判断,
+        而不是靠模型自己从长上下文里猜多久以前说过话。只追加、不改旧消息 -> 前缀缓存不受影响。"""
+        now = time.time()
+        senders = list(dict.fromkeys(p for p, _ in batch))
+        online = sorted(self.players)
+        lines = ["# 对话状态(系统记录; 以最新一条为准, 不要回应这条注记)",
+                 f"- 这句话来自: {', '.join(senders) or '(系统)'}; "
+                 f"当前在线 {len(online)} 人"
+                 + (f": {', '.join(online[:8])}" if online else "")]
+        for p in senders:
+            lines.append(self._describe_dialog(p, now))
+        # 顺带列出最近跟其他人聊过谁, 方便判断“这句话是不是在对别人说”
+        others = [p for p, _ in sorted(self._dialog.items(), key=lambda kv: -kv[1][0])
+                  if p not in senders][:2]
+        for p in others:
+            entry = self._dialog.get(p)
+            if entry and now - entry[0] <= self.dialog_window_sec:
+                lines.append(self._describe_dialog(p, now))
+        if not any((self._dialog.get(p) and now - self._dialog[p][0] <= self.dialog_window_sec)
+                   for p in senders):
+            lines.append("- 你和说话的玩家之间没有正在进行的对话: 没明确叫你时保持沉默。")
+        return "\n".join(lines)
+
+    def _update_dialog(self, audience: set[str], spoken: list[str], spoke: bool) -> None:
+        """回合结束后更新对话状态。说过话 -> 记下对谁说过、结尾是否提问;
+        保持沉默 -> 与这批玩家的连续对话就此断开(不能拿几分钟前的话当“还在聊”)。"""
+        if self._oneshot():
+            return
+        now = time.time()
+        who = {p for p in audience if p}
+        if spoke:
+            # 只要本轮说过的话里有提问就算“提过问”: 对方哪怕只回一个“3”也可能是在回答
+            asks = any(self._asks_question(t) for t in spoken)
+            for p in (who or set(self.players)):
+                self._dialog[p] = (now, asks)
+        else:
+            for p in who:
+                self._dialog.pop(p, None)
+        # 太久远的记录顺手清掉, 防止随在线玩家数无限增长
+        keep = max(self.dialog_window_sec * 4, 900)
+        self._dialog = {p: v for p, v in self._dialog.items() if now - v[0] <= keep}
+
+    def _seed_dialog_from(self, msgs: list[dict], at: float) -> None:
+        """恢复会话时从历史里找回最近一次“对谁说过话”, 免得重启后把正在对话误判成冷启动。
+        会话里没有逐条时间戳, 用落盘文件的 mtime 近似; 太久之前的记录自然会超出窗口。"""
+        speaker, text = "", ""
+        for m in msgs:
+            role = m.get("role")
+            if role == "user":
+                content = m.get("content") or ""
+                if ":" in content:
+                    speaker = content.split(":", 1)[0].strip()[:32]
+            elif role == "assistant":
+                for tc in (m.get("tool_calls") or []):
+                    t = self._spoken_text(tc)
+                    if t:
+                        text = t
+        if not text or not speaker:
+            return
+        asked = self._asks_question(text)
+        self._dialog[speaker] = (at, asked)
+        log(f"[恢复] 对话状态: 上次对 {speaker} 发言({self._fmt_ago(time.time() - at)}), "
+            f"{'提问' if asked else '非提问'}")
 
     # ---------- DeepSeek ----------
 
@@ -269,6 +401,7 @@ class BotAgentMixin:
         否则会话上下文里会留下孤立的 tool_calls, 后续请求会被 API 判为 400。
         “停止”(软停止)只在轮次开头与两次工具调用之间生效(安全点), 不打断工具内部等待。"""
         oneshot = self._oneshot()
+        self._tls.spoken = []   # 本回合真正说出口的话(按顺序), 回合结束用来更新对话状态
         if not oneshot:
             self._maybe_compact_for_size()
         session = self._session()
@@ -301,6 +434,9 @@ class BotAgentMixin:
                 if mid:
                     for m in self._commit_to_context(mid):
                         messages.append(m)
+                    # 中途插话的玩家也算本轮“对话对象”: 之后你回的话就是对他说的
+                    self._tls.turn_players = set(getattr(self._tls, "turn_players", ())) | {
+                        p for p, _ in mid}
                     log(f"[介入] 任务进行中注入 {len(mid)} 条新消息: "
                         + "; ".join(f"{p}: {c}" for p, c in mid))
                     # 安全点注入新的玩家消息 = 新的一次任务: 把工具轮次计数与上限一并重置,
@@ -381,6 +517,10 @@ class BotAgentMixin:
                 log(f"[能力] {fname} -> {result}")
                 if fname == "send_chat_message" or (fname == "ptc" and self._ptc_speaks(tc)):
                     spoke = True
+                    if not result.startswith("错误"):
+                        text = self._spoken_text(tc)
+                        if text:
+                            self._tls.spoken.append(text)
                 tool_msg = {"role": "tool", "tool_call_id": tc["id"], "content": result}
                 session.messages.append(tool_msg)
                 messages.append(tool_msg)
@@ -450,6 +590,10 @@ class BotAgentMixin:
                 continue
             self.abort.clear()       # 新任务开始, 清掉上一次的中止信号
             self.soft_abort.clear()
+            self._tls.turn_players = {p for p, _ in batch}  # 本轮对话对象(供对话状态记录)
+            if batch:
+                # 「对话状态」注记: 写在玩家消息之前, 让模型判断“这句话是不是对我说的”
+                self.session.add_system(self._dialog_note(batch))
             self._commit_to_context(batch)  # 本批消息写入上下文(call_api 从会话构建请求)
             if len(batch) > 1:
                 log(f"[合并] {len(batch)} 条待回复合并为一次请求")
@@ -475,6 +619,9 @@ class BotAgentMixin:
                 self.session.add_assistant(reply)
             else:
                 self._finish_turn(reply, spoke)
+            if (reply is not None and not self._abort().is_set()
+                    and not self._soft_abort().is_set()):
+                self._update_dialog(self._tls.turn_players, self._tls.spoken, spoke)
             self._maybe_exit_execute()
 
     def _maybe_exit_execute(self):

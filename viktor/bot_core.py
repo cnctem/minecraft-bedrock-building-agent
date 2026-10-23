@@ -128,6 +128,10 @@ class BotCoreMixin:
         self.body_forward = False        # 正文转发开关(玩家用「正文开/关」切换; 仅显示, 不进上下文)
         self.tool_forward = True         # 工具转发开关(默认开; 玩家用「工具开/关」切换; 仅显示, 不进上下文)
         self._backup_running = False     # 「备份」控制词的后台热备份是否在跑(期间不开新任务)
+        # 「对话状态」: 玩家 -> (上次对他发言的时间, 那一轮里是否提过问)。只由主 worker 读写,
+        # 用来判断玩家不带称呼的话是不是接你的话(见 prompts 的「该不该接话」)。
+        self._dialog: dict[str, tuple[float, bool]] = {}
+        self.dialog_window_sec = float(cfg.get("chat_dialog_window_sec", 180))
 
     def _write_state(self) -> None:
         """原子写一份忙碌/空闲快照到 paths.STATE_PATH, 供外部脚本判断「停止状态」。
@@ -190,6 +194,7 @@ class BotCoreMixin:
         self.body_forward = False
         self.tool_forward = True
         self._context_warn_level = 0  # 新会话上下文占用从零开始, 提醒档位复位
+        self._dialog.clear()          # 新会话 = 新对话: 旧会话的「正在聊」状态一并作废
         log(f"=== 会话 #{self.session.id} 开始 (玩家: {sorted(self.players)}) ===")
 
     def _end_session(self):

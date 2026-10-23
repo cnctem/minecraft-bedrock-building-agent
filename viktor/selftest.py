@@ -4,6 +4,7 @@
 依赖方向: selftest → Bot(viktor 包) + capabilities; 仅 --test 时由入口导入。
 """
 import json
+import time
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -522,6 +523,13 @@ def self_test():
     _time.sleep(0.6)
     assert not bot2.pending, "备份结束后应继续处理积压消息"
     assert any(m.get("content") == "A: 任务" for m in bot2.session.messages), bot2.session.messages
+    # 回合开头先写「对话状态」注记, 再写玩家消息(顺序错了模型会把注记当成旧历史)
+    _idx = next(i for i, m in enumerate(bot2.session.messages)
+                if m.get("content") == "A: 任务")
+    assert (bot2.session.messages[_idx - 1].get("content") or "").startswith("# 对话状态"), \
+        bot2.session.messages[_idx - 1:_idx + 1]
+    # 这一回合保持沉默: 与 A 的连续对话应断开
+    assert "A" not in bot2._dialog, bot2._dialog
     bot2.running = False
     with bot2.cv:
         bot2.cv.notify_all()
@@ -1591,6 +1599,68 @@ def self_test():
     bot2.pending.clear()
     print("静默消息自测 OK")
 
+    # ===== 对话状态 / 接话判定自测 =====
+    # 提问识别: 问号或疑问语气收尾才算; 陈述句不算(决定"对方的短回答是不是答案")
+    for q in ("要几层？", "你要用石砖吗", "从哪边开始建呢", "可以吗。", "用这个怎么样!"):
+        assert bot2._asks_question(q), q
+    for stmt in ("已经建好了", "我这就去", "那就开工"):
+        assert not bot2._asks_question(stmt), stmt
+    # 取"真正说出口的那句话": 直接调用与 ptc 内嵌(取最后一条)
+    _tc_direct = {"function": {"name": "send_chat_message",
+                                 "arguments": json.dumps({"text": "要几层？"}, ensure_ascii=False)}}
+    assert bot2._spoken_text(_tc_direct) == "要几层？"
+    _tc_ptc = {"function": {"name": "ptc", "arguments": json.dumps({"calls": [
+        {"tool": "get_player_position", "arguments": {"player": "Tester"}},
+        {"tool": "send_chat_message", "arguments": {"text": "先这样"}},
+        {"tool": "send_chat_message", "arguments": {"text": "还要加屋顶吗"}}]},
+        ensure_ascii=False)}}
+    assert bot2._spoken_text(_tc_ptc) == "还要加屋顶吗", bot2._spoken_text(_tc_ptc)
+    _saved_players = set(bot2.players)
+    bot2.players = {"Tester", "Bob"}
+    # 冷启动: 注记明确说没在对话中, 并提示保持沉默
+    bot2._dialog.clear()
+    _note = bot2._dialog_note([("Tester", "有人吗")])
+    assert _note.startswith("# 对话状态"), _note
+    assert "还没对 Tester 说过话" in _note and "保持沉默" in _note, _note
+    assert "当前在线 2 人" in _note and "Bob" in _note and "Tester" in _note, _note
+    # 刚说过话且是提问: 注记给出时间与"是提问", 不再提示冷启动
+    _now = time.time()
+    bot2._dialog["Tester"] = (_now - 12, True)
+    _note = bot2._dialog_note([("Tester", "3层")])
+    assert "12 秒前" in _note and "那次有提问" in _note, _note
+    assert "没有正在进行的对话" not in _note, _note
+    # 超出窗口: 标注超时, 并提示重新按冷启动(沉默)判断
+    bot2._dialog["Tester"] = (_now - bot2.dialog_window_sec - 60, False)
+    _note = bot2._dialog_note([("Tester", "那算了")])
+    assert "已超出" in _note and "那次没提问" in _note, _note
+    assert "没有正在进行的对话" in _note, _note
+    # 回合成败: 说过话 -> 记下对谁、结尾是否提问; 保持沉默 -> 与该玩家的对话断开
+    bot2._dialog.clear()
+    bot2._update_dialog({"Tester"}, ["好的"], True)
+    assert "Tester" in bot2._dialog and bot2._dialog["Tester"][1] is False
+    # 一轮里先提问、后报进度: 仍算"提过问"(对方随后的短回答就是答案)
+    bot2._update_dialog({"Tester"}, ["要几层？", "我先开工了"], True)
+    assert bot2._dialog["Tester"][1] is True, bot2._dialog
+    bot2._update_dialog({"Tester"}, [], False)
+    assert "Tester" not in bot2._dialog, bot2._dialog
+    # 沉默消息(0 前缀)不走模型, 不应改变对话状态
+    bot2._dialog["Tester"] = (time.time(), True)
+    bot2.process_line("[2026-10-10 18:56:00:000 INFO] [Scripting] [VIKTOR-CHAT] Tester: 0 别理我")
+    assert bot2._dialog["Tester"][1] is True, bot2._dialog
+    # 重启恢复: 从历史找回最近一次发言对象与“提过问”, 不把正在聊的玩家当冷启动
+    bot2._dialog.clear()
+    bot2._seed_dialog_from([
+        {"role": "user", "content": "Tester: 帮我建个塔"},
+        {"role": "assistant", "content": None, "tool_calls": [
+            {"id": "s1", "type": "function", "function": {
+                "name": "send_chat_message",
+                "arguments": json.dumps({"text": "要几层？"}, ensure_ascii=False)}}]},
+    ], time.time() - 5)
+    assert bot2._dialog.get("Tester", (0, False))[1] is True, bot2._dialog
+    bot2._dialog.clear()
+    bot2.players = _saved_players
+    print("对话状态自测 OK")
+
     # [系统] 前缀: 程序生成的提示带 [系统] 且不带 <维克托>; 模型发言带 <维克托> 不带 [系统]
     sys_out = []
     orig_send_cmd = bot2.bridge.send_command
@@ -1759,6 +1829,25 @@ def self_test():
              "arguments": json.dumps({"command": "fill 1 2 3"})}})
         assert ("[正文]", "正文ABC") in fwd and any(l == "[工具]" for l, _ in fwd), fwd
         assert len(bot2.session.messages) == n0, "转发不应写入上下文"
+        # 发言/沉默类调用不转发: send_chat_message 本身就是发言(再转一遍是重复),
+        # stay_silent 是内部决定(转出来等于暴露“刚判断不该说话”)
+        for _nm in ("send_chat_message", "stay_silent"):
+            assert Bot._tool_preview({"function": {"name": _nm, "arguments": "{}"}}) == "", _nm
+        _pv_mixed = Bot._tool_preview({"function": {"name": "ptc", "arguments": json.dumps(
+            {"calls": [{"tool": "get_player_position", "arguments": {}},
+                       {"tool": "send_chat_message", "arguments": {"text": "在这"}}]},
+            ensure_ascii=False)}})
+        assert _pv_mixed == "ptc get_player_position", _pv_mixed
+        _pv_only = Bot._tool_preview({"function": {"name": "ptc", "arguments": json.dumps(
+            {"calls": [{"tool": "stay_silent", "arguments": {}},
+                       {"tool": "send_chat_message", "arguments": {"text": "好"}}]},
+            ensure_ascii=False)}})
+        assert _pv_only == "", _pv_only
+        fwd.clear()
+        bot2._forward_tool({"function": {"name": "send_chat_message",
+                                       "arguments": json.dumps({"text": "大家好"}, ensure_ascii=False)}})
+        bot2._forward_tool({"function": {"name": "stay_silent", "arguments": "{}"}})
+        assert fwd == [], fwd
         bot2.pending.clear()
     finally:
         bot2.bridge.say_side = orig_side
