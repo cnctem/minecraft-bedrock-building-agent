@@ -183,9 +183,12 @@ class BotAppMixin:
         self.bus_enabled = self._probe_bridge()
         if not self.bus_enabled:
             log("[协议] 未握手成功, 服务端查询将报错(请重载 viktor_bridge 行为包)")
+        elif self.pack_proto >= 4:
+            log(f"[协议] 行为包交互协议: v{self.pack_proto} "
+                "(id 路由 + 批量下发 + 空间感知原语 + 建造引擎)")
         elif self.pack_proto >= 3:
             log(f"[协议] 行为包交互协议: v{self.pack_proto} "
-                "(id 路由 + 批量下发 + 空间感知原语)")
+                "(id 路由 + 批量下发 + 空间感知原语; 缺建造引擎, 请重载行为包)")
         else:
             log(f"[协议] 行为包交互协议: v{self.pack_proto} "
                 "(id 路由 + 批量下发; 缺 heightmap/slice/inspect/find, 请重载行为包)")
