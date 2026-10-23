@@ -323,6 +323,7 @@ class BotControlMixin:
         if not any((m.get("content") or "").startswith("# 会话已恢复")
                    for m in reversed(msgs) if m.get("role") == "system"):
             self.session.add_system(note)
+            log("[恢复] 已追加「历史已执行过, 不要重跑」注记")
         log(f"[恢复] 从 {p.name} 灌回 {len(msgs)} 条消息, 模式={MODES[self.mode].label}")
 
     @staticmethod
