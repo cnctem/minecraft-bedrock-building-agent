@@ -1847,6 +1847,12 @@ api.fill((0, 0, 0), (2, 0, 2), "stonebrick")
         "verify": {"mismatch": 0, "holes": 0, "wrong": 0, "samples": []},
     })
     assert "全部正确" in ok, ok
+    # 幂等: 已经正确的格子跳过不写
+    idem = bot2._render_build_commit("b1-1", {
+        "ok": True, "jid": "b1-1", "changed": 0, "boxes": 0, "ms": 3, "noop": 108,
+        "verify": {"mismatch": 0, "holes": 0, "wrong": 0, "samples": []},
+    })
+    assert "108 格本来就对" in idem, idem
     print("建造渲染自测 OK")
 
     r = bot2._tool_run_command({"command": "list"})

@@ -813,35 +813,6 @@ function statesMatch(block, want) {
   }
 }
 
-// 提交前把「将要被覆盖的当前方块」存成同样的 palette+RLE, 撤销时原样写回。
-function snapshotBefore(op, dim) {
-  const total = op.volume;
-  const cells = new Uint8Array(total);
-  const palette = [{ b: "keep" }];
-  const at = new Map();
-  for (let i = 0; i < total; i++) {
-    if (op.cells[i] === 0) continue;      // KEEP 格不动, 不记录
-    const c = cellCoords(op, i);
-    const b = readBlock(dim, c.x, c.y, c.z);
-    if (!b) continue;                      // 未加载: 不记录, 撤销时也不碰
-    let states;
-    try {
-      const st = b.permutation.getAllStates();
-      if (st && Object.keys(st).length) states = st;
-    } catch (e) { /* 无状态 */ }
-    const key = `${b.typeId}|${states ? JSON.stringify(states) : ""}`;
-    let pi = at.get(key);
-    if (pi === undefined) {
-      pi = palette.length;
-      at.set(key, pi);
-      palette.push({ b: b.typeId, s: states });
-    }
-    cells[i] = pi;
-  }
-  return { ox: op.ox, oy: op.oy, oz: op.oz, sx: op.sx, sy: op.sy, sz: op.sz,
-           volume: total, cells, palette };
-}
-
 function* previewJob(rid, jid, op, dim) {
   const out = { place: 0, replace: 0, noop: 0, unloaded: 0, protectedN: 0, unsupported: 0 };
   const protSamples = [], badSamples = [], unloadSamples = [];
@@ -903,17 +874,56 @@ function buildWarnings(diff, cells) {
   return w;
 }
 
-function* executeJob(rid, jid, op, dim, before, extra) {
+function* executeJob(rid, jid, op, dim, wantUndo, extra) {
   const t0 = Date.now();
-  const out = { changed: 0, boxes: 0, failed: 0, aborted: false };
-  const boxes = planBoxes(op);
+  const out = { changed: 0, boxes: 0, failed: 0, aborted: false, noop: 0, skippedUnloaded: 0 };
+  // 1) 差异预处理: 已经正确的格子标 KEEP(幂等: 重复提交不再写), 未加载的也不写;
+  //    同时把「将被覆盖的当前方块」记下来 —— 撤销只还原真正改动过的格子。
+  const cells = Uint8Array.from(op.cells);
+  const before = wantUndo ? {
+    ox: op.ox, oy: op.oy, oz: op.oz, sx: op.sx, sy: op.sy, sz: op.sz,
+    volume: op.volume, cells: new Uint8Array(op.volume), palette: [{ b: "keep" }],
+  } : null;
+  const beforeAt = new Map();
+  let work = 0;
+  for (let i = 0; i < op.volume; i++) {
+    if (op.cells[i] === 0) continue;
+    const entry = op.palette[op.cells[i]];
+    const c = cellCoords(op, i);
+    const b = readBlock(dim, c.x, c.y, c.z);
+    if (!b) {
+      cells[i] = 0;
+      out.skippedUnloaded++;
+    } else if (b.typeId === entry.b && statesMatch(b, entry.s)) {
+      cells[i] = 0;
+      out.noop++;
+    } else if (before) {
+      let states;
+      try {
+        const st = b.permutation.getAllStates();
+        if (st && Object.keys(st).length) states = st;
+      } catch (e) { /* 无状态 */ }
+      const key = `${b.typeId}|${states ? JSON.stringify(states) : ""}`;
+      let pi = beforeAt.get(key);
+      if (pi === undefined) {
+        pi = before.palette.length;
+        beforeAt.set(key, pi);
+        before.palette.push({ b: b.typeId, s: states });
+      }
+      before.cells[i] = pi;
+    }
+    if (++work >= CELLS_PER_TICK) { work = 0; yield; }
+  }
+  // 2) 只对差异部分做贪心合并 + fillBlocks
+  const workOp = { ...op, cells };
+  const boxes = planBoxes(workOp);
   out.boxes = boxes.length;
   const hasFill = typeof dim.fillBlocks === "function" && typeof mc.BlockVolume === "function";
   for (let bi = 0; bi < boxes.length; bi++) {
     const box = boxes[bi];
     const rec = builds.get(jid);
     if (rec && rec.aborted) { out.aborted = true; break; }
-    const entry = op.palette[box.p];
+    const entry = workOp.palette[box.p];
     const perm = resolvePerm(entry);
     if (!perm) { out.failed++; continue; }
     const count = (box.x1 - box.x0 + 1) * (box.y1 - box.y0 + 1) * (box.z1 - box.z0 + 1);
@@ -942,10 +952,10 @@ function* executeJob(rid, jid, op, dim, before, extra) {
     if (bi % 8 === 7) yield;
   }
   yield;
-  // 校验: 复读比对, 空洞优先
+  // 3) 校验: 对原始期望复读比对, 空洞优先
   const verify = { mismatch: 0, holes: 0, wrong: 0, unloaded: 0 };
   const holes = [], wrongs = [];
-  let work = 0;
+  work = 0;
   for (let i = 0; i < op.volume; i++) {
     const pi = op.cells[i];
     if (pi === 0) continue;
@@ -967,15 +977,17 @@ function* executeJob(rid, jid, op, dim, before, extra) {
     if (++work >= CELLS_PER_TICK) { work = 0; yield; }
   }
   verify.samples = holes.concat(wrongs).slice(0, BUILD_SAMPLES);
-  // 撤销记录
-  if (before) {
+  // 4) 撤销记录(只记真正改动过的格子)
+  // 什么都没改就不要往撤销栈里塞空记录(否则"撤销"会空转)
+  if (before && before.cells.some((v) => v !== 0)) {
     const rec = builds.get(jid);
     undoStack.push({ jid, name: rec ? rec.name : "", op: before });
     while (undoStack.length > BUILD_MAX_UNDO) undoStack.shift();
   }
   emitPayload(BUILD_TAG, rid, {
     ok: true, jid, changed: out.changed, boxes: out.boxes, failed: out.failed,
-    aborted: out.aborted, ms: Date.now() - t0, verify,
+    aborted: out.aborted, noop: out.noop, skippedUnloaded: out.skippedUnloaded,
+    ms: Date.now() - t0, verify,
     undoDepth: undoStack.length, ...extra,
   });
 }
@@ -1078,7 +1090,7 @@ function handleBuildInner(message) {
     }
     const entry = undoStack.splice(idx, 1)[0];
     const dim = resolveDimension("overworld");
-    runJob(executeJob(id, entry.jid, entry.op, dim, null, { undoOf: entry.jid }));
+    runJob(executeJob(id, entry.jid, entry.op, dim, false, { undoOf: entry.jid }));
     return;
   }
   const got = getBuildOp(jid);
@@ -1094,9 +1106,8 @@ function handleBuildInner(message) {
     return;
   }
   if (action === "commit") {
-    const before = snapshotBefore(rec.op, dim);
     rec.committed = true;
-    runJob(executeJob(id, jid, rec.op, dim, before, {}));
+    runJob(executeJob(id, jid, rec.op, dim, true, {}));
     return;
   }
   emitPayload(BUILD_TAG, id, { ok: false, error: `未知动作 ${action}` });

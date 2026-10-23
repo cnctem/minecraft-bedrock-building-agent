@@ -198,6 +198,10 @@ class BotBuildMixin:
         else:
             out.append(f"提交 {jid}: 写入 {data.get('changed', 0)} 格, "
                        f"{data.get('boxes', 0)} 批批量填充, {data.get('ms', 0)}ms")
+            if data.get("noop"):
+                out.append(f"(其中 {data['noop']} 格本来就对, 已跳过不写)")
+            if data.get("skippedUnloaded"):
+                out.append(f"⚠ {data['skippedUnloaded']} 格因未加载被跳过(没有写)")
         if data.get("failed"):
             out.append(f"⚠ 有 {data['failed']} 批失败(方块 ID 或状态非法/区块未加载)")
         if data.get("aborted"):

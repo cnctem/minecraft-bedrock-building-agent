@@ -140,8 +140,9 @@ scriptevent viktor:build drop <jid>
 同时算出贪心分解后的 `fillBlocks` 调用数（不执行）。
 
 ### commit
-1. 区块加载复核：`unloaded / total > 5%` → 拒绝，提示 `pin_region`。
-2. 存 before 体积（受影响 bounds 的当前方块，同款 RLE）→ undo 用。
+1. **差异预处理**：逐格复读，已经正确的格子标 KEEP（**幂等**：重复提交不再写），
+   未加载的格子也不写；同时把"将被覆盖的当前方块"记成 before 体积（撤销只还原真正改动的格子）。
+2. 未加载比例过高时提示先 `pin_region`（当前实现：跳过并回报 `skippedUnloaded`）。
 3. 贪心分解：逐 y 层做 2D 最大矩形合并（只合并同一 palette 且非 KEEP 的格子）→
    `(box, paletteIdx)` 列表；每个 box 调 `dim.fillBlocks(volume, perm)`。
 4. 时间切片 + abort 检查点：每批 box 后 `yield`，可被"强制停止"打断。
