@@ -1817,6 +1817,25 @@ api.fill((0, 0, 0), (2, 0, 2), "stonebrick")
     assert stats3["snapshot"], stats3
     print("建造读世界(快照)自测 OK")
 
+    # 多格方块: 门/高草展开成两格, 床只写一格(引擎自动生成床尾)
+    prog_multi = """
+api.set(0, 0, 0, "wooden_door", {"direction": 0})
+api.set(3, 0, 0, "bed", {"direction": 0})
+api.set(6, 0, 0, "tall_grass")
+"""
+    pm, sm = B.compile_build(prog_multi, (0, 64, 0), "south", B.block_ids())
+    assert sm["cells"] == 5, sm          # 门2 + 床1 + 草2
+    kinds = [e["b"] for e in pm["p"]]
+    assert kinds.count("minecraft:wooden_door") == 2, kinds
+    assert kinds.count("minecraft:bed") == 1, kinds
+    assert kinds.count("minecraft:tall_grass") == 2, kinds
+    bed = [e for e in pm["p"] if e["b"] == "minecraft:bed"][0]
+    assert "head_piece_bit" not in (bed.get("s") or {}), bed   # 床头/床尾由引擎决定
+    door_states = sorted(e["s"]["upper_block_bit"] for e in pm["p"]
+                         if e["b"] == "minecraft:wooden_door")
+    assert door_states == [False, True], door_states
+    print("多格方块展开自测 OK")
+
     # 模式门禁: 建造工具只在创造模式家族可见(用户明确要求)
     for mode in (MODE_NORMAL, MODE_PLAN, MODE_EXECUTE, MODE_ONESHOT):
         names = bot2._allowed_tools(mode)

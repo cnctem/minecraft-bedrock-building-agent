@@ -94,8 +94,13 @@ for u in range(0, W):
   d = api.dir("front")                      # 比如 "south"
   api.set(0, 0, 0, "oak_stairs", {"weirdo_direction": 2})
   ```
-- **多格方块会被拒绝**：门、床、高草/大型蕨、双箱等单格写入只出一半。用普通方块替代，
-  或单独用 `run_server_command` 的 `setblock` 放（那里走原生命令）。
+- **多格方块现在支持**，编译器会自动按实测规则处理（不用你自己写两格）：
+  | 方块 | 程序里怎么写 | 引擎行为 |
+  |---|---|---|
+  | 门 `*_door` / `wooden_door` | `api.set(u,v,w,"wooden_door",{"direction":d})` | 自动补上下两半（`upper_block_bit`） |
+  | 床 `bed` | `api.set(u,v,w,"bed",{"direction":d})` | 你给的格子是**床头**，床尾自动放在 `direction` 方向（0=北 1=东 2=南 3=西） |
+  | 高草/大型蕨等双格植物 | `api.set(u,v,w,"tall_grass")` | 自动补上下两半；**必须放在草/土上**，否则引擎会自己消失 |
+  `direction` 用整数（旧式 state）；`d = api.dirnum("front")` 可以按朝向取。
 
 ## 4. 工作流(按模块)
 

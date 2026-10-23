@@ -263,14 +263,16 @@ function reportBlock(message) {
 
 function reportCaps(message) {
   const { id } = takeId(message);
-  let fillBlocks = false;
+  let fillBlocks = false, runCommand = false;
   try {
-    fillBlocks = typeof world.getDimension("overworld").fillBlocks === "function";
+    const d0 = world.getDimension("overworld");
+    fillBlocks = typeof d0.fillBlocks === "function";
+    runCommand = typeof d0.runCommand === "function";
   } catch (e) { /* 旧引擎无此 API */ }
   emitPayload(CAPS_TAG, id, {
     ok: true,
     proto: PROTOCOL,
-    apis: { runJob: typeof system.runJob === "function", fillBlocks },
+    apis: { runJob: typeof system.runJob === "function", fillBlocks, runCommand },
     limits: {
       volume: HARD_VOLUME, columns: HARD_COLUMNS, slice: HARD_SLICE,
       frame: FRAME_CHARS, cellsPerTick: CELLS_PER_TICK,
@@ -664,13 +666,9 @@ const PROTECTED_TYPES = new Set([
   "bedrock", "barrier", "command_block", "chain_command_block", "repeating_command_block",
   "structure_block", "structure_void", "jigsaw", "light_block", "deny", "allow", "border_block",
 ]);
-// 多格方块: 单格写入会留下残缺的另一半(本引擎版本早于 1.26.10 的官方修复)
-const UNSUPPORTED_TYPES = new Set([
-  "bed", "tall_grass", "large_fern", "sunflower", "lilac", "rose_bush", "peony",
-  "small_dripleaf", "big_dripleaf", "big_dripleaf_stem", "tall_dripleaf", "pitcher_plant",
-  "cave_vines", "cave_vines_body_with_berries", "cave_vines_head_with_berries",
-  "hanging_roots", "spore_blossom",
-]);
+// 多格方块(门/床/高草)现在由 bot 编译器展开成两格(带 upper_block_bit/head_piece_bit),
+// 这里不再拦截; 留一个空集合给以后真正写不了的方块用。
+const UNSUPPORTED_TYPES = new Set([]);
 const builds = new Map();  // jid -> { parts, total, raw, op, created, aborted, before, name }
 const undoStack = [];      // [{ jid, name, op }]
 
@@ -824,7 +822,7 @@ function* previewJob(rid, jid, op, dim) {
     cellsUsed++;
     const entry = op.palette[pi];
     const name = shortId(entry.b);
-    if (UNSUPPORTED_TYPES.has(name) || /_door$|_bed$/.test(name)) {
+    if (UNSUPPORTED_TYPES.has(name)) {
       out.unsupported++;
       if (badSamples.length < BUILD_SAMPLES) badSamples.push(name);
     }

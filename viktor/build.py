@@ -25,13 +25,18 @@ SANDBOX_MEM_MB = 256
 
 FACINGS = ("north", "south", "east", "west")
 
-# 本引擎单格写入会留下残缺另一半的多格方块(门/床/高草等)
-UNSUPPORTED = {
-    "bed", "tall_grass", "large_fern", "sunflower", "lilac", "rose_bush", "peony",
-    "small_dripleaf", "big_dripleaf", "big_dripleaf_stem", "tall_dripleaf", "pitcher_plant",
-    "cave_vines", "cave_vines_body_with_berries", "cave_vines_head_with_berries",
-    "hanging_roots", "spore_blossom",
+# 多格方块: 编译器自动展开成两格(实测状态名, 见 docs/p2-build-engine.md)
+TALL_PLANTS = {
+    "tall_grass", "large_fern", "sunflower", "lilac", "rose_bush", "peony",
+    "pitcher_plant", "tall_dripleaf",
 }
+# 床: 写入格 = 床头; 床尾由引擎自动放在 direction 方向(实测 0=北 1=东 2=南 3=西, 即 头→尾)
+BED_DIR = {0: (0, -1), 1: (1, 0), 2: (0, 1), 3: (-1, 0)}
+CARD2NUM = {"south": 0, "west": 1, "north": 2, "east": 3,
+            "minecraft:south": 0, "minecraft:west": 1,
+            "minecraft:north": 2, "minecraft:east": 3}
+# 仍不支持(需要邻居/朝向计算, 或写入语义不明)
+UNSUPPORTED: set = set()
 
 
 _RAW_IDS = Path(__file__).resolve().parent.parent / "data" / "raw_ids.txt"
@@ -161,6 +166,9 @@ class _Api:
         lo, hi = _norm(_pt(a), _pt(b))
         self._add({"op": "pattern", "a": lo, "b": hi, "k": [str(x) for x in blocks],
                    "axis": str(axis), "s": states or None})
+    def dirnum(self, where="front"):
+        """局部方向 -> 旧式 direction 整数(0=南 1=西 2=北 3=东), 给门/床用。"""
+        return {"south": 0, "west": 1, "north": 2, "east": 3}[self.dir(where)]
     def dir(self, where="front"):
         w = str(where).lower()
         f = self.facing
@@ -504,6 +512,39 @@ def _shape_cells(op):
         raise BuildError(f"未知形状 {kind}")
 
 
+def _expand_multiblock(base: str, pos: tuple, states: dict | None):
+    """把多格方块展开成 [(世界坐标, states), ...]; 单格方块原样返回。
+
+    实测(1.21.0.03, 脚本 API setPermutation/fillBlocks 路径):
+      门   wooden_door / *_door: 只写下半会被引擎删除 → 必须写上下两半
+          (upper_block_bit=false / true)
+      床   bed: 写入的那一格**永远被当作床头**, 床尾由引擎自动放在
+          direction 方向(实测 0=北 1=东 2=南 3=西) → 只写一格, 不要写两格(会互相翻转)
+      高草 tall_grass 等双格植物: 与门同类, 写上下两半(upper_block_bit)
+    """
+    st = dict(states or {})
+    x, y, z = pos
+    if base.endswith("_door") or base == "wooden_door":
+        st.pop("head_piece_bit", None)
+        return [((x, y, z), {**st, "upper_block_bit": False}),
+                ((x, y + 1, z), {**st, "upper_block_bit": True})]
+    if base == "bed":
+        d = st.get("direction", 0)
+        if isinstance(d, str):
+            d = CARD2NUM.get(d.lower(), 0)
+        try:
+            d = int(d)
+        except (TypeError, ValueError):
+            d = 0
+        st.pop("head_piece_bit", None)
+        return [((x, y, z), {**st, "direction": d if d in BED_DIR else 0})]
+    if base in TALL_PLANTS:
+        st.pop("head_piece_bit", None)
+        return [((x, y, z), {**st, "upper_block_bit": False}),
+                ((x, y + 1, z), {**st, "upper_block_bit": True})]
+    return [((x, y, z), st or None)]
+
+
 def voxelize(ops: list, origin: tuple, facing: str, valid_blocks=None):
     """形状 → (palette, cells dict, bounds)。后写的覆盖先写的(KEEP 不参与)。"""
     cells: dict = {}
@@ -517,15 +558,16 @@ def voxelize(ops: list, origin: tuple, facing: str, valid_blocks=None):
             base = name.split("[", 1)[0].replace("minecraft:", "", 1)
             if valid_blocks is not None and base not in valid_blocks:
                 raise BuildError(f"未知方块 {name}; 先用 find_items 查准确 ID(基岩版)")
-            key = (name, json.dumps(states, sort_keys=True) if states else "")
-            pi = index.get(key)
-            if pi is None:
-                if len(palette) >= MAX_PALETTE:
-                    raise BuildError(f"用到的方块种类超过 {MAX_PALETTE} 种, 请减少配色")
-                pi = len(palette)
-                index[key] = pi
-                palette.append({"b": name, **({"s": states} if states else {})})
-            cells[to_world(origin, facing, u, v, w)] = pi
+            for wpos, wstates in _expand_multiblock(base, to_world(origin, facing, u, v, w), states):
+                key = (name, json.dumps(wstates, sort_keys=True) if wstates else "")
+                pi = index.get(key)
+                if pi is None:
+                    if len(palette) >= MAX_PALETTE:
+                        raise BuildError(f"用到的方块种类超过 {MAX_PALETTE} 种, 请减少配色")
+                    pi = len(palette)
+                    index[key] = pi
+                    palette.append({"b": name, **({"s": wstates} if wstates else {})})
+                cells[wpos] = pi
     if not cells:
         raise BuildError("程序没有放置任何方块")
     xs = [p[0] for p in cells]

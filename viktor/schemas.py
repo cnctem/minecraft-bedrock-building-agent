@@ -234,6 +234,7 @@ BUILD_PREVIEW_SCHEMA = {
             "  api.height(u,w)（该列最高非空气方块的局部 v，空列 None）/ api.block(u,v,w)\n"
             "  / api.solid(u,v,w) / api.air(u,v,w) —— 用来贴地形做地基、避开已有建筑。\n"
             "**KEEP 语义**：程序没提到的格子不写也不删；清空必须显式 api.fill(...,'air')。\n"
+            "门/床/高草等多格方块会自动补另一半(床只写一格: 床头, 床尾在 direction 方向)。\n"
             "返回 operation_id、包围盒、差异（新放置/覆盖/已正确/未加载）、执行计划与警告。"
             "看完差异确认无误，再调 build_commit 提交；要改就改程序重新 preview。"
         ),
