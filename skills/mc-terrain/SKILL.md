@@ -6,7 +6,7 @@ description: 地形与景观手册——山脉丘陵、悬崖峭壁、河谷峡�
 # 地形与景观手册(自然感 / 造景)
 
 地形不是随机堆方块，而是 **轮廓优先 → 大块面 → 材质分区 → 微地形 → 植被 → 水体 → 做旧**。
-曲线用 `mc-shapes`，建筑结构用 `mc-architecture`，内饰用 `mc-interior`。
+曲线用 `mc-build`，建筑结构用 `mc-architecture`，内饰用 `mc-interior`。
 
 ## 0. 五条铁律
 

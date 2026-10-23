@@ -13,7 +13,7 @@ ID 以 `find_items` 为准; 常见: `grass_block` `dirt` `podzol` `mud` `gravel`
 
 **步骤**:
 1. 定峰位(错开, 别排成一行)与峰高(主峰 h, 次峰 0.5~0.7h)。
-2. 用**分层等高线**: 每升高 1~2 格, 用一个不规则闭合曲线(在 `mc-shapes` 圆上扰动)圈范围, 层层收缩。
+2. 用**分层等高线**: 每升高 1~2 格, 用一个不规则闭合曲线(在 `mc-build` 圆上扰动)圈范围, 层层收缩。
 3. 相邻层之间用半砖/楼梯接坡(见 `SKILL.md` §3)。
 4. 铺材质: 山脚 `grass_block`+`dirt`; 山腰陡处露 `stone`/`andesite`/`tuff`; 山顶 `stone`+`gravel`,
    很高再盖 `snow_layer`。
@@ -22,7 +22,7 @@ ID 以 `find_items` 为准; 常见: `grass_block` `dirt` `podzol` `mud` `gravel`
 **命令片段**:
 ```
 fill <x1> <y> <z1> <x2> <y> <z2> stone            # 某层台面
-setblock <x> <y> <z> stone                        # 每层轮廓用曲线点生成(见 mc-shapes)
+setblock <x> <y> <z> stone                        # 每层轮廓用曲线点生成(见 mc-build)
 ```
 
 ## 2. 悬崖 / 崖壁
@@ -49,7 +49,7 @@ setblock <x> <y> <z> stone                        # 每层轮廓用曲线点生�
 
 ## 4. 洞穴口 / 地下入口
 
-- 在崖壁/山坡挖一个**拱形洞口**(用 `mc-shapes` 半圆), 洞口内收 1 格做阴影。
+- 在崖壁/山坡挖一个**拱形洞口**(用 `mc-build` 半圆), 洞口内收 1 格做阴影。
 - 洞口上方崖壁突出作"眉", 洞内壁用 `deepslate`/`cobblestone`, 深处放 `glow_lichen`/`light_block` 微光。
 - 洞口堆碎石、断木, 长苔藓/藤蔓。矿洞口加木支撑门框(`*_log` + `<木>_planks`)。
 
@@ -58,7 +58,7 @@ setblock <x> <y> <z> stone                        # 每层轮廓用曲线点生�
 **法则**: 碗形底、岸线不规则、水下有地形、岸边有植被。
 
 **步骤**:
-1. 用 `mc-shapes` 画一个**不规则圆/椭圆**(在弧线上随机加减 1~2 格)作为岸线。
+1. 用 `mc-build` 画一个**不规则圆/椭圆**(在弧线上随机加减 1~2 格)作为岸线。
 2. 从岸线向内、向下用逐层缩小的同心轮廓挖出**碗形**, 深 2~4 格。
 3. 底铺: 中间 `sand`/`clay`/`mud`, 靠岸 `gravel`(浅滩)。
 4. 注水: `fill <x1> <water_y> <z1> <x2> <water_y> <z2> water`, 只填**最上层**即可(下层有水源会保持),

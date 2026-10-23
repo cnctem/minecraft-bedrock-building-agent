@@ -241,30 +241,31 @@ python3 bot.py --test         # 解析逻辑自测
 - **去重**：同一会话内重复载入同一技能会直接返回“已载入过”（`Session.loaded_skills`），加 `force=true` 可强制重载。
 - **优先级**：技能只是补充说明，**与 system prompt 冲突时以 system prompt 为准**（已写入技能清单注记）。
 
-内置示例：
+内置示例（9 本）：
 
-- `skills/mc-commands/`（基岩版命令施工手册：fill/setblock/clone 变体、方块状态与朝向、
-  超量分段、施工套路；附表 `references/block-states.md` 是实测状态名）。
-- `skills/mc-shapes/`（体素造型手册：扫描公式画圆/椭圆/拱/圆柱/球/圆顶，用楼梯台阶做柔和曲面；
-  附表 `references/circle-tables.md` 是半径 1–30 的 1/4 弧表、偶数直径环表、球体逐层半径表，
-  `references/smooth-surfaces.md` 讲坡度配比与包边）。
-- `skills/mc-interior/`（室内装修手册：家具方块能力总表、房间功能清单、家具拼搭配方、配色与灯光；
-  附表 `references/furniture.md` 是 40+ 件家具的摆法与命令，`references/rooms.md` 是各房间必备清单，
-  `references/palette-light.md` 是配色与隐藏光源）。
-- `skills/mc-architecture/`（建筑设计与结构手册：体块/比例/模数、承重体系选型与搭法、立面门窗屋顶、
-  风格库；附表 `references/structure.md` 讲梁柱/拱券/穹顶/飞扶壁/桁架/框架/承重墙/悬挑/柱式/斗拱，
-  `references/facade.md` 讲三段式立面与门窗屋顶，`references/styles.md` 是 16 种风格要素）。
-- `skills/mc-terrain/`（地形与景观手册：自然感五律、高度场方法、山崖河谷湖海沙丘沼泽火山、
-  自定义树木、水景道路桥、农田梯田、与建筑衔接；附表 `references/landforms.md`、
-  `references/vegetation.md`、`references/water-road.md`）。
-- `skills/mc-greenery/`（绿化与景观手册：室内绿植、庭院花园、建筑周边、绿墙绿顶、水景、树木灌木地被、
-  步道与口袋公园；附表 `references/plants.md` 是植物能力表，`references/landscape.md` 讲庭院与风格园林，
-  `references/pocket-parks.md` 是口袋公园分区布局）。
-- `skills/mc-tellraw/`（基岩版 tellraw 手册：rawtext JSON 文本组件、clickEvent/hoverEvent、
-  坐标传送/网页/导航菜单/公告按钮；附表 `references/rawtext.md` 是组件字段与转义，
-  `references/examples.md` 是可套用模板）。
-- `skills/mc-weathering/`（做旧与细节手册：风化预算、材质风化配方、损伤语法、修补痕迹、生活道具与叙事细节；
-  附表 `references/aging.md` 是风化/损伤/修补配方，`references/details.md` 是道具与场景模板）。
+- `skills/mc-build/`（**建造引擎 + 体素造型**：受限 Python 程序 API(fill/box/walls/cylinder/sphere/
+  pyramid/roof/stair/pattern)、KEEP 语义、多格方块规则、对称/悬空自检、造型公式与半径表；
+  附表 `references/circle-tables.md`（半径 1–30 弧表/环表/球层表）、`references/dome.md`、
+  `references/slopes.md`、`references/smooth-surfaces.md`、`references/spiral.md`）。
+- `skills/mc-verify/`（**检查与修复**：由粗到细的验收阶梯、mismatch/holes/wrong 补丁流程、
+  诊断表、交付前检查清单）。
+- `skills/mc-commands/`（**命令 + 文本**：fill/setblock/clone 变体、方块状态与朝向、超量分段；
+  tellraw 文本组件与可点击消息 + `send_menu`；附表 `references/block-states.md`、
+  `references/rawtext.md`、`references/examples.md`）。
+- `skills/mc-lighting/`（**光照与夜景**：光级与刷怪门槛、光源亮度表、隐藏光源配方、
+  三层次配光法、外景路灯、在建造程序里埋灯）。
+- `skills/mc-architecture/`（建筑设计与结构手册：体块/比例/模数、承重体系、立面门窗屋顶、风格库；
+  附表 `references/structure.md`、`references/facade.md`、`references/styles.md`、`references/detail.md`）。
+- `skills/mc-interior/`（室内装修：家具方块能力总表、房间清单、家具拼搭、配色；
+  附表 `references/furniture.md`、`references/rooms.md`、`references/palette-light.md`、
+  `references/expert-rules.md`）。
+- `skills/mc-terrain/`（地形与景观：自然感五律、高度场方法、山崖河谷湖海沙丘、自定义树木、水景道路桥；
+  附表 `references/landforms.md`、`references/vegetation.md`、`references/water-road.md`、
+  `references/expert-rules.md`）。
+- `skills/mc-details/`（**做旧 + 绿化**：风化预算与材质配方、损伤语法、生活道具；
+  室内绿植、庭院花园、绿墙绿顶、水景、口袋公园；附表 `references/aging.md`、
+  `references/details.md`、`references/plants.md`、`references/landscape.md`、
+  `references/pocket-parks.md`）。
 
 以上技能全模式可用（含一次性/计划）。
 

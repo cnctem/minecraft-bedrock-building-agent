@@ -1624,8 +1624,9 @@ def self_test():
     assert r.startswith("# 技能书:") and "weirdo_direction" in r, r[:150]
     r = capabilities.execute("use_skill", '{"name":"mc-commands","file":"references/block-states.md"}')
     assert "pillar_axis" in r, r[:150]
-    assert "mc-shapes" in note, note
-    r = capabilities.execute("use_skill", '{"name":"mc-shapes","file":"references/circle-tables.md"}')
+    for _name in ("mc-build", "mc-verify", "mc-lighting", "mc-details"):
+        assert _name in note, (_name, note)
+    r = capabilities.execute("use_skill", '{"name":"mc-build","file":"references/circle-tables.md"}')
     assert "0,5 1,5 2,5 3,4 4,3 5,0" in r, r[:150]
     assert "mc-interior" in note, note
     r = capabilities.execute("use_skill", '{"name":"mc-interior","file":"references/furniture.md"}')
@@ -1636,6 +1637,10 @@ def self_test():
     assert "mc-terrain" in note, note
     r = capabilities.execute("use_skill", '{"name":"mc-terrain","file":"references/vegetation.md"}')
     assert "云杉" in r and "树冠" in r, r[:150]
+    r = capabilities.execute("use_skill", '{"name":"mc-verify"}')
+    assert "mismatch" in r and "诊断表" in r, r[:200]
+    r = capabilities.execute("use_skill", '{"name":"mc-lighting"}')
+    assert "光源亮度表" in r and "隐藏光源" in r, r[:200]
     r = capabilities.execute("use_skill", '{"name":"mc-commands","file":"../SKILL.md"}')
     assert "没有附带资料" in r, r
     r = capabilities.execute("use_skill", '{"name":"nonexistent"}')
