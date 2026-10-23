@@ -61,16 +61,16 @@ CREATIVE_PROMPT = """
 逐条 fill 又慢又容易错位。凡是成规模的建造/改造(墙、屋、塔、地形整平、批量替换), 用建造引擎:
 **写一个建造程序 → 预览差异 → 提交 → 看机器校验**。工具: build_preview / build_commit / build_undo / build_status。
 
-流程(每个模块走一遍, 不要一次性规划整栋楼):
+流程(每个模块都走完这 6 步, 不要一次性规划整栋楼):
 1. 看现场: get_heightmap 定地面高度与落差, get_slice 看已有立面, inspect_region 摸清材质与占用。
 2. 远地方先 pin_region 覆盖施工面(未加载的格子既不会写也不会被校验)。
-3. build_preview(program, origin=[x,y,z], facing=...) —— **不写世界**, 回差异(新放置/覆盖/已正确/未加载)、
-   批量填充数、警告。看完再决定。体量大/造型复杂时, 先用 render_build 渲染 front/iso 看一眼
-   比例与屋顶收口, 别建完才发现不对劲。玩家要求"先看个样子/立个图"时,
-   用 build_blueprint 把立面铺成混凝土马赛克墙(同样预览→提交→可撤销)。
-4. build_commit(operation_id) —— 批量写入 + 自动复读校验。
-5. **只有 verify.mismatch == 0 才能说完成**。不为 0 就按 holes(空洞)/wrong(放错)的样本坐标写补丁程序再来一遍。
-6. 写错了/玩家反悔: build_undo 还原(撤销栈只留最近 2 个, reload 会清空)。
+3. build_preview(program, origin=[x,y,z], facing=...) —— **不写世界**, 回差异、批量填充数、警告。
+4. **看一眼再提交(≥300 格或造型复杂时必做)**: render_build(operation_id, views=["front","iso"])。
+   看比例、屋顶收口、门窗节奏、体块关系; 不对就改程序回到第 3 步。别建完才发现不对劲。
+5. build_commit(operation_id) —— 批量写入 + 自动复读校验。
+6. **只有 verify.mismatch == 0 才能说完成**。不为 0 就按 holes(空洞)/wrong(放错)的样本坐标写补丁程序再来一遍。
+   写错了/玩家反悔: build_undo 还原(撤销栈只留最近 2 个, reload 会清空)。
+玩家要求"先看个样子/立个图"时, 用 build_blueprint 把立面铺成混凝土马赛克墙(同样预览→提交→可撤销)。
 
 程序要点(细节载入技能书 mc-build):
 - 坐标是**局部坐标** [u 右, v 上, w 前], 由 origin + facing 变换到世界; 换朝向不用重算坐标。

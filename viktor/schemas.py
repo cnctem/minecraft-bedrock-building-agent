@@ -314,7 +314,8 @@ BUILD_PREVIEW_SCHEMA = {
             "**KEEP 语义**：程序没提到的格子不写也不删；清空必须显式 api.fill(...,'air')。\n"
             "门/床/高草等多格方块会自动补另一半(床只写一格: 床头, 床尾在 direction 方向)。\n"
             "返回 operation_id、包围盒、差异（新放置/覆盖/已正确/未加载）、执行计划与警告。"
-            "看完差异确认无误，再调 build_commit 提交；要改就改程序重新 preview。"
+            "看完差异先用 render_build(operation_id, views=[\"front\",\"iso\"]) 看比例与屋顶收口, "
+            "确认无误再 build_commit；要改就改程序重新 preview。"
         ),
         "parameters": {
             "type": "object",

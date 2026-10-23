@@ -731,9 +731,9 @@ def self_test():
     from .bus import BusArgError
     assert "高度图列数最多" in bot2._tool_get_heightmap(
         {"x1": 0, "z1": 0, "x2": 64, "z2": 64})
-    assert "最多 32768 格" in bot2._tool_inspect_region(
+    assert "32×32×32" in bot2._tool_inspect_region(
         {"x1": 0, "y1": 0, "z1": 0, "x2": 40, "y2": 40, "z2": 40})
-    assert "最多 32768 格" in bot2._tool_find_blocks(
+    assert "32×32×32" in bot2._tool_find_blocks(
         {"block": "ore", "x1": 0, "y1": 0, "z1": 0, "x2": 40, "y2": 40, "z2": 40})
     assert "切面最多" in bot2._tool_get_slice(
         {"axis": "y", "level": 0, "x1": 0, "y1": 0, "z1": 0, "x2": 64, "y2": 0, "z2": 64})
@@ -1813,7 +1813,7 @@ for u in range(0, W, 3):
         B.compile_build("api.fill((0,0,0),(80,80,80),'stone')", (0, 0, 0), "south", B.block_ids())
         raise AssertionError("超体积应被拒")
     except B.BuildError as e:
-        assert "超过上限" in str(e), e
+        assert "40×40×40" in str(e), e
     print("建造沙箱/校验自测 OK")
 
     # 读世界: 预取快照后程序里能问地形(离线构造 3×3×3 快照: 底层石头, 上面空气)
@@ -1938,6 +1938,29 @@ api.set(6, 0, 0, "tall_grass")
     assert int.from_bytes(raw[16:20], "big") == 6, raw[16:20]      # 3 列 × scale 2
     png.unlink(missing_ok=True)
     print("视觉反馈(渲染/PNG)自测 OK")
+
+    # 限额报错要"可行动": 给等价尺寸与超出倍数
+    _be, _bp = bot2.bus_enabled, bot2.pack_proto
+    bot2.bus_enabled, bot2.pack_proto = True, 4
+    try:
+        msg = bot2._tool_get_heightmap({"x1": 0, "z1": 0, "x2": 80, "z2": 80})
+        assert "64×64" in msg and "约" in msg, msg
+        msg2 = bot2._tool_find_blocks({"block": "ore", "x1": 0, "y1": 0, "z1": 0,
+                                       "x2": 40, "y2": 40, "z2": 40})
+        assert "32×32×32" in msg2 and "约" in msg2, msg2
+    finally:
+        bot2.bus_enabled, bot2.pack_proto = _be, _bp
+    print("限额提示可行动自测 OK")
+
+    # preview 返回要引导"先看渲染"
+    pv2 = bot2._render_build_preview("b9-1", {
+        "ok": True, "jid": "b9-1", "name": "大件", "cells": 800, "paletteSize": 3,
+        "bounds": {"from": [0, 64, 0], "to": [19, 70, 19]},
+        "diff": {"place": 800, "replace": 0, "noop": 0, "unloaded": 0},
+        "plan": {"boxes": 12}, "warnings": [], "samples": {},
+    }, {"size": (20, 7, 20), "ops": 5, "cells": 800, "palette": 3})
+    assert 'render_build(operation_id="b9-1"' in pv2, pv2
+    print("preview 引导渲染自测 OK")
 
     # 蓝图墙: 马赛克配色与朝向
     palB, celB, bbB, wB, hB = R.blueprint_cells(pal3, cel3, bnd3, "front",

@@ -43,6 +43,13 @@ _RAW_IDS = Path(__file__).resolve().parent.parent / "data" / "raw_ids.txt"
 _BLOCK_IDS: set | None = None
 
 
+def limit_hint(label: str, cur: int, limit: int, shape: str, unit: str = "格") -> str:
+    """限额报错要能照着改: 说清上限的等价尺寸、当前多少、超了几倍。"""
+    over = (cur / limit) if limit else 0
+    return (f"{label}最多 {limit} {unit}(上限相当于 {shape}), 当前 {cur} {unit}"
+            f"(约 {over:.1f} 倍), 请缩到 {shape} 或更小/分块做。")
+
+
 def block_ids() -> set:
     """服务器本体导出的方块 ID(不含 minecraft:), 用于校验程序里的方块名。
 
@@ -777,9 +784,10 @@ def voxelize(ops: list, origin: tuple, facing: str, valid_blocks=None):
         raise BuildError(f"包围盒 {size[0]}×{size[1]}×{size[2]} 单轴超过 {MAX_BOUNDS}, 请拆成多次")
     volume = size[0] * size[1] * size[2]
     if volume > MAX_VOLUME:
-        raise BuildError(f"包围盒体积 {volume} 格超过上限 {MAX_VOLUME}, 请拆成多次或缩小范围")
+        raise BuildError(limit_hint("包围盒体积", volume, MAX_VOLUME, "40×40×40")
+                         + " 建议按模块（地基/墙/屋顶）分开提交。")
     if len(cells) > MAX_CELLS:
-        raise BuildError(f"写入格数 {len(cells)} 超过上限 {MAX_CELLS}")
+        raise BuildError(limit_hint("写入格数", len(cells), MAX_CELLS, "40×40×40"))
     return palette, cells, bounds
 
 

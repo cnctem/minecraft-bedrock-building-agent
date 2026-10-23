@@ -351,7 +351,8 @@ function heightmap(message) {
   const zs = [Math.min(box[1], box[3]), Math.max(box[1], box[3])];
   const cols = (xs[1] - xs[0] + 1) * (zs[1] - zs[0] + 1);
   if (cols > HARD_COLUMNS) {
-    fail(MAP_TAG, id, `列数 ${xs[1] - xs[0] + 1}×${zs[1] - zs[0] + 1}=${cols} 超过上限 ${HARD_COLUMNS}`);
+    fail(MAP_TAG, id, `高度图列数 ${cols} 超过上限 ${HARD_COLUMNS}(相当于 64×64), `
+      + `请缩到 64×64 或更小; 当前 ${xs[1] - xs[0] + 1}×${zs[1] - zs[0] + 1}`);
     return;
   }
   let yMax = WORLD_TOP, yMin = WORLD_BOTTOM;
@@ -427,7 +428,8 @@ function sliceBlocks(message) {
   const b0r = Math.min(ab[1], ab[3]), b1r = Math.max(ab[1], ab[3]);
   const cells = (a1 - a0 + 1) * (b1r - b0r + 1);
   if (cells > HARD_SLICE) {
-    fail(SLICE_TAG, id, `切面 ${a1 - a0 + 1}×${b1r - b0r + 1}=${cells} 格超过上限 ${HARD_SLICE}`);
+    fail(SLICE_TAG, id, `切面 ${cells} 格超过上限 ${HARD_SLICE}(相当于 64×64), `
+      + `当前 ${a1 - a0 + 1}×${b1r - b0r + 1}`);
     return;
   }
   // 侧视/前视从上往下画
@@ -523,7 +525,8 @@ function inspectRegion(message) {
   const zs = [Math.min(box[2], box[5]), Math.max(box[2], box[5])];
   const volume = (xs[1] - xs[0] + 1) * (ys[1] - ys[0] + 1) * (zs[1] - zs[0] + 1);
   if (volume > HARD_VOLUME) {
-    fail(INSPECT_TAG, id, `体积 ${volume} 超过上限 ${HARD_VOLUME}, 请拆成几块`);
+    fail(INSPECT_TAG, id, `区域 ${volume} 格超过上限 ${HARD_VOLUME}(相当于 32×32×32), `
+      + "请拆成几块; 只看地表用 heightmap、只看一层用 slice 更省");
     return;
   }
   // "-" = 不带 filter 的占位符(空字符串会把后面的位置参数挤位)
@@ -583,7 +586,7 @@ function findBlocks(message) {
   const zs = [Math.min(box[2], box[5]), Math.max(box[2], box[5])];
   const volume = (xs[1] - xs[0] + 1) * (ys[1] - ys[0] + 1) * (zs[1] - zs[0] + 1);
   if (volume > HARD_VOLUME) {
-    fail(FIND_TAG, id, `体积 ${volume} 超过上限 ${HARD_VOLUME}, 请拆成几块`);
+    fail(FIND_TAG, id, `搜索范围 ${volume} 格超过上限 ${HARD_VOLUME}(相当于 32×32×32), 请拆成几块`);
     return;
   }
   let limit = Number(parts[8]);
@@ -647,7 +650,8 @@ function snapshotRegion(message) {
   const zs = [Math.min(box[2], box[5]), Math.max(box[2], box[5])];
   const volume = (xs[1] - xs[0] + 1) * (ys[1] - ys[0] + 1) * (zs[1] - zs[0] + 1);
   if (volume > BUILD_MAX_VOLUME) {
-    fail(SNAP_TAG, id, `快照体积 ${volume} 超过上限 ${BUILD_MAX_VOLUME}, 请缩小 scan 范围`);
+    fail(SNAP_TAG, id, `快照 ${volume} 格超过上限 ${BUILD_MAX_VOLUME}(相当于 40×40×40), `
+      + "请缩小 scan 范围");
     return;
   }
   runJob(snapshotJob(id, resolveDimension(parts[6]), xs, ys, zs));
@@ -720,7 +724,9 @@ function decodeBuild(raw) {
   }
   if (s.some((v) => !Number.isFinite(v) || v <= 0)) throw new Error(`尺寸非法: ${s.join("x")}`);
   const volume = s[0] * s[1] * s[2];
-  if (volume > BUILD_MAX_VOLUME) throw new Error(`体积 ${volume} 超过上限 ${BUILD_MAX_VOLUME}`);
+  if (volume > BUILD_MAX_VOLUME) {
+    throw new Error(`体积 ${volume} 超过上限 ${BUILD_MAX_VOLUME}(相当于 40×40×40)`);
+  }
   // bot 端发来的 p 已去掉索引 0(KEEP); 这里补回占位, 保证索引与 RLE 对齐
   const palette = [{ b: "keep" },
     ...pal.map((e) => (typeof e === "string" ? { b: e } : { b: String(e.b), s: e.s }))];

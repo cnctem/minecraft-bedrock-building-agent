@@ -192,6 +192,10 @@ class BotBuildMixin:
             out.append("多格方块(请改成普通方块): " + ", ".join(samples["unsupported"][:6]))
         if diff.get("unloaded"):
             out.append("提示: 未加载的格子既不会写也不会被校验; 远处施工先 pin_region 覆盖。")
+        # 提交前先看一眼: 体块/比例/屋顶收口错了, 这时改程序最便宜
+        if cells >= 300:
+            out.append(f"下一步(建议): render_build(operation_id=\"{jid}\", "
+                       'views=["front", "iso"]) 先看比例与屋顶收口; 不对就改程序重新 preview。')
         out.append(f"确认无误后调用 build_commit(operation_id=\"{jid}\"); "
                    "要改就先改程序再 build_preview。")
         return "\n".join(out)
@@ -251,7 +255,7 @@ class BotBuildMixin:
         zs = (min(box[2], box[5]), max(box[2], box[5]))
         vol = ((xs[1]-xs[0]+1) * (ys[1]-ys[0]+1) * (zs[1]-zs[0]+1))
         if vol > build.MAX_VOLUME:
-            return f"区域 {vol} 格超过上限 {build.MAX_VOLUME}, 请缩小范围。"
+            return build.limit_hint("渲染区域", vol, build.MAX_VOLUME, "40×40×40")
         rid = self.bus.next_id()
         cmd = (f"scriptevent viktor:snapshot {rid} {xs[0]} {ys[0]} {zs[0]}"
                f" {xs[1]} {ys[1]} {zs[1]} overworld")

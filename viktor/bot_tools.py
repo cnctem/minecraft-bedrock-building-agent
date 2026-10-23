@@ -12,7 +12,7 @@ from pathlib import Path
 
 import capabilities
 
-from . import paths, wiki
+from . import build, paths, wiki
 from .bus import BusArgError, Req
 from .constants import (
     BUS_TIMEOUT_TEXT,
@@ -105,8 +105,9 @@ class BotToolsMixin:
         x1, z1, x2, z2 = self._box(args, ("x1", "z1", "x2", "z2"))
         cols = (abs(x2 - x1) + 1) * (abs(z2 - z1) + 1)
         if cols > HM_MAX_COLUMNS:
-            raise BusArgError(f"高度图列数最多 {HM_MAX_COLUMNS} 格, 当前 "
-                              f"{abs(x2 - x1) + 1}×{abs(z2 - z1) + 1}={cols} 列, 请缩小范围。")
+            raise BusArgError(build.limit_hint(
+                "高度图列数", cols, HM_MAX_COLUMNS, "64×64", "列")
+                + f" 当前范围 {abs(x2 - x1) + 1}×{abs(z2 - z1) + 1}。")
         dim = (args.get("dimension") or "overworld").strip().lower()
         cmd = f"scriptevent viktor:heightmap {rid} {x1} {z1} {x2} {z2} {dim}"
         extra = []
@@ -137,7 +138,7 @@ class BotToolsMixin:
             a1, a2, b1, b2 = x1, x2, y1, y2
         cells = (abs(a2 - a1) + 1) * (abs(b2 - b1) + 1)
         if cells > SLICE_MAX_CELLS:
-            raise BusArgError(f"切面最多 {SLICE_MAX_CELLS} 格, 当前共 {cells} 格, 请缩小范围。")
+            raise BusArgError(build.limit_hint("切面", cells, SLICE_MAX_CELLS, "64×64"))
         dim = (args.get("dimension") or "overworld").strip().lower()
         return f"scriptevent viktor:slice {rid} {axis} {level} {a1} {b1} {a2} {b2} {dim}"
 
@@ -145,8 +146,8 @@ class BotToolsMixin:
         x1, y1, z1, x2, y2, z2 = self._box(args)
         volume = (abs(x2 - x1) + 1) * (abs(y2 - y1) + 1) * (abs(z2 - z1) + 1)
         if volume > INSPECT_MAX_VOLUME:
-            raise BusArgError(f"区域最多 {INSPECT_MAX_VOLUME} 格(如 32×32×32), 当前 {volume} 格, "
-                              "请分块; 只看地表用 get_heightmap、只看一层用 get_slice 更省。")
+            raise BusArgError(build.limit_hint("区域", volume, INSPECT_MAX_VOLUME, "32×32×32")
+                              + " 只看地表用 get_heightmap、只看一层用 get_slice 更省。")
         dim = (args.get("dimension") or "overworld").strip().lower()
         detail = (args.get("detail") or "summary").strip().lower()
         if detail not in ("summary", "cells"):
@@ -163,7 +164,7 @@ class BotToolsMixin:
         x1, y1, z1, x2, y2, z2 = self._box(args)
         volume = (abs(x2 - x1) + 1) * (abs(y2 - y1) + 1) * (abs(z2 - z1) + 1)
         if volume > FIND_MAX_VOLUME:
-            raise BusArgError(f"搜索范围最多 {FIND_MAX_VOLUME} 格(如 32×32×32), 当前 {volume} 格, 请分块。")
+            raise BusArgError(build.limit_hint("搜索范围", volume, FIND_MAX_VOLUME, "32×32×32"))
         dim = (args.get("dimension") or "overworld").strip().lower()
         limit = max(1, min(int(args.get("limit") or 128), CELLS_HARD))
         return (f"scriptevent viktor:find {rid} {block} {x1} {y1} {z1} {x2} {y2} {z2}"
