@@ -319,6 +319,123 @@ def to_world(origin, facing, u, v, w):
     return ox - w, oy + v, oz + u   # west
 
 
+def from_world(origin, facing, x, y, z):
+    """世界坐标 -> 局部 (u, v, w); to_world 的逆。"""
+    ox, oy, oz = origin
+    v = y - oy
+    if facing == "south":
+        return x - ox, v, z - oz
+    if facing == "north":
+        return ox - x, v, oz - z
+    if facing == "east":
+        return oz - z, v, x - ox
+    return z - oz, v, ox - x   # west
+
+
+# 不需要支撑的方块(靠墙/靠顶/贴地生长等), 悬空检查跳过
+_ATTACHABLE = (
+    "torch", "soul_torch", "lantern", "soul_lantern", "ladder", "lever", "button",
+    "sign", "chain", "rail", "vine", "glow_lichen", "hanging_roots", "flower", "tulip",
+    "orchid", "allium", "bluet", "daisy", "poppy", "sapling", "fern", "grass",
+    "carpet", "pane", "candle", "flower_pot", "item_frame", "painting", "bell",
+)
+_LIQUIDS = ("water", "lava", "flowing_water", "flowing_lava")
+
+
+def _needs_support(name: str) -> bool:
+    base = name.replace("minecraft:", "", 1)
+    if base in ("air", "cave_air", "void_air") or base in _LIQUIDS:
+        return False
+    return not any(k in base for k in _ATTACHABLE)
+
+
+def check_symmetry(palette: list, cells: dict, origin, facing, spec: str) -> dict:
+    """按局部 u 或 w 轴做镜像对称检查(只比方块类型, 不比朝向/状态)。
+
+    spec = "u" / "w"(用包围盒中线) 或 "u:0" / "w:-2"(显式指定对称轴坐标)。
+    """
+    raw = (spec or "").strip().lower()
+    axis = raw[:1]
+    if axis not in ("u", "w"):
+        raise BuildError('symmetry 只能是 "u"(左右) / "w"(前后), 可加 ":坐标" 指定对称轴')
+    explicit = None
+    if ":" in raw:
+        try:
+            explicit = int(raw.split(":", 1)[1])
+        except ValueError:
+            raise BuildError(f"symmetry 的对称轴坐标必须是整数: {raw}")
+    local = {from_world(origin, facing, *p): pi for p, pi in cells.items()}
+    us = [k[0] for k in local]
+    ws = [k[2] for k in local]
+    u0, u1, w0, w1 = min(us), max(us), min(ws), max(ws)
+    center_u = 2 * explicit if explicit is not None else u0 + u1
+    center_w = 2 * explicit if explicit is not None else w0 + w1
+    mism = []
+    for (u, v, w), pi in local.items():
+        pu = center_u - u if axis == "u" else u
+        pw = center_w - w if axis == "w" else w
+        other = local.get((pu, v, pw))
+        mine = palette[pi]["b"]
+        if other is None:
+            mism.append((u, v, w, mine.replace("minecraft:", ""), "空"))
+        elif palette[other]["b"] != mine:
+            mism.append((u, v, w, mine.replace("minecraft:", ""),
+                         palette[other]["b"].replace("minecraft:", "")))
+    return {"axis": axis, "center": (center_u if axis == "u" else center_w) / 2,
+            "checked": len(local), "mismatch": len(mism), "samples": mism[:8]}
+
+
+def check_floating(palette: list, cells: dict, snapshot: dict | None,
+                   origin, facing) -> dict:
+    """悬空检查: 写入的方块下方与四邻都没有支撑 -> 疑似悬空。
+
+    只用「期望体积 ∪ 世界快照」判断, 不额外读世界; 没有快照就不检查(如实说明)。
+    """
+    if not snapshot:
+        return {"checked": False, "reason": "没给 scan 快照, 无法判断支撑"}
+    so = snapshot["o"]
+    ss = snapshot["s"]
+    rle = snapshot.get("rle") or ""
+    dense = bytearray(ss[0] * ss[1] * ss[2])
+    pos = 0
+    if rle:
+        for part in str(rle).split(","):
+            if not part:
+                continue
+            a, b = part.split(":")
+            v, n = int(a, 36), int(b, 36)
+            end = min(len(dense), pos + n)
+            for i in range(pos, end):
+                dense[i] = v
+            pos = end
+    spal = snapshot.get("p") or []
+
+    def solid(x, y, z) -> bool:
+        pi = cells.get((x, y, z))
+        if pi is not None:
+            name = palette[pi]["b"]
+        else:
+            lx, ly, lz = x - so[0], y - so[1], z - so[2]
+            if lx < 0 or ly < 0 or lz < 0 or lx >= ss[0] or ly >= ss[1] or lz >= ss[2]:
+                return True     # 视野外当作可能被支撑, 不误报
+            idx = (ly * ss[2] + lz) * ss[0] + lx
+            name = spal[dense[idx]] if dense[idx] < len(spal) else "?"
+        base = str(name).replace("minecraft:", "", 1)
+        if base in ("?", "air", "cave_air", "void_air") or base in _LIQUIDS:
+            return False
+        return not any(k in base for k in _ATTACHABLE)
+
+    floating = []
+    for (x, y, z), pi in cells.items():
+        if not _needs_support(palette[pi]["b"]):
+            continue
+        if not (solid(x, y - 1, z) or solid(x + 1, y, z) or solid(x - 1, y, z)
+                or solid(x, y, z + 1) or solid(x, y, z - 1)):
+            lu, lv, lw = from_world(origin, facing, x, y, z)
+            floating.append((lu, lv, lw, palette[pi]["b"].replace("minecraft:", "")))
+    return {"checked": True, "count": len(floating), "samples": floating[:8]}
+
+
 # ---------- 体素化 ----------
 def _circle(r, hollow):
     """圆盘/圆环的 (du, dw) 偏移。hollow 时只留外环。"""
@@ -621,7 +738,7 @@ def _b36(n: int) -> str:
 
 
 def compile_build(program: str, origin: tuple, facing: str, valid_blocks=None,
-                  snapshot: dict | None = None) -> tuple:
+                  snapshot: dict | None = None, symmetry: str | None = None) -> tuple:
     """程序 → (payload, stats)。payload 直接上行给行为包。"""
     facing = (facing or "south").lower()
     if facing not in FACINGS:
@@ -635,6 +752,10 @@ def compile_build(program: str, origin: tuple, facing: str, valid_blocks=None,
     ops = run_program(program, origin, facing, snapshot)
     palette, cells, bounds = voxelize(ops, origin, facing, valid_blocks)
     payload = encode(palette, cells, bounds, origin, facing)
+    checks = {}
+    if symmetry:
+        checks["symmetry"] = check_symmetry(palette, cells, origin, facing, symmetry)
+    checks["floating"] = check_floating(palette, cells, snapshot, origin, facing)
     stats = {
         "ops": len(ops), "cells": len(cells), "palette": len(palette) - 1,
         "bounds": bounds, "size": (bounds[3] - bounds[0] + 1,
@@ -643,5 +764,6 @@ def compile_build(program: str, origin: tuple, facing: str, valid_blocks=None,
         "payload_bytes": len(json.dumps(payload, ensure_ascii=False)),
         "snapshot": bool(snapshot),
         "snapshot_unloaded": (snapshot or {}).get("unloaded", 0),
+        "checks": checks,
     }
     return payload, stats

@@ -248,6 +248,10 @@ BUILD_PREVIEW_SCHEMA = {
                 "facing": {"type": "string", "enum": ["north", "south", "east", "west"],
                            "description": "建筑正面朝向，默认 south；决定局部 u/w 到世界 x/z 的映射"},
                 "name": {"type": "string", "description": "可选：给这次建造起个名字，便于 build_status 辨认"},
+                "symmetry": {"type": "string",
+                             "description": ("可选：对称性检查。\"u\"=左右 / \"w\"=前后，"
+                                             "默认用包围盒中线；可写 \"u:0\" 指定对称轴坐标。"
+                                             "只比对位置与方块类型(不比朝向状态)")},
                 "scan": {"type": "array", "items": {"type": "integer"},
                          "description": ("可选：预取世界快照的局部坐标框 [x1,y1,z1,x2,y2,z2]，"
                                          "给了程序里才能用 api.height/api.block；体积 ≤65536 格")},

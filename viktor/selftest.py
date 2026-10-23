@@ -1836,6 +1836,28 @@ api.set(6, 0, 0, "tall_grass")
     assert door_states == [False, True], door_states
     print("多格方块展开自测 OK")
 
+    # 对称检查: 包围盒中线 / 显式对称轴
+    asym = 'api.fill((0,0,0),(6,4,6),"stonebrick")\napi.set(-1,0,3,"stonebrick")'
+    _, s1 = B.compile_build(asym, (0, 64, 0), "south", B.block_ids(), None, "u:3")
+    assert s1["checks"]["symmetry"]["mismatch"] == 1, s1["checks"]["symmetry"]
+    _, s2 = B.compile_build('api.fill((-3,0,0),(3,4,6),"stonebrick")',
+                            (0, 64, 0), "south", B.block_ids(), None, "u")
+    assert s2["checks"]["symmetry"]["mismatch"] == 0, s2["checks"]["symmetry"]
+    # 悬空检查: 只在快照覆盖范围内判断; 没有快照就如实说"没检查"
+    snap_f = {"o": [0, 63, 0], "s": [5, 4, 5], "p": ["grass_block", "air"],
+              "rle": "0:25,1:75", "unloaded": 0}
+    _, s3 = B.compile_build('api.fill((0,0,0),(4,0,4),"stonebrick")\n'
+                            'api.set(2, 2, 2, "stonebrick")',
+                            (0, 64, 0), "south", B.block_ids(), snap_f)
+    assert s3["checks"]["floating"]["count"] == 1, s3["checks"]["floating"]
+    _, s4 = B.compile_build('api.fill((0,0,0),(4,0,4),"stonebrick")',
+                            (0, 64, 0), "south", B.block_ids(), snap_f)
+    assert s4["checks"]["floating"]["count"] == 0, s4["checks"]["floating"]
+    _, s5 = B.compile_build('api.fill((0,0,0),(4,0,4),"stonebrick")',
+                            (0, 64, 0), "south", B.block_ids(), None)
+    assert s5["checks"]["floating"]["checked"] is False, s5["checks"]["floating"]
+    print("对称/悬空校验自测 OK")
+
     # 模式门禁: 建造工具只在创造模式家族可见(用户明确要求)
     for mode in (MODE_NORMAL, MODE_PLAN, MODE_EXECUTE, MODE_ONESHOT):
         names = bot2._allowed_tools(mode)

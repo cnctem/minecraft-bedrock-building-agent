@@ -110,6 +110,7 @@ class BotBuildMixin:
         origin = args.get("origin") or []
         facing = str(args.get("facing") or "south").lower()
         name = str(args.get("name") or "").strip()[:40]
+        symmetry = str(args.get("symmetry") or "").strip() or None
         snapshot = None
         scan = args.get("scan")
         if scan:
@@ -125,7 +126,7 @@ class BotBuildMixin:
         try:
             payload, stats = build.compile_build(
                 program, origin, facing, build.block_ids() or capabilities.item_ids(),
-                snapshot)
+                snapshot, symmetry)
         except build.BuildError as e:
             return f"建造程序编译失败: {e}"
         jid = self._new_jid()
@@ -158,6 +159,21 @@ class BotBuildMixin:
                    f"已正确 {diff.get('noop', 0)} 格 / 未加载 {diff.get('unloaded', 0)} 格")
         out.append(f"执行计划: {(data.get('plan') or {}).get('boxes', '?')} 个批量填充"
                    f"(程序 {stats['ops']} 个形状)")
+        chk = stats.get("checks") or {}
+        sym = chk.get("symmetry")
+        if sym:
+            if sym["mismatch"] == 0:
+                out.append(f"对称: {sym['axis']} 轴(中心 {sym['center']}) {sym['checked']} 格全对称")
+            else:
+                out.append(f"⚠ 对称: {sym['axis']} 轴(中心 {sym['center']}) 有 {sym['mismatch']} 处不对称")
+                for u, v, w, mine, other in sym["samples"][:4]:
+                    out.append(f"    ({u}, {v}, {w}) 是 {mine}, 镜像处是 {other}")
+        fl = chk.get("floating") or {}
+        if fl.get("checked"):
+            if fl.get("count"):
+                out.append(f"⚠ 悬空: {fl['count']} 格下方与四周都没有支撑(如属设计请忽略)")
+                for u, v, w, name in fl["samples"][:4]:
+                    out.append(f"    ({u}, {v}, {w}) {name}")
         if stats.get("snapshot_unloaded"):
             out.append(f"⚠ 快照里有 {stats['snapshot_unloaded']} 格未加载, "
                        "这些列的 api.height 不可靠(必要时缩小 scan 或先 pin_region)")
