@@ -79,7 +79,8 @@ TOOLS = {
     "oneshot": {"only": {
         "send_chat_message", "update_memory", "get_player_activity",
         "get_player_position", "get_player_hand", "search_wiki", "read_wiki_page",
-        "run_server_command", "get_block", "scan_blocks", "ptc",
+        "run_server_command", "get_block", "get_heightmap", "get_slice",
+        "inspect_region", "find_blocks", "ptc",
         "find_items", "use_skill",
     }},
     # 计划模式: 黑名单, 不让它执行 MC 命令/动世界(查询、说话、记忆、ptc 仍在)

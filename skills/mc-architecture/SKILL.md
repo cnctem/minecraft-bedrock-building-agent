@@ -10,14 +10,14 @@ description: 建筑设计与结构手册——体块/比例/模数、承重体�
 
 ## 0. 设计与施工顺序
 
-1. **选址定向**：`get_player_position` 定朝向，`scan_blocks` 量地形与已有建筑材质；建筑与地形落差 >2 格先做台基/挡土墙。
+1. **选址定向**：`get_player_position` 定朝向，`get_heightmap` 量地形落差，`get_slice` 看已有建筑与材质；建筑与地形落差 >2 格先做台基/挡土墙。
 2. **体块草稿**：用醒目混凝土/羊毛搭主块 + 次块 + 连接体。至少 2~3 个体块穿插，每处差 ≥2 格才有远景存在感。
 3. **定网格**：按 5/7/9 格模数排柱、窗、开间；大型工程按 16×16 或 32×32 网格分区施工。奇数宽度优先，门/塔/山墙中轴才能严格对称。
 4. **结构先行**：柱、梁、拱、桁架、承重墙先落地，再填墙。让力线可见。
 5. **立面深度**：三段式 + 每 4~6 格一处 1 格凹凸；纯平墙最长不超过 7 格。
 6. **材质与渐变**：主材 ≥70%，辅助 2~3 种；每 3~5 格分段，交界用 2~3 格 dithering。详细流程见 `references/detail.md`。
 7. **屋顶与第五立面**：坡屋顶高度约占建筑总高 1/3~1/2；出檐 1~2 格，日式可 2~3 格。屋顶要有屋脊、老虎窗、烟囱或端头装饰。
-8. **落地**：`pin_region` 覆盖工地，体块用 `fill`，关键结构用 `setblock`，立面细节用 `ptc` 批量提交；完成后 `scan_blocks` 验收。
+8. **落地**：`pin_region` 覆盖工地，体块用 `fill`，关键结构用 `setblock`，立面细节用 `ptc` 批量提交；完成后 `inspect_region`(filter=目标方块) 验收 mismatch=0。
 
 > **自主默认**：玩家只说"建个房子"→ 沿用附近群系/建筑材质；尺寸默认 9×7、层高 4、木石组合、人字坡屋顶。先给轮廓，再深化。
 
@@ -92,8 +92,8 @@ description: 建筑设计与结构手册——体块/比例/模数、承重体�
 | 木构/墙板 | `*_planks`、`*_log`、`stripped_*_log`、`*_stairs`、`*_slab`、`*_trapdoor` |
 | 现代/工业 | `*_concrete`、`glass_pane`、`copper_block`、`copper_grate`、`iron_bars`、`chain` |
 
-1. `scan_blocks` 读地形与材质；2. `pin_region` 覆盖工地；3. `fill` 做体块；4. `setblock` 拉结构线；
-5. `ptc` 批量提交 `run_server_command` 中的楼梯/半砖/活板门指令；6. `scan_blocks` 检查对称、空洞、悬浮与朝向。
+1. `get_heightmap` 读地形、`get_slice` 读材质；2. `pin_region` 覆盖工地；3. `fill` 做体块；4. `setblock` 拉结构线；
+5. `ptc` 批量提交 `run_server_command` 中的楼梯/半砖/活板门指令；6. `inspect_region` + `get_slice` 检查对称、空洞、悬浮与朝向。
 
 ## 7. 坑清单
 

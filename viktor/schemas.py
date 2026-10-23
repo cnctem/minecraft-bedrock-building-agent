@@ -62,6 +62,7 @@ GET_BLOCK_SCHEMA = {
         "description": (
             "读取指定坐标上的方块类型(附带方块状态如朝向/半砖)。"
             "基岩版没有 /data get block(那是 Java 版), 必须用这个工具查方块。"
+            "只适合单点精确读取; 成片查看请用 get_heightmap / get_slice / inspect_region。"
             "只能查已加载的区块——坐标需在在线玩家附近或常加载区, 否则会报“区块未加载”。"
             "注意: 玩家的 location.y 是脚底高度, “脚下的方块”是 y-1。"
         ),
@@ -81,38 +82,136 @@ GET_BLOCK_SCHEMA = {
     },
 }
 
-SCAN_BLOCKS_SCHEMA = {
+GET_HEIGHTMAP_SCHEMA = {
     "type": "function",
     "function": {
-        "name": "scan_blocks",
+        "name": "get_heightmap",
         "description": (
-            "批量读取一个 1 格厚的矩形切面(平面)上每个方块的类型, 一次扫一整片, 比逐个 get_block 快得多。"
-            "切面必须是 1 格厚(其中一个轴只有 1 格, 可为 X/Y/Z), 且单层总格数 ≤256。"
-            "因此除 16×16×1 外也可以拉长条: 1×1×256、1×4×64、1×2×128 等。坐标给对角两点(x1y1z1 与 x2y2z2), 顺序不限。"
-            "默认只返回非空气方块; 给 filter 则只返回类型含该关键字的方块, 并附上未匹配方块的类型统计——"
-            "例如填完草方块后用 filter=grass 扫描, 若 other 里出现 air 就说明有没填满的格子。"
-            "只能读已加载的区块(在线玩家附近或常加载区), 未加载的格子计入 unloaded。"
+            "一次读出一整片区域的地形高度(每列地表 y + 顶面方块), 是选址与地形分析的主工具。"
+            "返回按行(z 从北到南)、列(x 从西到东)排的高度网格与顶面方块图, 并给出最低/最高高度。\n"
+            "用途: 选址、判断落差与坡度、算地基/挡土墙/支柱高度、找平地、看水域与岸线、核对填方是否齐平。\n"
+            "“地表”= 该列最高的非空气方块(水面、树叶也算, 看顶面类型即可分辨)。"
+            "要越过水面看水底地面, 把 y_max 设在水平面下一格(例如水面 y=62 时 y_max=61)。\n"
+            "未加载的列记为 unloaded, 该列高度显示 ---, 不要编造。列数上限 4096(如 64×64)。\n"
+            "它只给地表, 没有门窗/材质层次: 那些用 get_slice 或 inspect_region。"
         ),
         "parameters": {
             "type": "object",
             "properties": {
-                "x1": {"type": "integer", "description": "对角点 1 的 X"},
-                "y1": {"type": "integer", "description": "对角点 1 的 Y"},
-                "z1": {"type": "integer", "description": "对角点 1 的 Z"},
-                "x2": {"type": "integer", "description": "对角点 2 的 X"},
-                "y2": {"type": "integer", "description": "对角点 2 的 Y"},
-                "z2": {"type": "integer", "description": "对角点 2 的 Z"},
+                "x1": {"type": "integer", "description": "区域一角 x"},
+                "z1": {"type": "integer", "description": "区域一角 z"},
+                "x2": {"type": "integer", "description": "对角 x"},
+                "z2": {"type": "integer", "description": "对角 z"},
                 "dimension": {"type": "string",
                               "description": "维度: overworld(默认)/nether/the_end"},
-                "filter": {
-                    "type": "string",
-                    "description": (
-                        "只返回类型包含该关键字的方块(如 grass 匹配 grass_block; air 专门找空洞)。"
-                        "省略则返回所有非空气方块。"
-                    ),
-                },
+                "y_max": {"type": "integer",
+                          "description": "可选: 从哪个高度往下找地表, 默认 320(主世界建造上限)"},
+                "y_min": {"type": "integer",
+                          "description": "可选: 最低找到哪里, 默认 -64; 想忽略水面时配合 y_max 用"},
+            },
+            "required": ["x1", "z1", "x2", "z2"],
+        },
+    },
+}
+
+GET_SLICE_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "get_slice",
+        "description": (
+            "读一张平面并画成字符图(带图例), 看形状/立面/剖面用它, 不要用几十个 get_block。\n"
+            "axis=y: 俯视(level 是高度 y); axis=x: 侧视(level 是 x); axis=z: 前视(level 是 z)。"
+            "侧视/前视的行自动从上往下排, 图是正的。\n"
+            "范围: 给长方体两角点即可(x1..z2), 程序只取 level 那一层、忽略 level 轴上的坐标。\n"
+            "用途: 看墙面/屋顶/门窗/对称/内部空间/楼层截面; 施工后复检形状是否对。"
+            "单面 ≤4096 格(如 64×64); 未加载的格子显示 ?。\n"
+            "只要“有多少/哪里不对”用 inspect_region 更省; 要地面起伏用 get_heightmap。"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "axis": {"type": "string", "enum": ["x", "y", "z"],
+                         "description": "切面法线轴: y=俯视, x=侧视, z=前视(默认 y)"},
+                "level": {"type": "integer",
+                          "description": "切面所在坐标(axis=y 时是 y 高度, axis=x/z 时是 x/z)"},
+                "x1": {"type": "integer", "description": "长方体一角 x"},
+                "y1": {"type": "integer", "description": "长方体一角 y"},
+                "z1": {"type": "integer", "description": "长方体一角 z"},
+                "x2": {"type": "integer", "description": "对角 x"},
+                "y2": {"type": "integer", "description": "对角 y"},
+                "z2": {"type": "integer", "description": "对角 z"},
+                "dimension": {"type": "string",
+                              "description": "维度: overworld(默认)/nether/the_end"},
+            },
+            "required": ["level", "x1", "y1", "z1", "x2", "y2", "z2"],
+        },
+    },
+}
+
+INSPECT_REGION_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "inspect_region",
+        "description": (
+            "看一个三维区域里到底有什么: 默认回类型计数(哪几种方块、各多少格、多少空气、多少未加载), "
+            "体积可以很大, 是“先摸清现场”的首选。\n"
+            "给了 filter 时额外回: 命中数 match、不符合数 mismatch、以及不符合的坐标样本"
+            "(空洞/填错/漏填会直接出现在样本里)——施工后复检就用这个: filter=目标方块, mismatch 应为 0。\n"
+            "filter 是方块类型子串(不带 minecraft:), 如 concrete 匹配所有混凝土、stone 匹配 stone/stone_bricks。\n"
+            "detail=\"cells\" 时返回具体坐标(最多 limit 条, 默认 64)用于逐条修复; 默认 summary 只回计数。\n"
+            "体积上限 32768 格(如 32×32×32); 更大请分块, 或用 get_slice/get_heightmap。"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "x1": {"type": "integer", "description": "区域一角 x"},
+                "y1": {"type": "integer", "description": "区域一角 y"},
+                "z1": {"type": "integer", "description": "区域一角 z"},
+                "x2": {"type": "integer", "description": "对角 x"},
+                "y2": {"type": "integer", "description": "对角 y"},
+                "z2": {"type": "integer", "description": "对角 z"},
+                "dimension": {"type": "string",
+                              "description": "维度: overworld(默认)/nether/the_end"},
+                "filter": {"type": "string",
+                           "description": "可选: 只关心类型含该关键字的方块(子串, 不带 minecraft:)"},
+                "detail": {"type": "string", "enum": ["summary", "cells"],
+                           "description": "summary(默认)只回计数; cells 回具体坐标"},
+                "limit": {"type": "integer",
+                          "description": "cells/样本最多回几条, 默认 64, 上限 512"},
             },
             "required": ["x1", "y1", "z1", "x2", "y2", "z2"],
+        },
+    },
+}
+
+FIND_BLOCKS_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "find_blocks",
+        "description": (
+            "在一个三维区域里找某种方块的全部坐标。按类型子串匹配: 写 diamond_ore 更精确, "
+            "写 ore 会匹配所有矿石。返回总处数 + 坐标(最多 limit 条, truncated 表示还有)。\n"
+            "用途: 找资源/找水源/找某材料在哪、确认某方块在不在附近。\n"
+            "如果要找的是“哪里没填对”, 用 inspect_region 的 filter + mismatch, 不要用这个。"
+            "体积上限 32768 格。"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "block": {"type": "string",
+                          "description": "方块类型(可子串), 如 diamond_ore / ore / water, 不带 minecraft:"},
+                "x1": {"type": "integer", "description": "区域一角 x"},
+                "y1": {"type": "integer", "description": "区域一角 y"},
+                "z1": {"type": "integer", "description": "区域一角 z"},
+                "x2": {"type": "integer", "description": "对角 x"},
+                "y2": {"type": "integer", "description": "对角 y"},
+                "z2": {"type": "integer", "description": "对角 z"},
+                "dimension": {"type": "string",
+                              "description": "维度: overworld(默认)/nether/the_end"},
+                "limit": {"type": "integer",
+                          "description": "最多返回多少条坐标, 默认 128, 上限 512"},
+            },
+            "required": ["block", "x1", "y1", "z1", "x2", "y2", "z2"],
         },
     },
 }
@@ -166,7 +265,7 @@ PIN_REGION_SCHEMA = {
         "name": "pin_region",
         "description": (
             "把一片矩形区域设为常加载(ticking area), 防止玩家离开或不在线时区块卸载, "
-            "导致 fill/setblock/clone 报 0 blocks filled、scan_blocks/get_block 报区块未加载。"
+            "导致 fill/setblock/clone 报 0 blocks filled、inspect_region/get_slice/get_block 报区块未加载。"
             "施工范围可能超出在线玩家附近(模拟距离只有 4 区块)时, 开工前先调用它覆盖整个施工面。"
             "只需给 x/z 范围: 高度整列加载, 不用管 y。仅限主世界。"
             "仅在创造/执行模式下可用; 生命周期跟随创造/执行模式: 离开这些模式或会话结束时自动移除; "

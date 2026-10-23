@@ -100,7 +100,7 @@ setblock ~ ~ ~ oak_stairs ["weirdo_direction"=2,"upside_down_bit"=true]
 - **造壳体/房间**: `hollow` 一步出"外壳+空腔", 再 `setblock` 开门窗。
 - **复制装饰**: 做一小段后用 `clone` 复制。
 - **朝向编排(弧线/螺旋/曲面)**: 用 `ptc` 一次提交几十条 `setblock`, 每条带各自的状态。
-- **复检**: 填完用 `scan_blocks` / `get_block` 抽检关键格, 别只看"指令已执行"。
+- **复检**: 填完用 `inspect_region`(filter=目标方块, 看 mismatch) / `get_slice` 抽检, 别只看"指令已执行"。
 
 ## 6. 坑清单
 

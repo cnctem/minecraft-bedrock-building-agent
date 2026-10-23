@@ -81,5 +81,5 @@
 3. 看现有外墙/地板材质选调色板(`palette-light.md`)。
 4. 家具按 `furniture.md` 配方摆, 用 `ptc` 批处理。
 5. 补软装与杂物。
-6. 灯光收尾, `scan_blocks` 检查暗角。
+6. 灯光收尾, `inspect_region`(filter=light) 或 `get_block` 检查暗角。
 7. 汇报 + 让玩家加需求。

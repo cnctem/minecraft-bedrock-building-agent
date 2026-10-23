@@ -34,6 +34,12 @@ def self_test():
     # 清空=完整初始化会落盘会话, 自测也指到临时目录
     paths.SESSION_DIR = Path("/tmp/viktor-sessions-test")
     paths.ONESHOT_DIR = Path("/tmp/viktor-oneshot-test")
+    # 长期记忆也用临时文件: 真实 memory.md 会越长越占上下文, 让"压缩预算"这类用例
+    # 随真实数据漂移(记忆一长, 压缩后仍超限 → 退化成清空 → 测试误报)。
+    _mem_tmp = Path("/tmp/viktor-memory-test.md")
+    _mem_tmp.write_text("# 测试记忆\n- 无\n", encoding="utf-8")
+    _mem_orig = capabilities.MEMORY_PATH
+    capabilities.MEMORY_PATH = _mem_tmp
     bot = Bot(load_config())
     samples = [
         "[2026-10-10 14:20:00:000 INFO] Player connected: TestPlayer, xuid: 12345",
@@ -236,11 +242,11 @@ def self_test():
     cs.messages.append({"role": "tool", "tool_call_id": "c3", "content": "已发送到游戏内聊天。"})
     cs.messages.append({"role": "assistant", "content": None, "reasoning_content": "想",
                         "tool_calls": [_mk_tc("c4", "ptc", {"calls": [
-                            {"tool": "scan_blocks", "arguments": {"x1": 0, "y1": 0, "z1": 0,
-                                                                  "x2": 0, "y2": 0, "z2": 15}},
+                            {"tool": "inspect_region", "arguments": {"x1": 0, "y1": 0, "z1": 0,
+                                                                     "x2": 0, "y2": 0, "z2": 15}},
                             {"tool": "send_chat_message", "arguments": {"text": "扫描完了"}}]})]})
     cs.messages.append({"role": "tool", "tool_call_id": "c4",
-                        "content": "[1] scan_blocks -> DONE total=16\n"
+                        "content": "[1] inspect_region -> 区域 共 16 格\n"
                                    "[2] send_chat_message -> 已发送到游戏内聊天。"})
     cs.add_user("A: 继续")
     kept, stats = Session.compact(cs.messages)
@@ -317,38 +323,49 @@ def self_test():
     bot2.pending.clear()
     bot2.mode = MODE_NORMAL
 
-    # 自动压缩: 工具噪音撑爆预算 → 压缩(玩家的消息保留, 不清空); notify 开关生效
-    bot2.cfg["context_window_tokens"] = 1000  # 预算 4096
-    bot2.session = Session(777)
-    bot2.session.add_system(memory_note())
-    bot2.session.add_system(bot2._mode_note())
-    bot2.session.add_user("A: 大扫描")
-    bot2.session.messages.append({"role": "assistant", "content": None, "reasoning_content": "想",
-                                  "tool_calls": [_mk_tc("s1", "scan_blocks",
-                                                        {"x1": 0, "y1": 0, "z1": 0,
-                                                         "x2": 0, "y2": 0, "z2": 15})]})
-    bot2.session.messages.append({"role": "tool", "tool_call_id": "s1", "content": "x" * 8000})
-    old_sid = bot2.session.id
-    sent.clear()
-    assert bot2._maybe_compact_for_size()
-    assert bot2.session.id != old_sid, "自动压缩应换新会话"
-    assert any(m.get("content") == "A: 大扫描" for m in bot2.session.messages), "玩家消息应保留"
-    assert not any(m.get("role") == "tool" for m in bot2.session.messages), "工具结果应被压缩掉"
-    assert bot2.session.messages[-1]["content"].startswith("# 上下文已压缩")
-    assert sent and "已压缩" in sent[-1], sent
-    # 通知开关关闭 → 不再播报(仍是压缩路径: 玩家消息本身很短, 超限来自工具噪音)
-    bot2.cfg["notify_context_clear"] = False
-    bot2.session.add_user("A: 再看一次")
-    bot2.session.messages.append({"role": "assistant", "content": None,
-                                  "tool_calls": [_mk_tc("s2", "scan_blocks",
-                                                        {"x1": 0, "y1": 0, "z1": 0,
-                                                         "x2": 0, "y2": 0, "z2": 15})]})
-    bot2.session.messages.append({"role": "tool", "tool_call_id": "s2", "content": "y" * 8000})
-    sent.clear()
-    assert bot2._maybe_compact_for_size()
-    assert sent == [], sent
-    bot2.cfg["notify_context_clear"] = True
-    bot2.cfg["context_window_tokens"] = 1048576
+    # 与真实 memory.md 的体积解耦: 自动压缩的预算是写死的 4096, 真实记忆变长会把预算占满,
+    # 让“压缩”退化成“清空”(测试会误报)。这里换成一条很短的假记忆。
+    _mtmp = paths.BASE_DIR / "logs" / "selftest-memory.md"
+    _mtmp.parent.mkdir(parents=True, exist_ok=True)
+    _mtmp.write_text("# 测试记忆\n- 无\n", encoding="utf-8")
+    _orig_mem_path = capabilities.MEMORY_PATH
+    capabilities.MEMORY_PATH = _mtmp
+    try:
+        # 自动压缩: 工具噪音撑爆预算 → 压缩(玩家的消息保留, 不清空); notify 开关生效
+        bot2.cfg["context_window_tokens"] = 1000  # 预算 4096
+        bot2.session = Session(777)
+        bot2.session.add_system(memory_note())
+        bot2.session.add_system(bot2._mode_note())
+        bot2.session.add_user("A: 大扫描")
+        bot2.session.messages.append({"role": "assistant", "content": None, "reasoning_content": "想",
+                                      "tool_calls": [_mk_tc("s1", "inspect_region",
+                                                            {"x1": 0, "y1": 0, "z1": 0,
+                                                             "x2": 0, "y2": 0, "z2": 15})]})
+        bot2.session.messages.append({"role": "tool", "tool_call_id": "s1", "content": "x" * 8000})
+        old_sid = bot2.session.id
+        sent.clear()
+        assert bot2._maybe_compact_for_size()
+        assert bot2.session.id != old_sid, "自动压缩应换新会话"
+        assert any(m.get("content") == "A: 大扫描" for m in bot2.session.messages), "玩家消息应保留"
+        assert not any(m.get("role") == "tool" for m in bot2.session.messages), "工具结果应被压缩掉"
+        assert bot2.session.messages[-1]["content"].startswith("# 上下文已压缩")
+        assert sent and "已压缩" in sent[-1], sent
+        # 通知开关关闭 → 不再播报(仍是压缩路径: 玩家消息本身很短, 超限来自工具噪音)
+        bot2.cfg["notify_context_clear"] = False
+        bot2.session.add_user("A: 再看一次")
+        bot2.session.messages.append({"role": "assistant", "content": None,
+                                      "tool_calls": [_mk_tc("s2", "inspect_region",
+                                                            {"x1": 0, "y1": 0, "z1": 0,
+                                                             "x2": 0, "y2": 0, "z2": 15})]})
+        bot2.session.messages.append({"role": "tool", "tool_call_id": "s2", "content": "y" * 8000})
+        sent.clear()
+        assert bot2._maybe_compact_for_size()
+        assert sent == [], sent
+        bot2.cfg["notify_context_clear"] = True
+        bot2.cfg["context_window_tokens"] = 1048576
+    finally:
+        capabilities.MEMORY_PATH = _orig_mem_path
+        _mtmp.unlink(missing_ok=True)
 
     # 工具轮次中途溢出: 安全点压缩后本轮继续跑完(重建 messages、换新会话)
     bot2.cfg["context_window_tokens"] = 1000
@@ -616,37 +633,124 @@ def self_test():
     print(r)
     assert "需要整数坐标" in bot2._tool_get_block({"x": "a", "y": 1, "z": 2})
 
-    # 能力测试: 批量扫描切面
-    _responders["scan"] = lambda cmd, rid: [
-        f"[2026-10-10 18:32:00:000 INFO] [Scripting] [VIKTOR-SCAN] {rid} "
-        "320 64 -460 minecraft:overworld minecraft:grass_block",
-        f"[2026-10-10 18:32:00:000 INFO] [Scripting] [VIKTOR-SCAN] {rid} "
-        "321 64 -460 minecraft:overworld minecraft:grass_block",
-        f"[2026-10-10 18:32:00:000 INFO] [Scripting] [VIKTOR-SCAN] {rid} "
-        "DONE total=4 matched=2 unloaded=0 other=air=2",
+    # 能力测试: 空间感知原语 v3(分帧 JSON payload)
+    bot2.pack_proto = 3
+
+    def _frames(tag, rid, obj, size=48, reverse=False):
+        """把 payload 切成 `#i/n` 帧(故意切很小以验证重组), 末帧后跟 DONE。"""
+        body = json.dumps(obj, ensure_ascii=False)
+        parts = [body[i:i + size] for i in range(0, len(body), size)] or [""]
+        rows = [f"[2026-10-10 18:32:00:000 INFO] [Scripting] [{tag}] {rid} "
+                f"#{i + 1}/{len(parts)} {part}" for i, part in enumerate(parts)]
+        if reverse:  # 乱序到达也必须按 index 拼回
+            rows.reverse()
+        rows.append(f"[2026-10-10 18:32:00:000 INFO] [Scripting] [{tag}] {rid} DONE")
+        return rows
+
+    # 高度图: 2×2 列, 一行未加载
+    _responders["heightmap"] = lambda cmd, rid: _frames("VIKTOR-MAP", rid, {
+        "ok": True, "dim": "minecraft:overworld", "from": [10, 20], "to": [11, 21],
+        "w": 2, "h": 2, "yMin": -64, "yMax": 320,
+        "palette": ["grass_block", "water"], "heights": [64, 65, 62, 66],
+        "types": [0, 1, 0, 0], "low": 62, "high": 66, "unloaded": 0, "missing": 0,
+    }, reverse=True)
+    r = bot2._tool_get_heightmap({"x1": 10, "z1": 20, "x2": 11, "z2": 21})
+    assert "地形高度" in r and "地表 y 62~66" in r, r
+    assert " 64  65" in r and " 62  66" in r, r          # 高度网格
+    assert "grass_block" in r and "water" in r, r          # 图例
+    print(r)
+
+    # 缺帧: 明确报“回包不完整”, 不能拿半截 JSON 当结果
+    _responders["heightmap"] = lambda cmd, rid: [
+        f"[2026-10-10 18:32:00:000 INFO] [Scripting] [VIKTOR-MAP] {rid} #1/2 {{\"ok\":true,",
+        f"[2026-10-10 18:32:00:000 INFO] [Scripting] [VIKTOR-MAP] {rid} DONE",
     ]
-    rs = bot2._tool_scan_blocks({"x1": 320, "y1": 64, "z1": -460,
-                                 "x2": 321, "y2": 64, "z2": -459, "filter": "grass"})
-    assert "共 4 格" in rs and "grass_block" in rs and "air=2" in rs, rs
-    print(rs)
-    # 非 1 格厚 / 超限 应直接拒绝, 不发指令
-    assert "1 格厚" in bot2._tool_scan_blocks({"x1": 0, "y1": 0, "z1": 0,
-                                               "x2": 2, "y2": 2, "z2": 2})
-    assert "分几次" in bot2._tool_scan_blocks({"x1": 0, "y1": 0, "z1": 0,
-                                              "x2": 30, "y2": 0, "z2": 30})
-    # 新口径: 1 格厚 + 单层总格数 ≤256(程序放行 ≤300), 可拉 1×1×256 长条
+    r = bot2._tool_get_heightmap({"x1": 0, "z1": 0, "x2": 1, "z2": 1})
+    assert "回包不完整" in r, r
+
+    # 切面: 3 宽 2 高, 侧视, 含空气与未加载
+    _responders["slice"] = lambda cmd, rid: _frames("VIKTOR-SLICE", rid, {
+        "ok": True, "dim": "minecraft:overworld", "axis": "y", "level": 64,
+        "a0": 0, "a1": 2, "b0": 0, "b1": 1, "w": 3, "h": 2,
+        "palette": ["stone", "air"], "rows": ["001", "1?1"], "counts": [3, 2], "unloaded": 1,
+    })
+    r = bot2._tool_get_slice({"axis": "y", "level": 64, "x1": 0, "y1": 64, "z1": 0,
+                              "x2": 2, "y2": 64, "z2": 1})
+    assert "切面 y=64" in r and "3×2 格" in r, r
+    assert "未加载 1 格" in r, r
+    assert "stone" in r and "air" in r, r
+    print(r)
+
+    # 区域检查 + filter: 直接给不符合项坐标(复检主力)
+    _responders["inspect"] = lambda cmd, rid: _frames("VIKTOR-INSPECT", rid, {
+        "ok": True, "dim": "minecraft:overworld", "from": [0, 60, 0], "to": [3, 60, 0],
+        "volume": 4, "unloaded": 0, "air": 1, "palette": ["stone_bricks", "air"],
+        "types": {"stone_bricks": 3, "air": 1}, "otherTypes": 0,
+        "filter": "stone_bricks", "match": 3, "mismatch": 1,
+        "mismatchSamples": [[2, 60, 0, "air"]],
+    })
+    r = bot2._tool_inspect_region({"x1": 0, "y1": 60, "z1": 0, "x2": 3, "y2": 60, "z2": 0,
+                                   "filter": "stone_bricks"})
+    assert "命中 3 格" in r and "不符合 1 格" in r, r
+    assert "(2, 60, 0) air" in r, r
+    print(r)
+
+    # 区域检查 detail=cells: 单元清单带类型名
+    _responders["inspect"] = lambda cmd, rid: _frames("VIKTOR-INSPECT", rid, {
+        "ok": True, "dim": "minecraft:overworld", "from": [0, 60, 0], "to": [1, 60, 0],
+        "volume": 2, "unloaded": 0, "air": 0,
+        "palette": ["stone", "dirt"], "types": {"stone": 1, "dirt": 1}, "otherTypes": 0,
+        "cells": [[0, 60, 0, 0], [1, 60, 0, 1]], "cellsTruncated": True,
+    })
+    r = bot2._tool_inspect_region({"x1": 0, "y1": 60, "z1": 0, "x2": 1, "y2": 60, "z2": 0,
+                                   "detail": "cells", "limit": 2})
+    assert "(0, 60, 0) stone" in r and "(1, 60, 0) dirt" in r, r
+    assert "已达条数上限" in r, r
+    print(r)
+
+    # 找方块
+    _responders["find"] = lambda cmd, rid: _frames("VIKTOR-FIND", rid, {
+        "ok": True, "dim": "minecraft:overworld", "block": "water",
+        "from": [0, 55, 0], "to": [3, 70, 3], "volume": 1024, "unloaded": 4,
+        "match": 9, "positions": [[1, 60, 2], [2, 60, 2]], "truncated": True,
+    })
+    r = bot2._tool_find_blocks({"block": "water", "x1": 0, "y1": 55, "z1": 0,
+                                "x2": 3, "y2": 70, "z2": 3, "limit": 2})
+    assert "water" in r and "9 处" in r, r
+    assert "(1,60,2)" in r and "只列前 2 处" in r, r
+    assert "4 格未加载" in r, r
+    print(r)
+
+    # 脚本报错 -> 直接转述, 不伪造结果
+    _responders["inspect"] = lambda cmd, rid: _frames("VIKTOR-INSPECT", rid,
+                                                     {"ok": False, "error": "体积超过上限"})
+    r = bot2._tool_inspect_region({"x1": 0, "y1": 0, "z1": 0, "x2": 1, "y2": 1, "z2": 1})
+    assert "体积超过上限" in r, r
+
+    # 参数校验: 不发指令直接拒绝(省一次往返)
     from .bus import BusArgError
-    assert "viktor:scan" in bot2._scan_cmd("r1", {"x1": 0, "y1": 0, "z1": 0,
-                                                  "x2": 0, "y2": 0, "z2": 255})   # 1×1×256
-    assert "viktor:scan" in bot2._scan_cmd("r2", {"x1": 0, "y1": 0, "z1": 0,
-                                                  "x2": 15, "y2": 0, "z2": 15})  # 16×16×1
-    assert "viktor:scan" in bot2._scan_cmd("r3", {"x1": 0, "y1": 0, "z1": 0,
-                                                  "x2": 16, "y2": 0, "z2": 15})  # 272 格(余量内)
-    try:
-        bot2._scan_cmd("r4", {"x1": 0, "y1": 0, "z1": 0, "x2": 0, "y2": 0, "z2": 300})
-        raise AssertionError("301 格应被拒")
-    except BusArgError as e:
-        assert "总格数最多 256" in str(e), e
+    assert "高度图列数最多" in bot2._tool_get_heightmap(
+        {"x1": 0, "z1": 0, "x2": 64, "z2": 64})
+    assert "最多 32768 格" in bot2._tool_inspect_region(
+        {"x1": 0, "y1": 0, "z1": 0, "x2": 40, "y2": 40, "z2": 40})
+    assert "最多 32768 格" in bot2._tool_find_blocks(
+        {"block": "ore", "x1": 0, "y1": 0, "z1": 0, "x2": 40, "y2": 40, "z2": 40})
+    assert "切面最多" in bot2._tool_get_slice(
+        {"axis": "y", "level": 0, "x1": 0, "y1": 0, "z1": 0, "x2": 64, "y2": 0, "z2": 64})
+    assert "axis 只能是" in bot2._tool_get_slice(
+        {"axis": "q", "level": 0, "x1": 0, "y1": 0, "z1": 0, "x2": 1, "y2": 1, "z2": 1})
+    # 切面命令只取 level 那一层, 另两轴从两角点投影
+    assert bot2._slice_cmd("r1", {"axis": "x", "level": 100, "x1": 0, "y1": 60, "z1": 5,
+                                  "x2": 0, "y2": 70, "z2": 8}) == \
+        "scriptevent viktor:slice r1 x 100 5 60 8 70 overworld"
+    assert bot2._heightmap_cmd("r2", {"x1": 0, "z1": 0, "x2": 1, "z2": 1, "y_max": 61}) == \
+        "scriptevent viktor:heightmap r2 0 0 1 1 overworld 61 -64"
+
+    # 协议过旧: 明确提示重载, 不要静默失败
+    bot2.pack_proto = 2
+    r = bot2._tool_get_heightmap({"x1": 0, "z1": 0, "x2": 1, "z2": 1})
+    assert "协议过旧" in r and "重载" in r, r
+    bot2.pack_proto = 3
 
     # 并发批测: ptc 里连续的多个 scan 只触发 1 次 send_commands(整批一次下发)
     capabilities.set_bus_batch_runner(bot2._run_bus_batch)
@@ -658,14 +762,19 @@ def self_test():
 
     bot2.bridge.send_commands = _counting_send
     capabilities.set_ptc_limit(10)
+    _responders["inspect"] = lambda cmd, rid: _frames("VIKTOR-INSPECT", rid, {
+        "ok": True, "dim": "minecraft:overworld", "from": [0, 60, 0], "to": [3, 60, 0],
+        "volume": 4, "unloaded": 0, "air": 0, "palette": ["stone"],
+        "types": {"stone": 4}, "otherTypes": 0,
+    })
     _ptc = json.dumps({"calls": [
-        {"tool": "scan_blocks", "arguments": {"x1": 0, "y1": 0, "z1": 0, "x2": 0, "y2": 0, "z2": 15, "filter": "grass"}},
-        {"tool": "scan_blocks", "arguments": {"x1": 0, "y1": 0, "z1": 16, "x2": 0, "y2": 0, "z2": 31, "filter": "grass"}},
-        {"tool": "scan_blocks", "arguments": {"x1": 0, "y1": 0, "z1": 32, "x2": 0, "y2": 0, "z2": 47, "filter": "grass"}},
+        {"tool": "inspect_region", "arguments": {"x1": 0, "y1": 0, "z1": 0, "x2": 0, "y2": 0, "z2": 15}},
+        {"tool": "inspect_region", "arguments": {"x1": 0, "y1": 0, "z1": 16, "x2": 0, "y2": 0, "z2": 31}},
+        {"tool": "inspect_region", "arguments": {"x1": 0, "y1": 0, "z1": 32, "x2": 0, "y2": 0, "z2": 47}},
     ]})
     _r = capabilities.execute("ptc", _ptc)
     assert len(_batches) == 1 and len(_batches[0]) == 3, _batches
-    assert _r.count("切面") == 3, _r
+    assert _r.count("区域") == 3, _r
     print("PTC 查询批量下发自测 OK")
 
     bot2.bridge.send_commands = orig_send_commands
@@ -1247,7 +1356,8 @@ def self_test():
     # 计划模式工具: 黑名单挡住 MC 命令/改世界; 查询/说话/ptc/set_mode 保留
     ptools = bot2._allowed_tools(MODE_PLAN)
     assert not ({"run_server_command", "pin_region"} & ptools), ptools
-    assert {"get_player_position", "scan_blocks", "get_block",
+    assert {"get_player_position", "inspect_region", "get_slice", "get_heightmap",
+            "find_blocks", "get_block",
             "send_chat_message", "ptc", "set_mode"} <= ptools, ptools
     # 计划/执行: effort high, 其余对齐创造max(heavy ×2)
     pp = bot2._mode_params(MODE_PLAN)

@@ -20,7 +20,7 @@ description: 地形与景观手册——山脉丘陵、悬崖峭壁、河谷峡�
 
 ## 1. 工作流
 
-1. `scan_blocks` 读现有高度与材质，先定最低水面、谷底和建筑基址。
+1. `get_heightmap` 读现有高度(可先用 `find_blocks` 找水面 y)，先定最低水面、谷底和建筑基址。
 2. 用灰度思维定 3~5 个高度层：谷底/坡脚/山腰/峰顶/天际线；剪影至少读出高-中-低三个节奏。
 3. 粗造型：大块 `fill` 堆石/土，允许此时难看；先大范围，再做局部。
 4. 修坡度：缓坡半砖/整块，陡坡楼梯，>1:1 转崖壁；每层轮廓内缩 1~3 格。
@@ -28,7 +28,7 @@ description: 地形与景观手册——山脉丘陵、悬崖峭壁、河谷峡�
 6. 微地形：±1~2 格起伏、裂缝、碎石带、平台、凹龛。
 7. 植被：树 → 灌木 → 草花 → 苔藓/藤蔓；水体最后放，避免提前冲毁工地。
 8. 做旧：同类材质 5%~15% 互掺，特殊装饰在任意 10×10 内 ≤15%。
-9. `pin_region` 覆盖全范围，`ptc` 批量提交 `fill/setblock`；完事 `scan_blocks` 验收。
+9. `pin_region` 覆盖全范围，`ptc` 批量提交 `fill/setblock`；完事用 `inspect_region`(filter=目标) 与 `get_heightmap` 验收。
 
 ## 2. 高度场四种做法
 
@@ -84,9 +84,9 @@ description: 地形与景观手册——山脉丘陵、悬崖峭壁、河谷峡�
 
 ## 7. 工具落地
 
-1. `get_player_position` + `scan_blocks` 量范围；2. `pin_region` 覆盖施工区；
+1. `get_player_position` + `get_heightmap` 量范围；2. `pin_region` 覆盖施工区；
 3. 大块 `fill` 做骨架；4. `ptc` 批量提交 `run_server_command` 的 `setblock/fill`，做材质与微地形；
-5. 先取样机注一小块水，确认不漏再全面注水；6. `scan_blocks` 检查岸线、水线、空洞与树根落地。
+5. 先取样机注一小块水，确认不漏再全面注水；6. `inspect_region` 检查岸线、水线、空洞与树根落地。
 
 ## 8. 坑清单
 

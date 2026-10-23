@@ -13,9 +13,13 @@ RE_BRIDGE = re.compile(r"^\[Scripting\] \[VIKTOR-CHAT\] (.{1,32}?): (.*)$")
 RE_JOIN = re.compile(r"^Player connected: ([^,]+), xuid: (\d+)")
 RE_LEAVE = re.compile(r"^Player disconnected: ([^,]+), xuid:")
 RE_LIST = re.compile(r"^There are (\d+)/(\d+) players online")
-# 协议 v2: 行为包把请求 id 原样回显在每一行里, 供 ServerBus 按 id 路由
-BUS_ROUTE_RE = re.compile(r"\[VIKTOR-(POS|INV|BLOCK|SCAN)\] (r\d+)(?:[ \t](.*))?$")
-RE_HELLO = re.compile(r"\[VIKTOR-HELLO\] \S+ v2")
+# 协议 v3: 行为包把请求 id 原样回显在每一行里, 供 ServerBus 按 id 路由;
+# 查询回包是「一个 JSON payload 分多帧」(`#i/n <片段>` 行 + DONE), 由 bus 重组。
+BUS_ROUTE_RE = re.compile(
+    r"\[VIKTOR-(POS|INV|BLOCK|MAP|SLICE|INSPECT|FIND|CAPS)\] (r\d+)(?:[ \t](.*))?$")
+BUS_FRAME_RE = re.compile(r"^#(\d+)/(\d+) (.*)$", re.S)
+RE_HELLO = re.compile(r"\[VIKTOR-HELLO\] \S+ v(\d+)")
+PACK_PROTO_SPATIAL = 3  # 感知原语(heightmap/slice/inspect/find)所需的行为包协议
 
 # 控制面硬编码词: 完全匹配时直接中止正在运行的 Agent 任务(不走模型, 类似 Ctrl-C)
 FORCE_STOP_WORD = "强制停止"  # 控制面: 立即中止当前任务(连工具内部等待也打断)
@@ -41,8 +45,12 @@ MODE_EXECUTE = "execute"  # 未来: 只执行既定计划
 MODE_ONESHOT = "oneshot"  # 只能由 "1 ..." 触发, set_mode 进不去/出不来/不可知
 CREATIVE_MODES = (MODE_CREATIVE, MODE_CREATIVE_MAX)
 PIN_MODES = (MODE_CREATIVE, MODE_CREATIVE_MAX, MODE_EXECUTE)  # 支持常加载: 创造家族 + 执行(施工)
-SCAN_STATED_CELLS = 256  # scan_blocks 向模型声明的单层总格数上限(1 格厚, 总格数 ≤256)
-SCAN_MAX_CELLS = 300     # 程序实际允许(留余量; 行为包兜底同值)
+HM_MAX_COLUMNS = 4096    # get_heightmap 列数上限(64×64), 与行为包硬上限一致
+SLICE_MAX_CELLS = 4096   # get_slice 单面格数上限(64×64)
+INSPECT_MAX_VOLUME = 32768   # inspect_region 体积上限(32×32×32)
+FIND_MAX_VOLUME = 32768      # find_blocks 体积上限
+CELLS_STATED = 256       # 体积查询里默认返回的单元/样本条数
+CELLS_HARD = 512
 CONTEXT_WARN_START_PCT = 70  # 上下文占用提醒起始档(第一次; 分母是模型窗口, 默认 1M)
 CONTEXT_WARN_STEP_PCT = 10   # 之后每跨过这么多百分点再提醒一次(70/80/90...)
 # 走服务端请求总线的查询工具: name -> (kind, 超时配置项)
@@ -50,13 +58,19 @@ BUS_TOOLS = {
     "get_player_position": ("pos", "position_timeout_sec"),
     "get_player_hand": ("inv", "inventory_timeout_sec"),
     "get_block": ("block", "block_timeout_sec"),
-    "scan_blocks": ("scan", "scan_timeout_sec"),
+    "get_heightmap": ("map", "spatial_timeout_sec"),
+    "get_slice": ("slice", "spatial_timeout_sec"),
+    "inspect_region": ("inspect", "spatial_timeout_sec"),
+    "find_blocks": ("find", "spatial_timeout_sec"),
 }
 BUS_TIMEOUT_TEXT = {
     "get_player_position": "行为包脚本没有回应, 取不到坐标(可能脚本未加载)。",
     "get_player_hand": "行为包脚本没有回应, 取不到手持物品(可能脚本未加载)。",
     "get_block": "行为包脚本没有回应, 查不到方块(可能脚本未加载, 或区块未加载)。",
-    "scan_blocks": "行为包脚本没有回应, 扫描失败(可能脚本未加载, 或区块未加载)。",
+    "get_heightmap": "行为包脚本没有回应, 取不到高度图(可能脚本未加载), 或区域太大被区块未加载拖慢。",
+    "get_slice": "行为包脚本没有回应, 取不到切面(可能脚本未加载), 或区域太大被区块未加载拖慢。",
+    "inspect_region": "行为包脚本没有回应, 区域检查失败(可能脚本未加载), 或体积太大被区块未加载拖慢。",
+    "find_blocks": "行为包脚本没有回应, 没找到(可能脚本未加载), 或体积太大被区块未加载拖慢。",
 }
 ONESHOT_TRIGGER = re.compile(r"^1(?:[ \u3000]+|$)")  # "1 " / "1　" 开头, 或单一个 "1" = 一次性对话
 ONESHOT_FORCE_STOP = re.compile(r"^1[ \u3000]+强制停止$")  # 停止全部一次性对话

@@ -17,13 +17,16 @@ from .constants import CREATIVE_MODES, MODE_NORMAL
 from .paths import log
 from .profiles import MODES
 from .schemas import (
+    FIND_BLOCKS_SCHEMA,
     GET_BLOCK_SCHEMA,
     GET_HAND_SCHEMA,
+    GET_HEIGHTMAP_SCHEMA,
     GET_POSITION_SCHEMA,
+    GET_SLICE_SCHEMA,
+    INSPECT_REGION_SCHEMA,
     PIN_REGION_SCHEMA,
     READ_WIKI_PAGE_SCHEMA,
     RUN_COMMAND_SCHEMA,
-    SCAN_BLOCKS_SCHEMA,
     SEARCH_WIKI_SCHEMA,
     SEND_CHAT_SCHEMA,
     SET_MODE_SCHEMA,
@@ -40,6 +43,7 @@ class BotCoreMixin:
         self.bus = ServerBus(self.bridge, paths.SERVER_LOG_PATH,
                              cfg.get("bus_reader_poll_sec", 0.05))
         self.bus_enabled = False  # 启动握手(应对行为包未升级)后才置位
+        self.pack_proto = 0       # 行为包协议版本(握手回包解析); v3 才有空间感知原语
         # bus 批量执行器: 同一批 ptc 查询一次性下发、按 id 收齐
         capabilities.set_bus_batch_runner(self._run_bus_batch)
         capabilities.set_bus_batch_max(cfg.get("bus_batch_max", 8))
@@ -57,8 +61,14 @@ class BotCoreMixin:
                              concurrency="serial")
         capabilities.register("get_block", GET_BLOCK_SCHEMA,
                              self._tool_get_block, concurrency="bus")
-        capabilities.register("scan_blocks", SCAN_BLOCKS_SCHEMA,
-                             self._tool_scan_blocks, concurrency="bus")
+        capabilities.register("get_heightmap", GET_HEIGHTMAP_SCHEMA,
+                             self._tool_get_heightmap, concurrency="bus")
+        capabilities.register("get_slice", GET_SLICE_SCHEMA,
+                             self._tool_get_slice, concurrency="bus")
+        capabilities.register("inspect_region", INSPECT_REGION_SCHEMA,
+                             self._tool_inspect_region, concurrency="bus")
+        capabilities.register("find_blocks", FIND_BLOCKS_SCHEMA,
+                             self._tool_find_blocks, concurrency="bus")
         capabilities.register("pin_region", PIN_REGION_SCHEMA, self._tool_pin_region,
                              concurrency="serial")
         capabilities.register("search_wiki", SEARCH_WIKI_SCHEMA, self._tool_search_wiki,

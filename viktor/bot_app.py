@@ -140,11 +140,13 @@ class BotAppMixin:
     # ---------- 主循环 ----------
 
     def _probe_bridge(self) -> bool:
-        """协议握手: 发 `viktor:hello <nonce>`, 等行为包回 `[VIKTOR-HELLO] <nonce> v2`。
-        确认行为包支持 v2(id 回显)才启用请求总线; 否则 bus 查询会明确报错而非错领回包。
-        config 的 bus_protocol 可强制: "auto"(默认, 探测) / "v2"(跳过探测) / "off"(禁用)。"""
+        """协议握手: 发 `viktor:hello <nonce>`, 等行为包回 `[VIKTOR-HELLO] <nonce> v3`。
+        确认行为包支持协议(id 回显 + 分帧 payload)才启用请求总线; 协议版本决定
+        是否暴露空间感知原语。
+        config 的 bus_protocol 可强制: "auto"(默认, 探测) / "v2"/"v3"(跳过探测) / "off"(禁用)。"""
         mode = (self.cfg.get("bus_protocol") or "auto").lower()
-        if mode == "v2":
+        if mode in ("v2", "v3"):
+            self.pack_proto = int(mode[1:])
             return True
         if mode == "off":
             return False
@@ -164,7 +166,9 @@ class BotAppMixin:
                         new = f.read()
                 except FileNotFoundError:
                     new = ""
-                if RE_HELLO.search(new) and nonce in new:
+                m = RE_HELLO.search(new)
+                if m and nonce in new:
+                    self.pack_proto = int(m.group(1))
                     return True
                 time.sleep(0.1)
         return False
@@ -177,9 +181,14 @@ class BotAppMixin:
         self._cleanup_stale_pins()  # 先清残留(不与 list 校准抢日志)
         self.bridge.sync_player_count()
         self.bus_enabled = self._probe_bridge()
-        log("[协议] 行为包交互协议: "
-            + ("v2 (id 路由 + 批量下发)" if self.bus_enabled
-               else "未握手成功, 服务端查询将报错(请重载 viktor_bridge 行为包)"))
+        if not self.bus_enabled:
+            log("[协议] 未握手成功, 服务端查询将报错(请重载 viktor_bridge 行为包)")
+        elif self.pack_proto >= 3:
+            log(f"[协议] 行为包交互协议: v{self.pack_proto} "
+                "(id 路由 + 批量下发 + 空间感知原语)")
+        else:
+            log(f"[协议] 行为包交互协议: v{self.pack_proto} "
+                "(id 路由 + 批量下发; 缺 heightmap/slice/inspect/find, 请重载行为包)")
         # 平滑重启: 若指定 VIKTOR_RESTORE=<落盘会话路径>, 启动时自动灌回(静默, 不发聊天)
         restore = os.environ.get("VIKTOR_RESTORE")
         if restore:

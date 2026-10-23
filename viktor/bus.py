@@ -6,17 +6,30 @@ import threading
 import time
 from pathlib import Path
 
-from .constants import BUS_ROUTE_RE
+from .constants import BUS_FRAME_RE, BUS_ROUTE_RE
 
 
 class BusArgError(ValueError):
     """bus 工具参数校验失败: 消息直接作为给模型的错误文本。"""
 
 
-class Req:
-    """一次服务端查询请求: 命令、回包缓存与完成事件。"""
+def assemble_frames(chunks: dict, total) -> str | None:
+    """把 `#i/n` 帧按序号拼回一个 payload; 缺帧返回 None(调用方报错而非静默截断)。"""
+    if not chunks:
+        return None
+    n = total or max(chunks)
+    if set(chunks) != set(range(1, n + 1)):
+        return None
+    return "".join(chunks[i] for i in range(1, n + 1))
 
-    __slots__ = ("id", "kind", "cmd", "args", "timeout", "lines", "done", "event", "sent_at")
+
+class Req:
+    """一次服务端查询请求: 命令、回包缓存与完成事件。
+    lines = 逐行回包(坐标/物品/方块这类短结果);
+    chunks + payload = 分帧回包(`#i/n`, 大块 JSON), 收到 DONE 时重组。"""
+
+    __slots__ = ("id", "kind", "cmd", "args", "timeout", "lines", "chunks",
+                 "chunk_total", "payload", "done", "event", "sent_at")
 
     def __init__(self, rid, kind, cmd, timeout, args):
         self.id = rid
@@ -25,6 +38,9 @@ class Req:
         self.args = args
         self.timeout = timeout
         self.lines = []
+        self.chunks = {}          # 帧号 -> 片段
+        self.chunk_total = None   # 行为包声明的总帧数
+        self.payload = None       # 收到 DONE 后重组出的完整 JSON
         self.done = False
         self.event = threading.Event()
         self.sent_at = 0.0
@@ -127,8 +143,16 @@ class ServerBus:
             req = self._inflight.get(rid)
         if req is None or req.done:
             return
+        frame = BUS_FRAME_RE.match(body)
+        if frame:
+            # 分帧: 先攒, 不动 lines; 拼装留到 DONE(不依赖到达顺序)
+            req.chunk_total = int(frame.group(2))
+            req.chunks[int(frame.group(1))] = frame.group(3)
+            return
         req.lines.append(body)
         if _bus_terminal(kind, body):
+            if req.chunks:
+                req.payload = assemble_frames(req.chunks, req.chunk_total)
             req.done = True
             req.event.set()
             self._drop(rid)

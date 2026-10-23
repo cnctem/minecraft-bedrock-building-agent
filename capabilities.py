@@ -102,7 +102,7 @@ GET_ACTIVITY_SCHEMA = {
 # ---------- PTC: 批量工具调用 ----------
 # 一次提交多个工具调用, 合并成一条结果返回。
 # 执行端按工具的并发类别(见 _CONCURRENCY)调度: 无副作用的调用默认并行,
-# 查询类工具(get_player_position / get_block / scan_blocks ...)走 bot 的服务端请求总线:
+# 查询类工具(get_player_position / get_block / get_heightmap ...)走 bot 的服务端请求总线:
 # 同一批里的查询会先全部登记、再一次性下发, 只付一次 stdin 轮询延迟, 再按请求 id 收齐。
 MAX_PTC_CALLS = 24          # 程序实际放行数(留一倍余量)
 STATED_PTC_CALLS = 12       # 提示词/报错向模型声明的数(口头限制)

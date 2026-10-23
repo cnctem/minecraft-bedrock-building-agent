@@ -10,7 +10,7 @@ description: 室内装修/内饰手册——房间功能分区、家具方块能
 
 ## 0. 自主工作法
 
-- 默认不追问：`get_player_position` 定位，`scan_blocks` 量长宽高、门窗与现有材质；延续外墙/地板风格。没有风格时用 `oak_planks + stonebrick/deepslate + white_concrete`。
+- 默认不追问：`get_player_position` 定位，`get_slice` 量长宽高与门窗、`inspect_region` 看现有材质；延续外墙/地板风格。没有风格时用 `oak_planks + stonebrick/deepslate + white_concrete`。
 - 房间 <5×5 做紧凑型，>9×9 再分区；通道主要动线 ≥2 格，家具之间 ≥1 格。
 - 先做一个角落小样，退后看；满意再铺开。每区 1~2 个视觉焦点，材质 ≤5 种，允许留白。
 - 施工顺序：地板/墙裙/吊顶 → 焦点 → 大件 → 小件 → 软装 → 灯光。任一步都可停可续。
@@ -86,11 +86,11 @@ description: 室内装修/内饰手册——房间功能分区、家具方块能
 
 ## 7. 落地流程
 
-1. `scan_blocks` 量房、读材质；`pin_region` 覆盖全房。
+1. `get_slice` 量房、`inspect_region` 读材质；`pin_region` 覆盖全房。
 2. 定焦点、调色板、家具清单；先摆最大件，再补小件。
 3. 用 `ptc` 批量提交 `run_server_command` 的 `setblock`/`fill`；家具用相对坐标批处理。
 4. 摆放后抽检状态：楼梯 `weirdo_direction` 0东 1西 2南 3北，半砖 `vertical_half`，活板门方向/开合。
-5. 灯光最后做：先隐藏光源消灭暗角，再装主灯；`scan_blocks`/逐点检查光照 ≥1。
+5. 灯光最后做：先隐藏光源消灭暗角，再装主灯；`inspect_region`/`get_block` 检查光照 ≥1。
 6. 交付自检：动线、焦点、无悬空、无挡门、材质 ≤5、杂物 ≥3、光 ≥1。
 
 ## 8. 坑清单

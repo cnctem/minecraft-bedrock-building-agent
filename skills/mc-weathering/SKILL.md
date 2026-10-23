@@ -77,12 +77,12 @@ description: 做旧与细节手册——给建筑、废墟、遗迹、室内、�
 
 ## 6. 落地流程
 
-1. `scan_blocks` 读原结构与材质；`get_player_position` 定观察方向，先远看轮廓。
+1. `get_slice` 读原结构与材质、`get_heightmap` 看地坪高差；`get_player_position` 定观察方向，先远看轮廓。
 2. 用 `find_items` 找同族旧化方块，先做 3×3 小样确认颜色层级。
 3. `pin_region` 覆盖施工面；表面换色用 `fill ... replace`，局部损伤用 `setblock`。
 4. 大面积杂色/补丁/碎石用 `ptc` 批量提交 `run_server_command`；保存原结构线，不要用一次 `fill` 全墙换色。
 5. 先做损伤，再加修补，再放道具，最后补藤蔓/苔藓/灯。
-6. `scan_blocks` 抽检：结构线连续、无单格苔藓、无悬空藤蔓、无堵路、无过度杂色。
+6. `inspect_region` 抽检：结构线连续、无单格苔藓、无悬空藤蔓、无堵路、无过度杂色。
 
 ## 7. 坑清单
 

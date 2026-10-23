@@ -174,7 +174,10 @@ python3 bot.py --test         # 解析逻辑自测
 | `get_player_position(player?)` | 在线玩家实时坐标（行为包脚本，无指令可查）。返回整数**方块坐标**（向下取整），与玩家屏幕左上角显示的坐标完全一致 |
 | `get_player_hand(player?)` | 在线玩家手持物品 |
 | `get_block(x, y, z, dimension?)` | 读坐标上的方块类型与状态（行为包脚本；基岩版无 `/data`） |
-| `scan_blocks(x1..z2, dimension?, filter?)` | 批量扫一个 1 格厚切面（**单层总格数 ≤256**；厚轴可为 X/Y/Z，所以除 16×16×1 外也能拉 1×1×256 的长条）：默认回非空气方块，给 `filter` 则回类型含该关键字的方块并附未匹配类型统计 |
+| `get_heightmap(x1, z1, x2, z2, y_max?, y_min?)` | **看地形**：一次给出整片每列地表 y + 顶面方块类型（≤4096 列）。选址、落差、地基/挡土墙高度、岸线水线都看它 |
+| `get_slice(axis, level, x1..z2)` | **看平面**：俯视/立面/剖面渲染成字符图 + 图例（≤4096 格）。看墙、屋顶、门窗、对称、楼层截面；施工后复检形状 |
+| `inspect_region(x1..z2, filter?, detail?, limit?)` | **看体量**：区域类型计数（默认 summary）；给 `filter` 时额外回 `match`/`mismatch` + 不符合项坐标（空洞、放错），是**施工复检主力**——mismatch 归零才算对。`detail="cells"` 回具体坐标。≤32768 格 |
+| `find_blocks(block, x1..z2, limit?)` | 在区域内找某方块的全部坐标（类型子串匹配，`ore` 匹配所有矿）。≤32768 格 |
 | `find_items(query?, category?, limit?)` | 查基岩版物品/方块 ID 速查表（唯一权威来源）。`query` 支持中文/英文/ID 片段子串匹配，`category` 限定分类，不传参数返回分类总览。结果 id 可直接用于 `give`/`fill`/`setblock` |
 | `use_skill(name, file?, force?)` | 按需载入一本技能书（skill）的正文；`file` 展开其附带资料。系统在会话开头只列出技能名与适用场景，正文用时才载入 |
 | `search_wiki(query, lang?, limit?)` | 在 Minecraft Wiki 搜条目（默认中文 wiki，`lang="en"` 切英文），返回候选标题（含重定向提示）与摘要；再用 `read_wiki_page` 读正文。查配方/掉落/生成/机制等游戏事实 |
@@ -268,12 +271,18 @@ python3 bot.py --test         # 解析逻辑自测
 BDS 控制台 **不回显玩家聊天**，所以用行为包 `viktor_bridge` 订阅事件并 `console.log`：
 
 - `world.beforeEvents.chatSend` → `[VIKTOR-CHAT] 玩家: 内容`
-- **协议 v2**：bot 在事件参数最前面带一个请求 id `r<数字>`，脚本把该 id 原样回显在每一行里；bot 可一次下发整批请求、按 id 认领各自回包（见下文「服务端请求总线」）。不带 id 时保持旧格式，向后兼容。
+- **协议 v3**：bot 在事件参数最前面带一个请求 id `r<数字>`，脚本把该 id 原样回显在每一行里；bot 可一次下发整批请求、按 id 认领各自回包（见下文「服务端请求总线」）。不带 id 时保持旧格式，向后兼容。
+- **回包分帧**：v3 的查询回包是「一个 JSON payload 切成多帧」——`[VIKTOR-XXX] r<id> #i/n <片段>` 若干行，末行 `DONE`；`viktor/bus.py` 按帧号重组（不依赖到达顺序，缺帧直接报错而不是静默截断）。这样单次回包不再受日志单行长度限制。
 - `scriptevent viktor:pos [id]` → `[VIKTOR-POS] [id] 玩家 x y z 维度`（整数方块坐标，与玩家屏幕一致），末行 `[VIKTOR-POS] [id] DONE`
 - `scriptevent viktor:inv [id]` → `[VIKTOR-INV] [id] 玩家 槽位 物品 数量`（每人末行 `DONE 手持槽位`，全体末行 `[VIKTOR-INV] [id] DONE`）
 - `scriptevent viktor:block [id] <x> <y> <z> [维度]` → `[VIKTOR-BLOCK] [id] x y z 维度 方块ID [状态]`
-- `scriptevent viktor:scan [id] <x1> <y1> <z1> <x2> <y2> <z2> [维度] [过滤]` → 逐行 `[VIKTOR-SCAN] [id] x y z 维度 方块ID [状态]`，末行 `[VIKTOR-SCAN] [id] DONE total=.. matched=.. unloaded=.. other=..`。扫描用 `system.runJob` 周期性让出主线程，不再卡世界。
-- `scriptevent viktor:hello <nonce>` → `[VIKTOR-HELLO] <nonce> v2`：bot 启动时的协议握手，确认行为包装了新协议后才启用请求总线
+- `scriptevent viktor:heightmap [id] <x1> <z1> <x2> <z2> [维度] [yMax] [yMin]` → `[VIKTOR-MAP]` + JSON：每列地表 y 与顶面方块（调色板编码）。用**相邻列高度相关**做扫描线猜测（上一列结果当起点，上爬到顶/下找到第一个非空气），平均每列 1~3 次 `getBlock`；逐格从 y=320 往下扫是不可用的量级。
+- `scriptevent viktor:slice [id] <axis> <level> <a1> <b1> <a2> <b2> [维度]` → `[VIKTOR-SLICE]` + JSON：调色板 + base36 行（一侧视/前视自动从高到低）。`axis=y` 是 a=x,b=z；`x` 是 a=z,b=y；`z` 是 a=x,b=y。
+- `scriptevent viktor:inspect [id] <x1> <y1> <z1> <x2> <y2> <z2> [维度] [filter] [detail] [limit]` → `[VIKTOR-INSPECT]` + JSON：类型计数；给 `filter` 时回 `match`/`mismatch` 与不符合项坐标（空洞、放错）；`detail=cells` 回单元清单。
+- `scriptevent viktor:find [id] <方块ID> <x1> <y1> <z1> <x2> <y2> <z2> [维度] [limit]` → `[VIKTOR-FIND]` + JSON：匹配总数与坐标（子串匹配，可写 `ore`）。
+- `scriptevent viktor:caps [id]` → `[VIKTOR-CAPS]` + JSON：协议版本、可用 API（`runJob`/`fillBlocks`）、各项上限（能力广播）。
+- `scriptevent viktor:hello <nonce>` → `[VIKTOR-HELLO] <nonce> v3`：bot 启动时的协议握手；协议号决定是否启用 `heightmap/slice/inspect/find`，v2 会明确提示重载行为包。
+- 所有大范围查询都用 `system.runJob` 按 `CELLS_PER_TICK=512` 切片让出主线程，不卡世界。
 - `scriptevent viktor:ids` → 分块输出全部物品/方块 ID（`[VIKTOR-IDS] ITEMS/BLOCKS …`、末行 `DONE`），供离线重建 ID 速查表
 
 需要 `@minecraft/server` 的 **beta** 模块与 `level.dat` 里的实验开关。
@@ -286,7 +295,8 @@ BDS 控制台 **不回显玩家聊天**，所以用行为包 `viktor_bridge` 订
 
 `bedrock_server` 每隔约 0.8–1.0s 才把 stdin 里积压的控制台命令整批读走一次。因此逐个下发查询要逐个等 ~1s，
 而把一批 `r<id>` 请求一次 `stuff` 进去只付一次轮询延迟。`viktor/bus.py` 的 `ServerBus` 负责：登记 → 一次下发 →
-一个读线程 tail `server.log` 按 `[VIKTOR-*] r<id>` 路由 → 各请求按自己的 id 收齐。
+一个读线程 tail `server.log` 按 `[VIKTOR-*] r<id>` 路由 → 各请求按自己的 id 收齐；
+分帧回包（`#i/n`）在 `DONE` 时按帧号重组（`assemble_frames`），缺帧直接判失败。
 `ptc` 里连续的查询类调用会自动合成一批下发（每批上限 `bus_batch_max`）；
 指令执行/常加载/备份这类“读任意控制台输出、无法按 id 认领”的工具仍用 `console_gate` 串行。
 若行为包未升级（`viktor:hello` 无响应），查询工具会明确报错提示重载行为包，而不是错领回包。
@@ -408,11 +418,10 @@ BDS 控制台 **不回显玩家聊天**，所以用行为包 `viktor_bridge` 订
 | `reply_chunk_len` / `reply_max_chunks` | 回复分片发送，防止过长 |
 | `mc_server_dir` | 服务器目录（备份时定位世界存档） |
 | `command_blocklist` | 禁止执行的指令 |
-| `command_result_timeout_sec` / `position_timeout_sec` / `inventory_timeout_sec` / `block_timeout_sec` / `scan_timeout_sec` | 等待脚本/控制台回包的秒数 |
-| `bus_protocol` | 服务端请求总线协议：`auto`（默认，用 `viktor:hello` 探测）/ `v2`（跳过探测）/ `off`（禁用，查询报错） |
+| `command_result_timeout_sec` / `position_timeout_sec` / `inventory_timeout_sec` / `block_timeout_sec` / `spatial_timeout_sec` | 等待脚本/控制台回包的秒数（`spatial_*` 覆盖高度图/切面/区域检查/找方块这类大范围查询，默认 25） |
+| `bus_protocol` | 服务端请求总线协议：`auto`（默认，用 `viktor:hello` 探测）/ `v3`（跳过探测）/ `off`（禁用，查询报错）。v3 才有空间感知原语 |
 | `bus_reader_poll_sec` | 总线读线程 tail `server.log` 的轮询间隔（默认 0.05） |
 | `bus_batch_max` | 一次下发给服务端的查询请求上限（默认 8），保护服务端主线程 |
-| `scan_result_limit` | `scan_blocks` 返回文本的字符上限（超出截断） |
 | `normal_effort` / `creative_effort` / `creative_max_effort` | 各模式的思考强度（low / high / max） |
 | `oneshot_effort` / `oneshot_max_reply_tokens` / `oneshot_max_tool_rounds` / `oneshot_max_concurrent` | 一次性对话的思考强度、输出上限、工具轮次上限与最大并发数（默认 low / 6000 / 4 / 4） |
 | `parallel_tool_calls` | 是否告诉 API 允许一次返回多个工具调用（默认 true） |

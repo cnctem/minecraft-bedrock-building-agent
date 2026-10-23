@@ -2,6 +2,7 @@
 
 依赖方向: bot_tools → bus/constants/profiles/paths/capabilities; 不 import 其它 bot_* 模块。
 """
+import json
 import re
 import shutil
 import subprocess
@@ -20,8 +21,12 @@ from .constants import (
     PIN_MODES,
     PIN_NAME,
     RE_LINE,
-    SCAN_MAX_CELLS,
-    SCAN_STATED_CELLS,
+    CELLS_HARD,
+    FIND_MAX_VOLUME,
+    HM_MAX_COLUMNS,
+    INSPECT_MAX_VOLUME,
+    PACK_PROTO_SPATIAL,
+    SLICE_MAX_CELLS,
 )
 from .paths import log
 from .profiles import MODES
@@ -71,31 +76,98 @@ class BotToolsMixin:
                 raise BusArgError("需要整数坐标 x y z。")
             dim = (args.get("dimension") or "overworld").strip().lower()
             return f"scriptevent viktor:block {rid} {x} {y} {z} {dim}"
-        if name == "scan_blocks":
-            return self._scan_cmd(rid, args)
+        if name == "get_heightmap":
+            return self._heightmap_cmd(rid, args)
+        if name == "get_slice":
+            return self._slice_cmd(rid, args)
+        if name == "inspect_region":
+            return self._inspect_cmd(rid, args)
+        if name == "find_blocks":
+            return self._find_cmd(rid, args)
         raise BusArgError(f"错误: 未知的查询工具 {name}")
 
-    def _scan_cmd(self, rid: str, args: dict) -> str:
+    # ---------- 空间感知原语(协议 v3): 由粗到细 ----------
+    # 一次调用看清一片, 而不是切几十张薄片、每格一行:
+    #   get_heightmap  地形高度(选址/落差/地基)
+    #   get_slice      一张平面字符图(看形状/立面/剖面)
+    #   inspect_region 区域聚合(类型计数 / 不符项坐标: 施工复检主力)
+    #   find_blocks    区域内找某方块坐标
+    # 参数校验放在下发之前: 省一次往返, 错误信息也直接可读。
+
+    @staticmethod
+    def _box(args: dict, names=("x1", "y1", "z1", "x2", "y2", "z2")) -> tuple:
         try:
-            x1, y1, z1, x2, y2, z2 = (int(args[k]) for k in
-                                      ("x1", "y1", "z1", "x2", "y2", "z2"))
+            return tuple(int(args[k]) for k in names)
         except (KeyError, TypeError, ValueError):
-            raise BusArgError("需要整数坐标 x1 y1 z1 x2 y2 z2。")
+            raise BusArgError("需要整数坐标 " + " ".join(names) + "。")
+
+    def _heightmap_cmd(self, rid: str, args: dict) -> str:
+        x1, z1, x2, z2 = self._box(args, ("x1", "z1", "x2", "z2"))
+        cols = (abs(x2 - x1) + 1) * (abs(z2 - z1) + 1)
+        if cols > HM_MAX_COLUMNS:
+            raise BusArgError(f"高度图列数最多 {HM_MAX_COLUMNS} 格, 当前 "
+                              f"{abs(x2 - x1) + 1}×{abs(z2 - z1) + 1}={cols} 列, 请缩小范围。")
         dim = (args.get("dimension") or "overworld").strip().lower()
-        filt = re.sub(r"\s+", "", args.get("filter") or "").lower()
-        xs, ys, zs = sorted((x1, x2)), sorted((y1, y2)), sorted((z1, z2))
-        ex, ey, ez = xs[1] - xs[0] + 1, ys[1] - ys[0] + 1, zs[1] - zs[0] + 1
-        ext = sorted((ex, ey, ez))
-        if ext[0] != 1:
-            raise BusArgError(f"这不是 1 格厚的切面({ex}×{ey}×{ez})。请让其中一个轴只有 1 格。")
-        cells = ex * ey * ez
-        if cells > SCAN_MAX_CELLS:
-            raise BusArgError(f"单层切面总格数最多 {SCAN_STATED_CELLS} 格(程序上限 {SCAN_MAX_CELLS}), "
-                              f"当前 {ex}×{ey}×{ez}={cells} 格, 请分几次扫描。")
-        cmd = f"scriptevent viktor:scan {rid} {x1} {y1} {z1} {x2} {y2} {z2} {dim}"
-        if filt:
-            cmd += f" {filt}"
+        cmd = f"scriptevent viktor:heightmap {rid} {x1} {z1} {x2} {z2} {dim}"
+        extra = []
+        for key in ("y_max", "y_min"):
+            if args.get(key) is not None:
+                extra.append(str(int(args[key])))
+        if extra:  # 行为包按位置解析 yMax yMin, 只给一个时补齐另一个
+            if len(extra) == 1:
+                extra.append("-64")
+            cmd += " " + " ".join(extra)
         return cmd
+
+    def _slice_cmd(self, rid: str, args: dict) -> str:
+        axis = (args.get("axis") or "y").strip().lower()
+        if axis not in ("x", "y", "z"):
+            raise BusArgError("axis 只能是 x / y / z。")
+        try:
+            level = int(args["level"])
+        except (KeyError, TypeError, ValueError):
+            raise BusArgError("需要整数 level(切面所在坐标)。")
+        x1, y1, z1, x2, y2, z2 = self._box(args)
+        # 只取 level 那一层: level 轴塌缩成 level, 另两个轴的范围来自两角点
+        if axis == "y":
+            a1, a2, b1, b2 = x1, x2, z1, z2
+        elif axis == "x":
+            a1, a2, b1, b2 = z1, z2, y1, y2
+        else:
+            a1, a2, b1, b2 = x1, x2, y1, y2
+        cells = (abs(a2 - a1) + 1) * (abs(b2 - b1) + 1)
+        if cells > SLICE_MAX_CELLS:
+            raise BusArgError(f"切面最多 {SLICE_MAX_CELLS} 格, 当前共 {cells} 格, 请缩小范围。")
+        dim = (args.get("dimension") or "overworld").strip().lower()
+        return f"scriptevent viktor:slice {rid} {axis} {level} {a1} {b1} {a2} {b2} {dim}"
+
+    def _inspect_cmd(self, rid: str, args: dict) -> str:
+        x1, y1, z1, x2, y2, z2 = self._box(args)
+        volume = (abs(x2 - x1) + 1) * (abs(y2 - y1) + 1) * (abs(z2 - z1) + 1)
+        if volume > INSPECT_MAX_VOLUME:
+            raise BusArgError(f"区域最多 {INSPECT_MAX_VOLUME} 格(如 32×32×32), 当前 {volume} 格, "
+                              "请分块; 只看地表用 get_heightmap、只看一层用 get_slice 更省。")
+        dim = (args.get("dimension") or "overworld").strip().lower()
+        detail = (args.get("detail") or "summary").strip().lower()
+        if detail not in ("summary", "cells"):
+            raise BusArgError('detail 只能是 "summary" 或 "cells"。')
+        limit = max(1, min(int(args.get("limit") or 64), CELLS_HARD))
+        filt = re.sub(r"\s+", "", str(args.get("filter") or "")).lower().replace("minecraft:", "")
+        return (f"scriptevent viktor:inspect {rid} {x1} {y1} {z1} {x2} {y2} {z2}"
+                f" {dim} {filt or '-'} {detail} {limit}")
+
+    def _find_cmd(self, rid: str, args: dict) -> str:
+        block = re.sub(r"\s+", "", str(args.get("block") or "")).lower().replace("minecraft:", "")
+        if not block:
+            raise BusArgError("需要 block(方块类型, 可写片段如 ore)。")
+        x1, y1, z1, x2, y2, z2 = self._box(args)
+        volume = (abs(x2 - x1) + 1) * (abs(y2 - y1) + 1) * (abs(z2 - z1) + 1)
+        if volume > FIND_MAX_VOLUME:
+            raise BusArgError(f"搜索范围最多 {FIND_MAX_VOLUME} 格(如 32×32×32), 当前 {volume} 格, 请分块。")
+        dim = (args.get("dimension") or "overworld").strip().lower()
+        limit = max(1, min(int(args.get("limit") or 128), CELLS_HARD))
+        return (f"scriptevent viktor:find {rid} {block} {x1} {y1} {z1} {x2} {y2} {z2}"
+                f" {dim} {limit}")
 
     def _bus_spec(self, name: str, args: dict):
         """返回 (kind, timeout, args); 命令在拿到 rid 后再构造, 便于把校验错误回给模型。"""
@@ -150,7 +222,13 @@ class BotToolsMixin:
             return self._render_hand(req, args)
         if name == "get_block":
             return self._render_block(req, args)
-        return self._render_scan(req, args)
+        if name == "get_heightmap":
+            return self._render_heightmap(req, args)
+        if name == "get_slice":
+            return self._render_slice(req, args)
+        if name == "inspect_region":
+            return self._render_inspect(req, args)
+        return self._render_find(req, args)
 
     def _render_position(self, req: Req, args: dict) -> str:
         found: dict[str, str] = {}
@@ -228,40 +306,191 @@ class BotToolsMixin:
             return f"坐标 ({x}, {y}, {z}) [{bdim}] 的方块是: {block}"
         return BUS_TIMEOUT_TEXT["get_block"]
 
-    def _render_scan(self, req: Req, args: dict) -> str:
-        x1, y1, z1, x2, y2, z2 = (int(args[k]) for k in
-                                  ("x1", "y1", "z1", "x2", "y2", "z2"))
-        dim = (args.get("dimension") or "overworld").strip().lower()
-        filt = re.sub(r"\s+", "", args.get("filter") or "").lower()
-        xs, ys, zs = sorted((x1, x2)), sorted((y1, y2)), sorted((z1, z2))
-        ex, ey, ez = xs[1] - xs[0] + 1, ys[1] - ys[0] + 1, zs[1] - zs[0] + 1
-        rows, done = [], None
-        for body in req.lines:
-            if body.startswith("DONE"):
-                done = body[4:].strip()
+    # ---------- v3 渲染: JSON payload -> 紧凑可读文本 ----------
+
+    # 字符图符号: 空气固定 "."(最好认), 其余方块按调色板顺序取下面的符号;
+    # "?" 专门表示未加载/未知, "-" 表示高度缺失, 都不参与分配, 避免混淆。
+    GRID_SYMBOLS = "#=+*%@&$~^<>oOxXvVzZ0123456789"
+    AIR_TYPES = ("air", "cave_air", "void_air")
+
+    @classmethod
+    def _symbols(cls, palette: list) -> list:
+        """调色板索引 -> 单字符。同一张图里 legend 与网格共用这一份映射。"""
+        out, k = [], 0
+        for name in palette:
+            if name in (None, "", "?"):
+                out.append("?")
+            elif name in cls.AIR_TYPES:
+                out.append(".")
+            else:
+                out.append(cls.GRID_SYMBOLS[k] if k < len(cls.GRID_SYMBOLS) else "?")
+                k += 1
+        return out
+
+    @classmethod
+    def _sym(cls, palette: list, idx: int) -> str:
+        syms = cls._symbols(palette)
+        return syms[idx] if 0 <= idx < len(syms) else "?"
+
+    def _payload(self, name: str, req: Req) -> dict | str:
+        """取出分帧 JSON; 返回 dict, 或直接可回给模型的错误文本。"""
+        if req.payload is None:
+            if req.chunks:
+                got = len(req.chunks)
+                return (f"行为包回包不完整({got}/{req.chunk_total} 帧), 可能是日志被截断; "
+                        "请缩小范围重试。")
+            return BUS_TIMEOUT_TEXT[name]
+        try:
+            data = json.loads(req.payload)
+        except (json.JSONDecodeError, TypeError) as e:
+            return f"行为包回包不是合法 JSON: {e}"
+        if not isinstance(data, dict) or not data.get("ok"):
+            err = data.get("error") if isinstance(data, dict) else data
+            return f"查询失败: {err or '未知错误'}"
+        return data
+
+    @staticmethod
+    def _dim(data: dict) -> str:
+        return str(data.get("dim", "")).replace("minecraft:", "") or "overworld"
+
+    @classmethod
+    def _legend(cls, palette: list, counts=None, limit: int = 14) -> str:
+        """图例: 符号=类型(数量), 与网格使用同一份符号映射。"""
+        syms = cls._symbols(palette)
+        parts = []
+        for i, name in enumerate(palette):
+            if name in (None, "", "?"):
                 continue
-            parts = body.split(" ", 4)
-            if len(parts) >= 5 and all(p.lstrip("-").isdigit() for p in parts[:3]):
-                rows.append(parts)
-        if done is None:
-            return BUS_TIMEOUT_TEXT["scan_blocks"]
-        info = dict(re.findall(r"(\w+)=([^\s]+)", done))
-        if "error" in info:
-            return f"扫描失败: {info['error']}"
-        total, matched = info.get("total", "?"), info.get("matched", "?")
-        unloaded, other = info.get("unloaded", "0"), info.get("other", "")
-        label = f'匹配 "{filt}"' if filt else "非空"
-        head = (f"切面 {ex}×{ey}×{ez} [{dim}] 共 {total} 格: {label} {matched} 格, "
-                f"未加载 {unloaded} 格")
-        if other:
-            head += f"; 其他方块: {other}"
-        limit = self.cfg.get("scan_result_limit", 6000)
-        out = [head]
-        for p in rows:
-            out.append(f"({p[0]}, {p[1]}, {p[2]}) {p[4].replace('minecraft:', '', 1)}")
-            if len("\n".join(out)) > limit:
-                out.append(f"...(结果过长, 已截断; 共匹配 {matched} 格)")
+            n = counts[i] if isinstance(counts, list) and i < len(counts) else None
+            tag = f" {n}" if n is not None else ""
+            parts.append(f"{syms[i]}={name}{tag}")
+            if len(parts) >= limit:
+                parts.append("…")
                 break
+        return "  ".join(parts)
+
+    def _render_heightmap(self, req: Req, args: dict) -> str:
+        data = self._payload("get_heightmap", req)
+        if isinstance(data, str):
+            return data
+        w, h = data["w"], data["h"]
+        heights, types, palette = data["heights"], data["types"], data["palette"]
+        fx, fz = data["from"]
+        tx, tz = data["to"]
+        unloaded, missing = data.get("unloaded", 0), data.get("missing", 0)
+        low, high = data.get("low", -1), data.get("high", -1)
+        head = (f"地形高度 x {fx}..{tx}, z {fz}..{tz} [{self._dim(data)}]: "
+                f"{w}×{h} 列, 地表 y {low}~{high}")
+        if unloaded:
+            head += f", 未加载 {unloaded} 列"
+        if missing:
+            head += f", 无方块 {missing} 列"
+        out = [head, "行=z(北→南), 列=x(西→东); 数字=该列地表 y, --- = 未加载/无方块"]
+        for r in range(h):
+            row = heights[r * w:(r + 1) * w]
+            out.append(" ".join("---" if v < 0 else f"{v:3d}" for v in row))
+        # 顶面方块图: 一眼看出草/水/树/沙的分布
+        if palette:
+            out.append("顶面方块:")
+            for r in range(h):
+                row = types[r * w:(r + 1) * w]
+                syms = self._symbols(palette)
+                out.append("".join("?" if v == 255 else (syms[v] if v < len(syms) else "?")
+                                   for v in row))
+            out.append("图例: " + self._legend(palette))
+        return "\n".join(out)
+
+    def _render_slice(self, req: Req, args: dict) -> str:
+        data = self._payload("get_slice", req)
+        if isinstance(data, str):
+            return data
+        axis, level = data["axis"], data["level"]
+        palette, rows, counts = data["palette"], data["rows"], data.get("counts") or []
+        w, h, unloaded = data["w"], data["h"], data.get("unloaded", 0)
+        orient = {
+            "y": "行=z(北→南), 列=x(西→东), 俯视",
+            "x": "行=y(高→低), 列=z(北→南), 侧视",
+            "z": "行=y(高→低), 列=x(西→东), 前视",
+        }[axis]
+        head = f"{orient} 切面 {axis}={level} [{self._dim(data)}]: {w}×{h} 格"
+        if unloaded:
+            head += f", 未加载 {unloaded} 格(显示 ?)"
+        out = [head]
+        for row in rows:
+            syms = self._symbols(palette)
+            line = []
+            for ch in row:
+                if ch == "?":
+                    line.append("?")
+                    continue
+                i = int(ch, 36)
+                line.append(syms[i] if i < len(syms) else "?")
+            out.append("".join(line))
+        out.append("图例: " + self._legend(palette, counts))
+        return "\n".join(out)
+
+    def _render_inspect(self, req: Req, args: dict) -> str:
+        data = self._payload("inspect_region", req)
+        if isinstance(data, str):
+            return data
+        fx, fy, fz = data["from"]
+        tx, ty, tz = data["to"]
+        volume, unloaded, air = data["volume"], data.get("unloaded", 0), data.get("air", 0)
+        head = (f"区域 ({fx}, {fy}, {fz})..({tx}, {ty}, {tz}) [{self._dim(data)}] "
+                f"共 {volume} 格: 空气 {air} 格")
+        if unloaded:
+            head += f", 未加载 {unloaded} 格(结论只覆盖已加载部分)"
+        out = [head]
+        types = data.get("types") or {}
+        if types:
+            total = max(1, volume - unloaded)
+            items = [f"{n} {c}格({c * 100 / total:.1f}%)" for n, c in types.items()]
+            if data.get("otherTypes"):
+                items.append(f"其他 {data['otherTypes']}格")
+            out.append("类型: " + ", ".join(items))
+        if data.get("filter"):
+            extra = ""
+            if "holes" in data:
+                extra = f'(其中空洞 {data.get("holes", 0)} 格, 放错 {data.get("wrong", 0)} 格)'
+            out.append(f'筛选 "{data["filter"]}": 命中 {data.get("match", 0)} 格, '
+                       f'不符合 {data.get("mismatch", 0)} 格{extra}')
+            samples = data.get("mismatchSamples") or []
+            if samples:
+                out.append("不符合的位置(供逐条修复):")
+                for x, y, z, t in samples:
+                    out.append(f"  ({x}, {y}, {z}) {str(t).replace('minecraft:', '')}")
+        cells = data.get("cells")
+        if cells is not None:
+            label = "命中单元" if data.get("filter") else "非空气单元"
+            out.append(f"{label} {len(cells)} 条")
+            palette = data.get("palette") or []
+            for x, y, z, i in cells:
+                name = palette[i] if 0 <= i < len(palette) else "?"
+                out.append(f"  ({x}, {y}, {z}) {name}")
+            if data.get("cellsTruncated"):
+                out.append("  …(已达条数上限, 还有更多)")
+        if not types and not data.get("filter") and not cells:
+            out.append("区域内没有可报告的方块(可能整片未加载)。")
+        return "\n".join(out)
+
+    def _render_find(self, req: Req, args: dict) -> str:
+        data = self._payload("find_blocks", req)
+        if isinstance(data, str):
+            return data
+        fx, fy, fz = data["from"] if "from" in data else (
+            args.get("x1", "?"), args.get("y1", "?"), args.get("z1", "?"))
+        tx, ty, tz = data["to"] if "to" in data else (
+            args.get("x2", "?"), args.get("y2", "?"), args.get("z2", "?"))
+        block = data.get("block", "")
+        match, positions = data.get("match", 0), data.get("positions") or []
+        out = [f'在 ({fx}, {fy}, {fz})..({tx}, {ty}, {tz}) [{self._dim(data)}] '
+               f'{data.get("volume", "?")} 格中找 "{block}": {match} 处']
+        if positions:
+            out.append("坐标: " + ", ".join(f"({x},{y},{z})" for x, y, z in positions))
+        if data.get("truncated"):
+            out.append(f"(只列前 {len(positions)} 处, 共有 {match} 处; 想全看请缩小范围)")
+        if data.get("unloaded"):
+            out.append(f"注意: 有 {data['unloaded']} 格未加载, 未参与搜索(可能漏掉)。")
         return "\n".join(out)
 
     def _require_bus(self) -> str:
@@ -297,10 +526,34 @@ class BotToolsMixin:
             return err
         return self._bus_call("get_block", args or {})
 
-    def _tool_scan_blocks(self, args: dict) -> str:
+    def _require_spatial(self) -> str:
+        """空间感知原语需要协议 v3; 协议过旧时明确报错, 不要让它拿到空数据。"""
         if err := self._require_bus():
             return err
-        return self._bus_call("scan_blocks", args or {})
+        if getattr(self, "pack_proto", 0) < PACK_PROTO_SPATIAL:
+            return (f"行为包协议过旧(v{getattr(self, 'pack_proto', 0)}), "
+                    "不支持 heightmap/slice/inspect/find; 请重载更新后的 viktor_bridge 行为包。")
+        return ""
+
+    def _tool_get_heightmap(self, args: dict) -> str:
+        if err := self._require_spatial():
+            return err
+        return self._bus_call("get_heightmap", args or {})
+
+    def _tool_get_slice(self, args: dict) -> str:
+        if err := self._require_spatial():
+            return err
+        return self._bus_call("get_slice", args or {})
+
+    def _tool_inspect_region(self, args: dict) -> str:
+        if err := self._require_spatial():
+            return err
+        return self._bus_call("inspect_region", args or {})
+
+    def _tool_find_blocks(self, args: dict) -> str:
+        if err := self._require_spatial():
+            return err
+        return self._bus_call("find_blocks", args or {})
 
     # ---------- Minecraft Wiki 查询(HTTP, 实时抓取) ----------
     # 定位是施工辅助: 查事实与数值(配方/掉落/生成/机制/数据值)。ID 用 find_items,

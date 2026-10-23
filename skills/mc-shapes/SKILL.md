@@ -67,7 +67,7 @@ z = round_half_up(sqrt(R*R - x*x))，x = 0..R
 2. 标中心：`setblock cx y cz glowstone`；立临时中心柱到球形顶部，避免逐层从上一层量误差累积。
 3. 空心每条 `setblock`；实心每列 `fill`；把 `run_server_command` 统一用 `ptc` 提交，别逐条往返。
 4. 先做 R=4~6 小样，确认楼梯朝向与包边，再放大。
-5. `scan_blocks` 扫切面；抽检四极点 `(cx±R,cz)`、`(cx,cz±R)` 与 45° 点。
+5. `get_slice` 扫切面看形状；`get_block` 抽检四极点 `(cx±R,cz)`、`(cx,cz±R)` 与 45° 点。
 6. 清中心标记，汇报半径、口径、材质。
 
 ## 7. 坑清单

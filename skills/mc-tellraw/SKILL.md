@@ -68,7 +68,7 @@ tellraw @p {"rawtext":[{"text":"[传送到喷泉]","color":"gold","bold":true,"c
 
 - `@s` 在点击时解析为**点击者**，适合个人传送。
 - 坐标要用绝对整数；相对 `~` 会相对点击者当前位置。
-- 先 `get_player_position` 或 `scan_blocks` 确认落点，建议 y 取地面上一层。
+- 先 `get_player_position` + `get_block` 确认落点，建议 y 取地面上一层。
 - 跨维度：`value":"/execute in nether run tp @s 0 64 0"`；先小范围测试语法。
 
 ### 执行命令 / 只建议命令
@@ -93,7 +93,7 @@ tellraw @p {"rawtext":[{"text":"旧传送门","color":"light_purple","hoverEvent
 ## 4. 坐标超链接工作流
 
 1. `get_player_position` 拿到落点 `x y z`，换算成安全站立位置。
-2. 用 `scan_blocks`/`get_block` 确认目标不是岩浆、水、基岩或高空悬空。
+2. 用 `inspect_region`/`get_block` 确认目标不是岩浆、水、基岩或高空悬空。
 3. 构造 `rawtext`，把坐标写成绝对整数，按钮放入 `run_command`。
 4. 先向自己发一条测试：`tellraw @p {...}`，斜杠值使用 `/tp @s x y z`。
 5. 点击验证落点、维度、权限和提示；失败先检查 JSON 引号与 `/`。
