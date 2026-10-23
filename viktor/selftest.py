@@ -1425,6 +1425,16 @@ def self_test():
     assert _sk and "mc-interior" in _sk[-1]["content"], _sk
     assert all("reasoning_content" in m for m in bot2.session.messages
                if m["role"] == "assistant"), "恢复时应给 assistant 补 reasoning_content"
+    # 恢复必须点明"历史已执行过, 不要重跑": 否则模型下句话会把老工具调用整批重做,
+    # 玩家会看到 [工具] 又被转发一遍
+    _restore_note = [m for m in bot2.session.messages if m.get("role") == "system"
+                     and (m.get("content") or "").startswith("# 会话已恢复")]
+    assert _restore_note and "不要重跑" in _restore_note[-1]["content"], _restore_note
+    # 重复恢复不重复追加
+    _n_before = len(bot2.session.messages)
+    bot2.resume_session(str(rp))
+    assert len([m for m in bot2.session.messages if m.get("role") == "system"
+                and (m.get("content") or "").startswith("# 会话已恢复")]) == 1
     bot2.session, bot2.mode = saved_sess, saved_mode
     rp.unlink(missing_ok=True)
     print("会话恢复自测 OK")
@@ -1578,8 +1588,11 @@ def self_test():
     bot2._on_restore_session("Tester")
     assert any("已恢复" in t for t in rs), rs
     assert any(m.get("content") == "好的" for m in bot2.session.messages)
+    # 恢复后末尾依次是: 技能清单(如有变化) -> "会话已恢复"注记
     assert bot2.session.messages[-1].get("role") == "system" \
-        and bot2.session.messages[-1]["content"].startswith("# 可用技能书"), bot2.session.messages[-1]
+        and bot2.session.messages[-1]["content"].startswith("# 会话已恢复"), bot2.session.messages[-1]
+    assert any((m.get("content") or "").startswith("# 可用技能书")
+               for m in bot2.session.messages), "技能清单注记应仍在"
     bot2.bridge.say_as_viktor = orig_say_rs
     rdump.unlink(missing_ok=True)
     print("恢复会话自测 OK")

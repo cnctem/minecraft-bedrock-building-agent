@@ -63,5 +63,6 @@
   "wiki_max_chars": 12000,
   "wiki_user_agent": "viktor-mc-bot/0.1 (personal Minecraft Bedrock server bot)",
   "build_progress": true,
-  "build_progress_min_sec": 2.0
+  "build_progress_min_sec": 2.0,
+  "replay_log_on_truncate": false
 }

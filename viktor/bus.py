@@ -165,7 +165,8 @@ class ServerBus:
                     continue
                 size = self.log_path.stat().st_size
                 if size < self._offset:
-                    self._offset = 0  # 日志被截断/轮转
+                    # 进程重启后请求 id 会从 r1 重新编号: 重放旧帧可能被新请求误认领
+                    self._offset = size
                 with open(self.log_path, "rb") as f:
                     f.seek(self._offset)
                     data = f.read()

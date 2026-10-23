@@ -228,7 +228,14 @@ class BotAppMixin:
             try:
                 size = log_file.stat().st_size
                 if size < self.offset:  # 日志被截断/轮转
-                    self.offset = 0
+                    if self.cfg.get("replay_log_on_truncate", False):
+                        self.offset = 0
+                    else:
+                        # 从头重放会把历史聊天重新塞进队列, bot 会对着旧消息再答一遍,
+                        # 并把当时的工具调用整批重新转发。默认只跳过去, 只处理新行。
+                        log(f"[tail] 日志被截断/轮转({self.offset} -> {size}), "
+                            "跳过历史内容只处理新行(需要重放请设 replay_log_on_truncate=true)")
+                        self.offset = size
                 with open(log_file, encoding="utf-8", errors="replace") as f:
                     f.seek(self.offset)
                     for line in f:

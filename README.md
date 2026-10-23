@@ -435,6 +435,7 @@ BDS 控制台 **不回显玩家聊天**，所以用行为包 `viktor_bridge` 订
 | `bus_reader_poll_sec` | 总线读线程 tail `server.log` 的轮询间隔（默认 0.05） |
 | `bus_batch_max` | 一次下发给服务端的查询请求上限（默认 8），保护服务端主线程 |
 | `build_progress` / `build_progress_min_sec` | 建造提交时是否播报进度、再次节流的最小间隔（默认 true / 2.0s） |
+| `replay_log_on_truncate` | `server.log` 被截断/轮转时是否从头重放（默认 false：只跳过、处理新行。重放会重新处理历史聊天，bot 会对着旧消息再答一遍并重新转发旧工具调用） |
 | `normal_effort` / `creative_effort` / `creative_max_effort` | 各模式的思考强度（low / high / max） |
 | `oneshot_effort` / `oneshot_max_reply_tokens` / `oneshot_max_tool_rounds` / `oneshot_max_concurrent` | 一次性对话的思考强度、输出上限、工具轮次上限与最大并发数（默认 low / 6000 / 4 / 4） |
 | `parallel_tool_calls` | 是否告诉 API 允许一次返回多个工具调用（默认 true） |

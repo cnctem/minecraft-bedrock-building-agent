@@ -313,6 +313,16 @@ class BotControlMixin:
             if old.strip() != note.strip():
                 self.session.add_system(note)
                 log("[恢复] 技能清单已更新, 末尾补注入一条")
+        # 关键: 恢复的是"已完成的历史"。不点明的话, 模型会把这轮对话当成还没做完的任务,
+        # 下一句话就把之前的工具调用整批重跑一遍(玩家看到 [工具] 全被重新转发)。
+        note = ("# 会话已恢复(重启)\n"
+                "以上是重启之前的对话记录, 其中的工具调用都已经真实执行过、世界状态也已落定。\n"
+                "不要重跑、不要补做、不要重新转发上面出现过的工具调用。\n"
+                "从现在起只处理玩家新说的话; 需要现场状态时用查询工具重新确认, "
+                "不要凭历史推断当前世界。")
+        if not any((m.get("content") or "").startswith("# 会话已恢复")
+                   for m in reversed(msgs) if m.get("role") == "system"):
+            self.session.add_system(note)
         log(f"[恢复] 从 {p.name} 灌回 {len(msgs)} 条消息, 模式={MODES[self.mode].label}")
 
     @staticmethod
