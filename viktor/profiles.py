@@ -84,13 +84,16 @@ TOOLS = {
         "find_items", "use_skill",
     }},
     # 计划模式: 黑名单, 不让它执行 MC 命令/动世界(查询、说话、记忆、ptc 仍在)
-    "no_commands": {"except": {"run_server_command", "pin_region"}},
+    "no_commands": {"except": {"run_server_command", "pin_region",
+                               "build_preview", "build_commit", "build_undo", "build_status"}},
+    # 建造引擎(含 Python 沙箱)只在创造模式家族暴露: 其它模式连工具名都看不到
+    "no_build": {"except": {"build_preview", "build_commit", "build_undo", "build_status"}},
 }
 
 # 模式表: 只组合上面的 profile。next_modes = set_mode 允许切到的目标(其它模式对模型“不可知”);
 # 空元组 = 不可切换(连 set_mode 都不暴露)。plan/oneshot 不在任何 next_modes 里 -> 无法被切进去。
 MODES = {
-    MODE_NORMAL:       Mode("none",     "quick",   "all",      "normal",       label="普通",
+    MODE_NORMAL:       Mode("none",     "quick",   "no_build", "normal",       label="普通",
                             next_modes=(MODE_CREATIVE, MODE_CREATIVE_MAX)),
     MODE_CREATIVE:     Mode("creative", "heavy",   "all",      "creative",     label="创造",
                             next_modes=(MODE_NORMAL, MODE_CREATIVE_MAX)),
@@ -98,7 +101,7 @@ MODES = {
                             next_modes=(MODE_NORMAL, MODE_CREATIVE)),
     MODE_PLAN:         Mode("plan",     "heavy",   "no_commands", "creative",     label="计划", scale=2,
                             next_modes=(MODE_EXECUTE,)),
-    MODE_EXECUTE:      Mode("execute",  "heavy",   "all",         "creative",     label="执行", scale=2,
+    MODE_EXECUTE:      Mode("execute",  "heavy",   "no_build",    "creative",     label="执行", scale=2,
                             next_modes=(MODE_NORMAL,)),
     MODE_ONESHOT:      Mode("oneshot",  "oneshot", "oneshot",  "oneshot",      label="一次性",
                             reveal_rounds=True),

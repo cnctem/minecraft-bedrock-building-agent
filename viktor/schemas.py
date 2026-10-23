@@ -216,6 +216,90 @@ FIND_BLOCKS_SCHEMA = {
     },
 }
 
+BUILD_PREVIEW_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "build_preview",
+        "description": (
+            "【建造引擎】把一段建造程序编译成期望方块，与当前世界做差异对比，**不写世界**。\n"
+            "程序是受限 Python 的函数体，作用域里有 api：\n"
+            "  api.set(u,v,w,block,states?) / api.fill(a,b,block) / api.box(a,b,block,hollow=False)\n"
+            "  api.walls(a,b,block,thickness=1) / api.frame(a,b,block,step=4) / api.line(a,b,block)\n"
+            "  api.plane(a,b,block,axis='v') / api.cylinder(center,r,h,block,axis='v',hollow=False)\n"
+            "  api.sphere(center,r,block,hollow=False) / api.pyramid(a,b,height,block,hollow=True)\n"
+            "  api.pattern(a,b,[blocks],axis='v') / api.dir('front'|'back'|'left'|'right')\n"
+            "  坐标是**局部坐标** [u 右, v 上, w 前]，由 origin + facing 变换到世界坐标。\n"
+            "  可用 for/if/函数/算术/math.sin 等；**没有** import/文件/网络。\n"
+            "**KEEP 语义**：程序没提到的格子不写也不删；清空必须显式 api.fill(...,'air')。\n"
+            "返回 operation_id、包围盒、差异（新放置/覆盖/已正确/未加载）、执行计划与警告。"
+            "看完差异确认无误，再调 build_commit 提交；要改就改程序重新 preview。"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "program": {"type": "string",
+                            "description": "建造程序正文(Python 语句块)，用 api.* 声明形状"},
+                "origin": {"type": "array", "items": {"type": "integer"},
+                           "description": "局部 (0,0,0) 对应的世界坐标 [x, y, z]"},
+                "facing": {"type": "string", "enum": ["north", "south", "east", "west"],
+                           "description": "建筑正面朝向，默认 south；决定局部 u/w 到世界 x/z 的映射"},
+                "name": {"type": "string", "description": "可选：给这次建造起个名字，便于 build_status 辨认"},
+            },
+            "required": ["program", "origin"],
+        },
+    },
+}
+
+BUILD_COMMIT_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "build_commit",
+        "description": (
+            "【建造引擎】提交一个已预览的操作：运行时用批量填充写入世界，然后**自动复读校验**。\n"
+            "返回写入格数、批次数、耗时，以及 verify：mismatch / holes(该有方块却是空气) / "
+            "wrong(放错) 与样本坐标。\n"
+            "**只有 verify.mismatch == 0 才能对玩家说完成**；不为 0 就按样本坐标写补丁程序再走一遍。\n"
+            "提交后可用 build_undo 还原（撤销栈只保留最近 2 个操作，reload 会清空）。"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "operation_id": {"type": "string",
+                                 "description": "build_preview 返回的 operation_id"},
+            },
+            "required": ["operation_id"],
+        },
+    },
+}
+
+BUILD_UNDO_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "build_undo",
+        "description": (
+            "【建造引擎】撤销最近一次（或指定）已提交的建造：用提交前保存的方块体积原样写回。\n"
+            "撤销栈只保留最近 2 个操作；行为包 reload 后会清空。"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "operation_id": {"type": "string",
+                                 "description": "可选：要撤销的操作 id；不传则撤销最近一次"},
+            },
+            "required": [],
+        },
+    },
+}
+
+BUILD_STATUS_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "build_status",
+        "description": "【建造引擎】列出当前暂存的建造操作（待提交/已提交/上传中）与可撤销的栈。",
+        "parameters": {"type": "object", "properties": {}},
+    },
+}
+
 SET_MODE_SCHEMA = {
     "type": "function",
     "function": {

@@ -412,6 +412,11 @@ def _items() -> dict:
     return _ITEMS_CACHE
 
 
+def item_ids() -> set:
+    """全部可用 ID(不含 minecraft: 前缀), 供建造引擎校验方块名。"""
+    return set(_items().keys())
+
+
 def _item_haystack(iid: str, meta: dict) -> str:
     parts = [iid, meta.get("zh", ""), meta.get("en", "")] + list(meta.get("alias", []))
     return " ".join(parts).lower()

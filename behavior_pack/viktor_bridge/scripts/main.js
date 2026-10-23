@@ -5,6 +5,7 @@
 // 每一行输出里, 于是 bot 可以一次下发整批请求、再按 id 认领各自回包 (见 [VIKTOR-*] 行)。
 // 旧格式 (无 id) 依旧兼容: takeId 只在首 token 形如 r123 时才认作 id。
 import { world, system, ItemTypes, BlockTypes } from "@minecraft/server";
+import * as mc from "@minecraft/server";
 import { ActionFormData } from "@minecraft/server-ui";
 
 const CHAT_TAG = "[VIKTOR-CHAT]";
@@ -19,8 +20,9 @@ const SLICE_TAG = "[VIKTOR-SLICE]";    // 二维切面(调色板 + base36 行)
 const INSPECT_TAG = "[VIKTOR-INSPECT]"; // 三维区域摘要 / 单元列表 / 不符合项
 const FIND_TAG = "[VIKTOR-FIND]";      // 区域内搜方块坐标
 const CAPS_TAG = "[VIKTOR-CAPS]";      // 能力广播(协议/可用 API/各项上限)
+const BUILD_TAG = "[VIKTOR-BUILD]";    // 建造引擎回包(分帧 JSON)
 // v3: 新增 heightmap/slice/inspect/find/caps; 查询回包改为「一个 JSON payload 分多帧」
-const PROTOCOL = "v3";
+const PROTOCOL = "v4";
 // 分帧: 每帧 JSON 字符数。console.log 的行长没有官方保证, 700 是实测安全的保守值;
 // 一帧一行, bot 侧按 `#i/n` 重组, 因此单次回包不再受行长限制。
 const FRAME_CHARS = 700;
@@ -598,6 +600,459 @@ function runJob(job) {
   while (!r.done) r = job.next();
 }
 
+
+// ---------- v4: 建造引擎 ----------
+// 分工: bot 负责把「建造程序」编译成期望体素(纯几何), 这里负责
+//   预览(diff) → 提交(贪心合并 + fillBlocks 时间切片) → 校验(复读比对) → 撤销(before 体积)
+// 期望体积编码: palette(索引 0 固定 = KEEP 不写) + 分层 RLE("idx:count" base36, 逗号分隔)。
+const BUILD_MAX_VOLUME = 65536;      // 单次操作体积上限(格)
+const BUILD_TTL_MS = 10 * 60 * 1000; // 暂存操作有效期
+const BUILD_MAX_PENDING = 4;         // 同时暂存的操作数
+const BUILD_MAX_UNDO = 2;            // 撤销栈深度
+const BUILD_SAMPLES = 8;             // 回包里每类样本条数
+// 这些方块不允许被覆盖(世界骨架/系统方块)
+const PROTECTED_TYPES = new Set([
+  "bedrock", "barrier", "command_block", "chain_command_block", "repeating_command_block",
+  "structure_block", "structure_void", "jigsaw", "light_block", "deny", "allow", "border_block",
+]);
+// 多格方块: 单格写入会留下残缺的另一半(本引擎版本早于 1.26.10 的官方修复)
+const UNSUPPORTED_TYPES = new Set([
+  "bed", "tall_grass", "large_fern", "sunflower", "lilac", "rose_bush", "peony",
+  "small_dripleaf", "big_dripleaf", "big_dripleaf_stem", "tall_dripleaf", "pitcher_plant",
+  "cave_vines", "cave_vines_body_with_berries", "cave_vines_head_with_berries",
+  "hanging_roots", "spore_blossom",
+]);
+const builds = new Map();  // jid -> { parts, total, raw, op, created, aborted, before, name }
+const undoStack = [];      // [{ jid, name, op }]
+
+function splitAction(message) {
+  const s = String(message || "").trim();
+  const i = s.indexOf(" ");
+  return i < 0 ? { action: s.toLowerCase(), rest: "" } : { action: s.slice(0, i).toLowerCase(), rest: s.slice(i + 1) };
+}
+
+function decodeRle(str, total) {
+  const out = new Uint8Array(total);   // 缺省 0 = KEEP
+  let pos = 0;
+  if (str) {
+    for (const part of String(str).split(",")) {
+      if (!part) continue;
+      const c = part.indexOf(":");
+      const v = parseInt(part.slice(0, c), 36);
+      const n = parseInt(part.slice(c + 1), 36);
+      if (!Number.isFinite(v) || !Number.isFinite(n) || n <= 0) continue;
+      const end = Math.min(total, pos + n);
+      out.fill(v, pos, end);
+      pos = end;
+    }
+  }
+  return out;
+}
+
+function encodeRle(cells) {
+  const parts = [];
+  let i = 0;
+  while (i < cells.length) {
+    const v = cells[i];
+    let j = i + 1;
+    while (j < cells.length && cells[j] === v) j++;
+    parts.push(`${v.toString(36)}:${(j - i).toString(36)}`);
+    i = j;
+  }
+  return parts.join(",");
+}
+
+function decodeBuild(raw) {
+  const obj = JSON.parse(raw);
+  const o = (obj.o || []).map((v) => Math.floor(Number(v)));
+  const s = (obj.s || []).map((v) => Math.floor(Number(v)));
+  const pal = obj.p;
+  if (o.length !== 3 || s.length !== 3 || !Array.isArray(pal) || pal.length === 0) {
+    throw new Error("payload 需要 o[3] / s[3] / p[]");
+  }
+  if (s.some((v) => !Number.isFinite(v) || v <= 0)) throw new Error(`尺寸非法: ${s.join("x")}`);
+  const volume = s[0] * s[1] * s[2];
+  if (volume > BUILD_MAX_VOLUME) throw new Error(`体积 ${volume} 超过上限 ${BUILD_MAX_VOLUME}`);
+  // bot 端发来的 p 已去掉索引 0(KEEP); 这里补回占位, 保证索引与 RLE 对齐
+  const palette = [{ b: "keep" },
+    ...pal.map((e) => (typeof e === "string" ? { b: e } : { b: String(e.b), s: e.s }))];
+  if (palette.length > 65) throw new Error(`调色板 ${palette.length - 1} 项超过上限 64`);
+  return {
+    ox: o[0], oy: o[1], oz: o[2], sx: s[0], sy: s[1], sz: s[2],
+    volume, cells: decodeRle(obj.rle, volume), palette,
+  };
+}
+
+// 贪心合并: 每层做 2D 最大矩形合并, 再把同位置连续层合并成 3D 长方体。
+// 目的是把「几万格」压成「几十个 fillBlocks 调用」。
+function planBoxes(op) {
+  const { ox, oy, oz, sx, sy, sz, cells } = op;
+  const rects = [];
+  const seen = new Uint8Array(sx * sz);
+  for (let ly = 0; ly < sy; ly++) {
+    seen.fill(0);
+    const base = ly * sz * sx;
+    for (let lz = 0; lz < sz; lz++) {
+      for (let lx = 0; lx < sx; lx++) {
+        const k = lz * sx + lx;
+        if (seen[k]) continue;
+        const p = cells[base + k];
+        if (p === 0) { seen[k] = 1; continue; }
+        let w = 1;
+        while (lx + w < sx && !seen[k + w] && cells[base + k + w] === p) w++;
+        let h = 1;
+        outer: while (lz + h < sz) {
+          for (let i = 0; i < w; i++) {
+            const kk = (lz + h) * sx + lx + i;
+            if (seen[kk] || cells[base + kk] !== p) break outer;
+          }
+          h++;
+        }
+        for (let dz = 0; dz < h; dz++) for (let i = 0; i < w; i++) seen[(lz + dz) * sx + lx + i] = 1;
+        rects.push({ p, x0: ox + lx, x1: ox + lx + w - 1, z0: oz + lz, z1: oz + lz + h - 1, y: oy + ly });
+      }
+    }
+  }
+  const groups = new Map();
+  for (const r of rects) {
+    const key = `${r.x0},${r.x1},${r.z0},${r.z1},${r.p}`;
+    const list = groups.get(key);
+    if (list) list.push(r.y); else groups.set(key, [r.y]);
+  }
+  const boxes = [];
+  for (const [key, ys] of groups) {
+    ys.sort((a, b) => a - b);
+    const [x0, x1, z0, z1, p] = key.split(",").map(Number);
+    let start = ys[0], prev = ys[0];
+    for (let i = 1; i <= ys.length; i++) {
+      const y = ys[i];
+      if (y !== prev + 1) {
+        boxes.push({ x0, x1, z0, z1, y0: start, y1: prev, p });
+        start = y;
+      }
+      prev = y;
+    }
+  }
+  return boxes;
+}
+
+function resolvePerm(entry) {
+  try {
+    return mc.BlockPermutation.resolve(entry.b, entry.s);
+  } catch (e) {
+    return undefined;
+  }
+}
+
+function cellCoords(op, i) {
+  const layer = op.sx * op.sz;
+  const y = op.oy + Math.floor(i / layer);
+  const rem = i % layer;
+  return { x: op.ox + (rem % op.sx), y, z: op.oz + Math.floor(rem / op.sx) };
+}
+
+function statesMatch(block, want) {
+  if (!want) return true;
+  try {
+    const have = block.permutation.getAllStates() || {};
+    for (const k of Object.keys(want)) {
+      if (String(have[k]) !== String(want[k])) return false;
+    }
+    return true;
+  } catch (e) {
+    return false;
+  }
+}
+
+// 提交前把「将要被覆盖的当前方块」存成同样的 palette+RLE, 撤销时原样写回。
+function snapshotBefore(op, dim) {
+  const total = op.volume;
+  const cells = new Uint8Array(total);
+  const palette = [{ b: "keep" }];
+  const at = new Map();
+  for (let i = 0; i < total; i++) {
+    if (op.cells[i] === 0) continue;      // KEEP 格不动, 不记录
+    const c = cellCoords(op, i);
+    const b = readBlock(dim, c.x, c.y, c.z);
+    if (!b) continue;                      // 未加载: 不记录, 撤销时也不碰
+    let states;
+    try {
+      const st = b.permutation.getAllStates();
+      if (st && Object.keys(st).length) states = st;
+    } catch (e) { /* 无状态 */ }
+    const key = `${b.typeId}|${states ? JSON.stringify(states) : ""}`;
+    let pi = at.get(key);
+    if (pi === undefined) {
+      pi = palette.length;
+      at.set(key, pi);
+      palette.push({ b: b.typeId, s: states });
+    }
+    cells[i] = pi;
+  }
+  return { ox: op.ox, oy: op.oy, oz: op.oz, sx: op.sx, sy: op.sy, sz: op.sz,
+           volume: total, cells, palette };
+}
+
+function* previewJob(rid, jid, op, dim) {
+  const out = { place: 0, replace: 0, noop: 0, unloaded: 0, protectedN: 0, unsupported: 0 };
+  const protSamples = [], badSamples = [], unloadSamples = [];
+  let work = 0, cellsUsed = 0;
+  let minX = Infinity, minY = Infinity, minZ = Infinity, maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
+  for (let i = 0; i < op.volume; i++) {
+    const pi = op.cells[i];
+    if (pi === 0) continue;
+    cellsUsed++;
+    const entry = op.palette[pi];
+    const name = shortId(entry.b);
+    if (UNSUPPORTED_TYPES.has(name) || /_door$|_bed$/.test(name)) {
+      out.unsupported++;
+      if (badSamples.length < BUILD_SAMPLES) badSamples.push(name);
+    }
+    const c = cellCoords(op, i);
+    minX = Math.min(minX, c.x); maxX = Math.max(maxX, c.x);
+    minY = Math.min(minY, c.y); maxY = Math.max(maxY, c.y);
+    minZ = Math.min(minZ, c.z); maxZ = Math.max(maxZ, c.z);
+    const b = readBlock(dim, c.x, c.y, c.z);
+    if (!b) {
+      out.unloaded++;
+      if (unloadSamples.length < BUILD_SAMPLES) unloadSamples.push([c.x, c.y, c.z]);
+    } else {
+      const cur = shortId(b.typeId);
+      if (PROTECTED_TYPES.has(cur)) {
+        out.protectedN++;
+        if (protSamples.length < BUILD_SAMPLES) protSamples.push([c.x, c.y, c.z, cur]);
+      }
+      const same = b.typeId === entry.b && statesMatch(b, entry.s);
+      if (same) out.noop++;
+      else if (cur === "air") out.place++;
+      else out.replace++;
+    }
+    if (++work >= CELLS_PER_TICK) { work = 0; yield; }
+  }
+  const boxes = planBoxes(op);
+  const rec = builds.get(jid);
+  if (rec) {
+    rec.bounds = cellsUsed ? { from: [minX, minY, minZ], to: [maxX, maxY, maxZ] } : null;
+    rec.cells = cellsUsed;
+  }
+  emitPayload(BUILD_TAG, rid, {
+    ok: true, jid, name: rec ? rec.name : "", volume: op.volume, cells: cellsUsed,
+    bounds: cellsUsed ? { from: [minX, minY, minZ], to: [maxX, maxY, maxZ] } : null,
+    paletteSize: op.palette.length - 1,
+    diff: out, plan: { boxes: boxes.length },
+    samples: { protected: protSamples, unsupported: badSamples, unloaded: unloadSamples },
+    warnings: buildWarnings(out, cellsUsed),
+  });
+}
+
+function buildWarnings(diff, cells) {
+  const w = [];
+  if (diff.unloaded) w.push(`有 ${diff.unloaded} 格未加载, 这部分既不会写也不会被校验`);
+  if (diff.protectedN) w.push(`有 ${diff.protectedN} 格是受保护方块, 会被跳过`);
+  if (diff.unsupported) w.push(`有 ${diff.unsupported} 格是多格方块(门/床/高草等), 单格写入会残缺, 请改用普通方块`);
+  if (cells > 20000) w.push(`本次 ${cells} 格, 提交会比较久, 建议按模块拆分`);
+  return w;
+}
+
+function* executeJob(rid, jid, op, dim, before, extra) {
+  const t0 = Date.now();
+  const out = { changed: 0, boxes: 0, failed: 0, aborted: false };
+  const boxes = planBoxes(op);
+  out.boxes = boxes.length;
+  const hasFill = typeof dim.fillBlocks === "function" && typeof mc.BlockVolume === "function";
+  for (let bi = 0; bi < boxes.length; bi++) {
+    const box = boxes[bi];
+    const rec = builds.get(jid);
+    if (rec && rec.aborted) { out.aborted = true; break; }
+    const entry = op.palette[box.p];
+    const perm = resolvePerm(entry);
+    if (!perm) { out.failed++; continue; }
+    const count = (box.x1 - box.x0 + 1) * (box.y1 - box.y0 + 1) * (box.z1 - box.z0 + 1);
+    try {
+      if (hasFill) {
+        const vol = new mc.BlockVolume(
+          { x: box.x0, y: box.y0, z: box.z0 },
+          { x: box.x1, y: box.y1, z: box.z1 });
+        dim.fillBlocks(vol, perm);
+        out.changed += count;
+      } else {
+        for (let y = box.y0; y <= box.y1; y++) {
+          for (let z = box.z0; z <= box.z1; z++) {
+            for (let x = box.x0; x <= box.x1; x++) {
+              try {
+                const b = dim.getBlock({ x, y, z });
+                if (b) { b.setPermutation(perm); out.changed++; }
+              } catch (e) { /* 单格失败不中断整批 */ }
+            }
+          }
+        }
+      }
+    } catch (e) {
+      out.failed++;
+    }
+    if (bi % 8 === 7) yield;
+  }
+  yield;
+  // 校验: 复读比对, 空洞优先
+  const verify = { mismatch: 0, holes: 0, wrong: 0, unloaded: 0 };
+  const holes = [], wrongs = [];
+  let work = 0;
+  for (let i = 0; i < op.volume; i++) {
+    const pi = op.cells[i];
+    if (pi === 0) continue;
+    const entry = op.palette[pi];
+    const c = cellCoords(op, i);
+    const b = readBlock(dim, c.x, c.y, c.z);
+    if (!b) { verify.unloaded++; }
+    else if (b.typeId !== entry.b || !statesMatch(b, entry.s)) {
+      verify.mismatch++;
+      const cur = shortId(b.typeId);
+      if (cur === "air" && shortId(entry.b) !== "air") {
+        verify.holes++;
+        if (holes.length < BUILD_SAMPLES) holes.push([c.x, c.y, c.z, "air"]);
+      } else {
+        verify.wrong++;
+        if (wrongs.length < BUILD_SAMPLES) wrongs.push([c.x, c.y, c.z, cur]);
+      }
+    }
+    if (++work >= CELLS_PER_TICK) { work = 0; yield; }
+  }
+  verify.samples = holes.concat(wrongs).slice(0, BUILD_SAMPLES);
+  // 撤销记录
+  if (before) {
+    const rec = builds.get(jid);
+    undoStack.push({ jid, name: rec ? rec.name : "", op: before });
+    while (undoStack.length > BUILD_MAX_UNDO) undoStack.shift();
+  }
+  emitPayload(BUILD_TAG, rid, {
+    ok: true, jid, changed: out.changed, boxes: out.boxes, failed: out.failed,
+    aborted: out.aborted, ms: Date.now() - t0, verify,
+    undoDepth: undoStack.length, ...extra,
+  });
+}
+
+function gcBuilds() {
+  const now = Date.now();
+  for (const [jid, rec] of builds) {
+    if (now - rec.created > BUILD_TTL_MS) builds.delete(jid);
+  }
+}
+
+function getBuildOp(jid) {
+  const rec = builds.get(jid);
+  if (!rec) return { err: `操作 ${jid} 不存在或已过期(reload 会清空暂存), 请重新 build_preview` };
+  if (!rec.op) {
+    if (rec.total && rec.parts.size !== rec.total) {
+      return { err: `上传不完整(${rec.parts.size}/${rec.total} 帧), 请重新 preview` };
+    }
+    try {
+      rec.op = decodeBuild(rec.raw);
+    } catch (e) {
+      return { err: `payload 解析失败: ${e}` };
+    }
+  }
+  return { rec };
+}
+
+function handleBuild(message) {
+  const { id: rid0 } = takeId(String(message || "").replace(/^(\S+)\s+/, ""));
+  try {
+    handleBuildInner(message);
+  } catch (e) {
+    console.error(`${BUILD_TAG} 处理失败: ${e}`);
+    emitPayload(BUILD_TAG, rid0, { ok: false, error: `行为包内部错误: ${e}` });
+  }
+}
+
+function handleBuildInner(message) {
+  const { action, rest } = splitAction(message);
+  gcBuilds();
+  if (action === "put") {
+    const m = String(rest).match(/^(\S+)\s+(\d+)\/(\d+)\s+([\s\S]*)$/);
+    if (!m) { console.error(`${BUILD_TAG} put 参数错误: ${String(rest).slice(0, 80)}`); return; }
+    const jid = m[1];
+    let rec = builds.get(jid);
+    if (!rec) {
+      if (builds.size >= BUILD_MAX_PENDING) {
+        // 丢最旧的未提交操作
+        let oldest = null, oldestAt = Infinity;
+        for (const [k, v] of builds) if (v.created < oldestAt) { oldestAt = v.created; oldest = k; }
+        if (oldest) builds.delete(oldest);
+      }
+      rec = { parts: new Map(), total: 0, raw: "", created: Date.now(), aborted: false, name: "" };
+      builds.set(jid, rec);
+    }
+    rec.parts.set(Number(m[2]), m[4]);
+    rec.total = Number(m[3]);
+    rec.raw = "";
+    for (let i = 1; i <= rec.total; i++) {
+      const part = rec.parts.get(i);
+      if (part === undefined) { rec.raw = ""; break; }
+      rec.raw += part;
+    }
+    return;
+  }
+  if (action === "abort") {
+    const rec = builds.get(String(rest).trim());
+    if (rec) rec.aborted = true;
+    return;
+  }
+  if (action === "drop") {
+    builds.delete(String(rest).trim());
+    return;
+  }
+  if (action === "list") {
+    const { id } = takeId(rest);
+    const ops = [];
+    for (const [jid, rec] of builds) {
+      ops.push({ jid, name: rec.name, created: rec.created, cells: rec.cells || 0,
+                 bounds: rec.bounds || null, complete: !rec.total || rec.parts.size === rec.total,
+                 committed: !!rec.committed });
+    }
+    emitPayload(BUILD_TAG, id, { ok: true, ops, undo: undoStack.map((u) => ({ jid: u.jid, name: u.name })) });
+    return;
+  }
+  // preview / commit / undo 都带请求 id
+  const { id, rest: rest2 } = takeId(rest);
+  const jid = (id ? rest2 : rest).trim();
+  if (!jid) {
+    emitPayload(BUILD_TAG, id, { ok: false, error: "缺少操作 id" });
+    return;
+  }
+  if (action === "undo") {
+    let idx = -1;
+    if (jid && jid !== "-") idx = undoStack.findIndex((u) => u.jid === jid);
+    if (idx < 0) idx = undoStack.length - 1;
+    if (idx < 0) {
+      emitPayload(BUILD_TAG, id, { ok: false, error: "没有可撤销的操作" });
+      return;
+    }
+    const entry = undoStack.splice(idx, 1)[0];
+    const dim = resolveDimension("overworld");
+    runJob(executeJob(id, entry.jid, entry.op, dim, null, { undoOf: entry.jid }));
+    return;
+  }
+  const got = getBuildOp(jid);
+  if (got.err) {
+    emitPayload(BUILD_TAG, id, { ok: false, error: got.err });
+    return;
+  }
+  const rec = got.rec;
+  const dim = resolveDimension(rec.op.dim || "overworld");
+  if (action === "preview") {
+    rec.name = rec.name || "";
+    runJob(previewJob(id, jid, rec.op, dim));
+    return;
+  }
+  if (action === "commit") {
+    const before = snapshotBefore(rec.op, dim);
+    rec.committed = true;
+    runJob(executeJob(id, jid, rec.op, dim, before, {}));
+    return;
+  }
+  emitPayload(BUILD_TAG, id, { ok: false, error: `未知动作 ${action}` });
+}
+
 // 导出全部物品/方块 ID: `scriptevent viktor:ids`(控制台触发, 供离线重建 data/items.json)。
 // 分块输出, 避免单行过长被切断。升级服务器版本后可重跑一次刷新 ID 清单。
 function dumpIds() {
@@ -721,6 +1176,7 @@ system.afterEvents.scriptEventReceive.subscribe((ev) => {
   else if (ev.id === "viktor:inspect") inspectRegion(ev.message);
   else if (ev.id === "viktor:find") findBlocks(ev.message);
   else if (ev.id === "viktor:caps") reportCaps(ev.message);
+  else if (ev.id === "viktor:build") handleBuild(ev.message);
   else if (ev.id === "viktor:menu") handleMenu(ev.message);
   else if (ev.id === "viktor:ids") dumpIds();
 }, { namespaces: ["viktor"] });

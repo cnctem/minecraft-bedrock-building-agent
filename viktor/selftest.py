@@ -1750,6 +1750,86 @@ def self_test():
     assert any("tickingarea remove viktor_pin" in c for c in _calls), _calls
     print("pin_region 撞名自愈自测 OK")
 
+    # ---------- 建造引擎(P2.1) ----------
+    from . import build as B
+
+    prog = """
+W, D, H = 9, 7, 5
+api.fill((-1, -1, -1), (W, -1, D), "stonebrick")
+api.box((0, 0, 0), (W-1, H-1, D-1), "oak_planks")
+api.fill((1, 0, 1), (W-2, H-2, D-2), "air")
+for u in range(0, W, 3):
+    api.box((u, 0, 0), (u, H-1, 0), "spruce_log")
+"""
+    payload, stats = B.compile_build(prog, (100, 64, 200), "south", B.block_ids())
+    assert stats["ops"] == 6 and stats["cells"] > 200, stats   # fill+box+fill+3×box(循环)
+    assert payload["s"][1] == 6 and payload["o"] == [99, 63, 199], payload
+    assert len(payload["p"]) == stats["palette"], payload["p"]
+    assert ":" in payload["rle"] and " " not in payload["rle"], payload["rle"][:60]
+    print("建造编译自测 OK", stats["size"], stats["cells"], "格", stats["payload_bytes"], "字节")
+
+    # 朝向: south 与 east 的局部→世界映射
+    assert B.to_world((0, 0, 0), "south", 1, 2, 3) == (1, 2, 3)
+    assert B.to_world((0, 0, 0), "north", 1, 2, 3) == (-1, 2, -3)
+    assert B.to_world((0, 0, 0), "east", 1, 2, 3) == (3, 2, -1)
+    assert B.to_world((0, 0, 0), "west", 1, 2, 3) == (-3, 2, 1)
+
+    # 沙箱: import / open / dunder / exec 全部拦在编译期
+    for bad, want in (("import os", "Import"), ('open("/etc/passwd")', "open"),
+                      ("api.__class__", "下划线"), ('exec("1")', "exec")):
+        try:
+            B.compile_build(bad, (0, 0, 0), "south", B.block_ids())
+            raise AssertionError(f"应拦截: {bad}")
+        except B.BuildError as e:
+            assert want in str(e), (bad, e)
+    # 未知方块 / 超体积 / 空程序
+    for bad, want in (('api.fill((0,0,0),(1,1,1),"not_a_block")', "未知方块"),
+                      ("def f(:", "语法错误"),
+                      ("W = 3  # 只有变量, 没有放置", "没有放置任何方块")):
+        try:
+            B.compile_build(bad, (0, 0, 0), "south", B.block_ids())
+            raise AssertionError(f"应报错: {bad}")
+        except B.BuildError as e:
+            assert want in str(e), (bad, e)
+    try:
+        B.compile_build("api.fill((0,0,0),(80,80,80),'stone')", (0, 0, 0), "south", B.block_ids())
+        raise AssertionError("超体积应被拒")
+    except B.BuildError as e:
+        assert "超过上限" in str(e), e
+    print("建造沙箱/校验自测 OK")
+
+    # 模式门禁: 建造工具只在创造模式家族可见(用户明确要求)
+    for mode in (MODE_NORMAL, MODE_PLAN, MODE_EXECUTE, MODE_ONESHOT):
+        names = bot2._allowed_tools(mode)
+        assert not ({"build_preview", "build_commit", "build_undo", "build_status"} & names), \
+            (mode, sorted(names))
+    for mode in (MODE_CREATIVE, MODE_CREATIVE_MAX):
+        names = bot2._allowed_tools(mode)
+        assert {"build_preview", "build_commit", "build_undo", "build_status"} <= names, mode
+    print("建造工具模式门禁自测 OK(仅 creative / creative_max)")
+
+    # 渲染: 预览 / 提交 / 撤销
+    pv = bot2._render_build_preview("b1-1", {
+        "ok": True, "jid": "b1-1", "name": "小屋", "cells": 531, "paletteSize": 6,
+        "bounds": {"from": [0, 64, 0], "to": [10, 73, 8]},
+        "diff": {"place": 385, "replace": 0, "noop": 146, "unloaded": 0},
+        "plan": {"boxes": 26}, "warnings": [], "samples": {},
+    }, {"size": (11, 10, 9), "ops": 9, "cells": 531, "palette": 6})
+    assert "新放置 385" in pv and "26 个批量填充" in pv and "build_commit" in pv, pv
+    cm = bot2._render_build_commit("b1-1", {
+        "ok": True, "jid": "b1-1", "changed": 531, "boxes": 26, "ms": 89, "undoDepth": 1,
+        "verify": {"mismatch": 2, "holes": 1, "wrong": 1,
+                   "samples": [[1, 64, 1, "air"], [2, 64, 2, "dirt"]]},
+    })
+    assert "531 格" in cm and "空洞 1" in cm and "(1, 64, 1) 实际是 air" in cm, cm
+    assert "不要直接" in cm or "补丁程序" in cm, cm
+    ok = bot2._render_build_commit("b1-1", {
+        "ok": True, "jid": "b1-1", "changed": 10, "boxes": 2, "ms": 5,
+        "verify": {"mismatch": 0, "holes": 0, "wrong": 0, "samples": []},
+    })
+    assert "全部正确" in ok, ok
+    print("建造渲染自测 OK")
+
     r = bot2._tool_run_command({"command": "list"})
     assert r.strip() and "禁止" not in r, r
     print(r)

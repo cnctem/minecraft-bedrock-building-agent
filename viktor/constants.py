@@ -16,10 +16,13 @@ RE_LIST = re.compile(r"^There are (\d+)/(\d+) players online")
 # 协议 v3: 行为包把请求 id 原样回显在每一行里, 供 ServerBus 按 id 路由;
 # 查询回包是「一个 JSON payload 分多帧」(`#i/n <片段>` 行 + DONE), 由 bus 重组。
 BUS_ROUTE_RE = re.compile(
-    r"\[VIKTOR-(POS|INV|BLOCK|MAP|SLICE|INSPECT|FIND|CAPS)\] (r\d+)(?:[ \t](.*))?$")
+    r"\[VIKTOR-(POS|INV|BLOCK|MAP|SLICE|INSPECT|FIND|CAPS|BUILD)\] (r\d+)(?:[ \t](.*))?$")
 BUS_FRAME_RE = re.compile(r"^#(\d+)/(\d+) (.*)$", re.S)
 RE_HELLO = re.compile(r"\[VIKTOR-HELLO\] \S+ v(\d+)")
 PACK_PROTO_SPATIAL = 3  # 感知原语(heightmap/slice/inspect/find)所需的行为包协议
+PACK_PROTO_BUILD = 4    # 建造引擎(preview/commit/undo)所需的行为包协议
+BUILD_FRAME_CHARS = 560 # 建造 payload 每帧字符数(整条命令 <~700, 见 [实测])
+BUILD_TIMEOUT_SEC = 120 # 预览/提交/撤销的等待上限(大体积要跑好几秒)
 
 # 控制面硬编码词: 完全匹配时直接中止正在运行的 Agent 任务(不走模型, 类似 Ctrl-C)
 FORCE_STOP_WORD = "强制停止"  # 控制面: 立即中止当前任务(连工具内部等待也打断)
@@ -62,6 +65,11 @@ BUS_TOOLS = {
     "get_slice": ("slice", "spatial_timeout_sec"),
     "inspect_region": ("inspect", "spatial_timeout_sec"),
     "find_blocks": ("find", "spatial_timeout_sec"),
+    # 建造引擎走自己的超时(见 BUILD_TIMEOUT_SEC), 这里只登记 kind
+    "build_preview": ("build", "spatial_timeout_sec"),
+    "build_commit": ("build", "spatial_timeout_sec"),
+    "build_undo": ("build", "spatial_timeout_sec"),
+    "build_status": ("build", "spatial_timeout_sec"),
 }
 BUS_TIMEOUT_TEXT = {
     "get_player_position": "行为包脚本没有回应, 取不到坐标(可能脚本未加载)。",
@@ -71,6 +79,10 @@ BUS_TIMEOUT_TEXT = {
     "get_slice": "行为包脚本没有回应, 取不到切面(可能脚本未加载), 或区域太大被区块未加载拖慢。",
     "inspect_region": "行为包脚本没有回应, 区域检查失败(可能脚本未加载), 或体积太大被区块未加载拖慢。",
     "find_blocks": "行为包脚本没有回应, 没找到(可能脚本未加载), 或体积太大被区块未加载拖慢。",
+    "build_preview": "行为包没有回应建造预览(可能脚本未加载, 或 payload 没传完整)。",
+    "build_commit": "行为包没有回应提交结果(可能脚本未加载); 若已写入一部分, 可用 build_undo 还原。",
+    "build_undo": "行为包没有回应撤销结果(可能脚本未加载)。",
+    "build_status": "行为包没有回应操作列表(可能脚本未加载)。",
 }
 ONESHOT_TRIGGER = re.compile(r"^1(?:[ \u3000]+|$)")  # "1 " / "1　" 开头, 或单一个 "1" = 一次性对话
 ONESHOT_FORCE_STOP = re.compile(r"^1[ \u3000]+强制停止$")  # 停止全部一次性对话

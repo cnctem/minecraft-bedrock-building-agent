@@ -182,6 +182,10 @@ python3 bot.py --test         # 解析逻辑自测
 | `use_skill(name, file?, force?)` | 按需载入一本技能书（skill）的正文；`file` 展开其附带资料。系统在会话开头只列出技能名与适用场景，正文用时才载入 |
 | `search_wiki(query, lang?, limit?)` | 在 Minecraft Wiki 搜条目（默认中文 wiki，`lang="en"` 切英文），返回候选标题（含重定向提示）与摘要；再用 `read_wiki_page` 读正文。查配方/掉落/生成/机制等游戏事实 |
 | `read_wiki_page(title, section?, lang?)` | 读 wiki 页面正文。默认只回「开头摘要 + 章节目录」省上下文，用 `section` 精读某节（如「合成」「数据值」）；表格保留为 `\|` 分隔行、合成/烧炼配方渲染成网格。本服基岩版，以基岩版列为准 |
+| `build_preview(program, origin, facing?, name?)` | **仅创造模式**：把受限 Python 建造程序编译成期望方块并与世界做差异对比，**不写世界**。返回 operation_id、包围盒、差异（新放置/覆盖/已正确/未加载）、批量填充数、警告 |
+| `build_commit(operation_id)` | **仅创造模式**：批量写入（`fillBlocks` + 贪心合并）并**自动复读校验**，返回 `verify.mismatch/holes/wrong` 与样本坐标；`mismatch==0` 才算完成 |
+| `build_undo(operation_id?)` | **仅创造模式**：用提交前保存的方块体积还原（撤销栈 2 个，reload 清空） |
+| `build_status()` | **仅创造模式**：列出暂存/可撤销的建造操作 |
 | `pin_region(x1, z1, x2, z2)` | **仅创造/执行模式下可用**：把施工面设为常加载（ticking area，自动按 ≤100 区块切片）：防止玩家走开/离线后区块卸载导致 fill 失败。**生命周期 = 创造/执行模式**：离开这些模式（切回 normal 等）或会话结束时自动移除 |
 | `set_mode(mode, reason?)` | 切换运行模式；可选目标按当前模式动态注入（普通↔创造/创造max；计划→执行；一次性无此工具） |
 | `ptc(calls, stop_on_error?)` | 批量工具调用：一次提交多条调用，合并成一条结果。**互不依赖的调用（查询/读 wiki/读资料）默认并行执行**，只等最慢一个；有副作用的调用（MC 指令、改状态、写记忆）**按数组顺序串行执行并充当屏障**，不会与前后调用并发（省往返与上下文） |
@@ -281,7 +285,10 @@ BDS 控制台 **不回显玩家聊天**，所以用行为包 `viktor_bridge` 订
 - `scriptevent viktor:inspect [id] <x1> <y1> <z1> <x2> <y2> <z2> [维度] [filter] [detail] [limit]` → `[VIKTOR-INSPECT]` + JSON：类型计数；给 `filter` 时回 `match`/`mismatch` 与不符合项坐标（空洞、放错）；`detail=cells` 回单元清单。
 - `scriptevent viktor:find [id] <方块ID> <x1> <y1> <z1> <x2> <y2> <z2> [维度] [limit]` → `[VIKTOR-FIND]` + JSON：匹配总数与坐标（子串匹配，可写 `ore`）。
 - `scriptevent viktor:caps [id]` → `[VIKTOR-CAPS]` + JSON：协议版本、可用 API（`runJob`/`fillBlocks`）、各项上限（能力广播）。
-- `scriptevent viktor:hello <nonce>` → `[VIKTOR-HELLO] <nonce> v3`：bot 启动时的协议握手；协议号决定是否启用 `heightmap/slice/inspect/find`，v2 会明确提示重载行为包。
+- **建造引擎（v4）**：`viktor:build put <jid> <i>/<n> <片段>`（上行分帧）→ `preview` / `commit` / `undo` / `list` / `abort` / `drop` → `[VIKTOR-BUILD] <rid>` + 分帧 JSON。
+  上行必须分帧：`[实测]` 单条 `scriptevent` 消息体 ≤700 字符可用，750 整条被丢弃（全行约 768 字节），所以每帧 ≤560 字符、**一帧一次 `screen stuff`**。
+  期望体积编码：`palette`（索引 0 固定 = KEEP 不写）+ 分层 RLE（`idx:count`，base36）；提交时按层贪心合并成单方块长方体再调 `fillBlocks`。
+- `scriptevent viktor:hello <nonce>` → `[VIKTOR-HELLO] <nonce> v4`：bot 启动时的协议握手；协议号决定可用能力（v3 = 空间感知原语，v4 = 建造引擎），过旧会明确提示重载行为包。
 - 所有大范围查询都用 `system.runJob` 按 `CELLS_PER_TICK=512` 切片让出主线程，不卡世界。
 - `scriptevent viktor:ids` → 分块输出全部物品/方块 ID（`[VIKTOR-IDS] ITEMS/BLOCKS …`、末行 `DONE`），供离线重建 ID 速查表
 

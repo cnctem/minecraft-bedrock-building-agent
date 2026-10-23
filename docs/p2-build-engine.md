@@ -189,7 +189,21 @@ P2.2 追加机器校验：悬空方块、越界、保护方块未被动、给定
 - **P2.3 表达力**：程序内只读快照（`api.height/api.block`）、标准库糖（roof/arch/stairs）、
   `ops` JSON 直通（简单场景不写代码）、建造上下文 anchors。
 
-## 11. 待实测 / 待定
+## 11. 落地状态（P2.1 已完成）
+
+已实现并实测：
+
+| 项 | 结果 |
+|---|---|
+| 编译器 + 沙箱 | `viktor/build.py`：AST 白名单 + 子进程（`-I -S`、256MB、5s CPU、8s 墙钟）；import/open/dunder/exec/死循环全部拦住 |
+| 体素化 + 编码 | 9 个形状 → 531 格 → 1.0KB / 2 帧；包围盒与 palette 与预期一致 |
+| 上行分帧 | 每帧 ≤560 字符、一帧一次 `stuff`；`[实测]` 12 帧连发全部到达且保序 |
+| preview | 531 格 / 26 个批量填充 / 1.0s；差异 `新放置 385 / 已正确 146` |
+| commit | 531 格 / 26 批 / **89ms** / `verify.mismatch 0` |
+| undo | 还原 531 格 / 9 批 / 72ms；撤销后复扫 990 格全为空气（无残留） |
+| 模式门禁 | 只有 `creative` / `creative_max` 可见；normal/plan/execute/oneshot 连工具名都看不到 |
+
+## 12. 待实测 / 待定
 
 1. `/setblock` 在 1.21.0.03 放门/床是否也是半块？（决定是否放行"命令回退"）
 2. `fillBlocks` 单次调用的体积上限与跨区块行为（决定贪心 box 上限与 `pin_region` 必要性）。

@@ -17,6 +17,10 @@ from .constants import CREATIVE_MODES, MODE_NORMAL
 from .paths import log
 from .profiles import MODES
 from .schemas import (
+    BUILD_COMMIT_SCHEMA,
+    BUILD_PREVIEW_SCHEMA,
+    BUILD_STATUS_SCHEMA,
+    BUILD_UNDO_SCHEMA,
     FIND_BLOCKS_SCHEMA,
     GET_BLOCK_SCHEMA,
     GET_HAND_SCHEMA,
@@ -69,6 +73,14 @@ class BotCoreMixin:
                              self._tool_inspect_region, concurrency="bus")
         capabilities.register("find_blocks", FIND_BLOCKS_SCHEMA,
                              self._tool_find_blocks, concurrency="bus")
+        capabilities.register("build_preview", BUILD_PREVIEW_SCHEMA,
+                             self._tool_build_preview, concurrency="serial")
+        capabilities.register("build_commit", BUILD_COMMIT_SCHEMA,
+                             self._tool_build_commit, concurrency="serial")
+        capabilities.register("build_undo", BUILD_UNDO_SCHEMA,
+                             self._tool_build_undo, concurrency="serial")
+        capabilities.register("build_status", BUILD_STATUS_SCHEMA,
+                             self._tool_build_status, concurrency="serial")
         capabilities.register("pin_region", PIN_REGION_SCHEMA, self._tool_pin_region,
                              concurrency="serial")
         capabilities.register("search_wiki", SEARCH_WIKI_SCHEMA, self._tool_search_wiki,

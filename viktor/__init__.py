@@ -4,7 +4,7 @@
 
     bot.py (入口)  →  viktor.selftest (--test)
         │
-        viktor.Bot = BotCoreMixin + BotControlMixin + BotToolsMixin
+        viktor.Bot = BotCoreMixin + BotControlMixin + BotToolsMixin + BotBuildMixin
                      + BotAgentMixin + BotAppMixin      ← 各职责 mixin(彼此不 import,
         │                                                只用 self.* 经 MRO 协作)
         session / bus / bridge / config / profiles
@@ -15,6 +15,7 @@
 """
 from .bot_agent import BotAgentMixin
 from .bot_app import BotAppMixin
+from .bot_build import BotBuildMixin
 from .bot_control import BotControlMixin
 from .bot_core import BotCoreMixin
 from .bot_tools import BotToolsMixin
@@ -22,5 +23,6 @@ from .bot_tools import BotToolsMixin
 __all__ = ["Bot"]
 
 
-class Bot(BotCoreMixin, BotControlMixin, BotToolsMixin, BotAgentMixin, BotAppMixin):
+class Bot(BotCoreMixin, BotControlMixin, BotToolsMixin, BotBuildMixin,
+          BotAgentMixin, BotAppMixin):
     """主对话机器人: 由各职责 mixin 组合而成, 对外接口与拆分前的 bot.Bot 一致。"""
