@@ -350,7 +350,8 @@ def self_test():
         assert any(m.get("content") == "A: 大扫描" for m in bot2.session.messages), "玩家消息应保留"
         assert not any(m.get("role") == "tool" for m in bot2.session.messages), "工具结果应被压缩掉"
         assert bot2.session.messages[-1]["content"].startswith("# 上下文已压缩")
-        assert sent and "已压缩" in sent[-1], sent
+        assert sent and "已自动压缩" in sent[-1], sent
+        assert "「压缩」" in sent[-1], sent[-1]
         # 通知开关关闭 → 不再播报(仍是压缩路径: 玩家消息本身很短, 超限来自工具噪音)
         bot2.cfg["notify_context_clear"] = False
         bot2.session.add_user("A: 再看一次")
@@ -418,6 +419,8 @@ def self_test():
     assert war == [], war
     bot2._maybe_warn_context_size(705_000)      # 70% -> 第一档
     assert len(war) == 1 and "70%" in war[0], war
+    # 提醒不只报占用, 还要告诉玩家可以手动发「压缩」(忙时先停止)
+    assert "「压缩」" in war[0] and "「停止」" in war[0], war[0]
     bot2._maybe_warn_context_size(790_000)      # 79% -> 仍 70 档, 不重复
     assert len(war) == 1, war
     bot2._maybe_warn_context_size(800_000)      # 80% -> 再提

@@ -253,20 +253,22 @@ class BotAgentMixin:
             log(f"[清空] 上下文约 {used} 估算 token 超过预算 {budget}, 压缩后仍超限, "
                 f"已完整初始化新会话(丢弃 {n} 条消息)")
             if self.cfg.get("notify_context_clear", True):
-                self._sys("上下文太长, 我已清空重开。发送「恢复会话」可找回上一段对话。")
+                self._sys("上下文太长, 我已清空重开。发送「恢复会话」可找回上一段对话; "
+                          "以后可提前发「压缩」, 只压缩对话、不清空。")
             return True
         self._apply_compact(msgs, stats)
         log(f"[压缩] 上下文约 {used} 估算 token 超过预算 {budget}, 已自动压缩"
             f"(保留玩家消息 {stats['kept_user']} 条、发言 {stats['kept_speech']} 条, "
             f"移除 {stats['dropped']} 条过程记录)")
         if self.cfg.get("notify_context_clear", True):
-            self._sys("上下文太长, 我已压缩对话(保留玩家消息与我说过的话)。")
+            self._sys("上下文太长, 我已自动压缩对话(保留玩家消息与我说过的话)。"
+                      "以后想随时整理上下文, 发「压缩」即可。")
         return True
 
     def _maybe_warn_context_size(self, used: int) -> None:
         """上下文占用每跨过一档(70% 起、步长 10%)就用 [系统] 提醒玩家一次, 同一档只提一次。
         分母是模型窗口(context_window_tokens, 默认 1M); 压缩/清空/新会话后档位复位,
-        之后会重新从 70% 起提醒。只提醒, 不改变任何执行行为。"""
+        之后会重新从 70% 起提醒。提醒里告知玩家可以手动发「压缩」, 只提醒、不改行为。"""
         window = self.cfg.get("context_window_tokens", 1048576)
         if window <= 0:
             return
@@ -279,7 +281,8 @@ class BotAgentMixin:
         self._context_warn_level = level
         log(f"[上下文] 估算 {used} token / 窗口 {window} (~{level}%), 已用 [系统] 提醒玩家")
         self._sys(f"对话上下文已占用约 {level}%, 接近上限时我会自动压缩对话"
-                  f"(保留玩家消息与我说过的话), 当前任务不受影响。")
+                  f"(只保留玩家消息与我说过的话)。想现在就压缩, 发「压缩」即可"
+                  f"(有任务在跑时先「停止」或「强制停止」); 当前任务不受影响。")
 
     def _input_token_budget(self) -> int:
         """输入能占多少 token: 模型窗口 − 本轮最大输出 − 安全余量。
