@@ -277,7 +277,10 @@ BDS 控制台 **不回显玩家聊天**，所以用行为包 `viktor_bridge` 订
 - `scriptevent viktor:ids` → 分块输出全部物品/方块 ID（`[VIKTOR-IDS] ITEMS/BLOCKS …`、末行 `DONE`），供离线重建 ID 速查表
 
 需要 `@minecraft/server` 的 **beta** 模块与 `level.dat` 里的实验开关。
-修改脚本后用控制台 `reload` 热重载，不必重启服务器。
+修改脚本后用控制台 `reload` 热重载，不必重启服务器（改 `manifest.json` 依赖才需重启）。
+
+行为包源码就放在本仓库 `behavior_pack/viktor_bridge/`（见该目录 [README](behavior_pack/README.md)），
+服务器的 `behavior_packs/viktor_bridge` 是指向它的软链接——改仓库里的文件即改线上脚本，不存在两份拷贝。
 
 #### 服务端请求总线（降低查询延迟）
 

@@ -1,0 +1,41 @@
+{
+  "format_version": 2,
+  "header": {
+    "name": "Viktor Bridge",
+    "description": "\u628a\u73a9\u5bb6\u804a\u5929\u901a\u8fc7 console.log \u6865\u63a5\u7ed9 mc-ai-bot",
+    "uuid": "2c6a2552-7f38-4494-8811-f082a8769065",
+    "version": [
+      1,
+      0,
+      0
+    ],
+    "min_engine_version": [
+      1,
+      21,
+      0
+    ]
+  },
+  "modules": [
+    {
+      "type": "script",
+      "language": "javascript",
+      "entry": "scripts/main.js",
+      "uuid": "e6e0960e-3fb7-4dcf-9841-79bdfe5c1df7",
+      "version": [
+        1,
+        0,
+        0
+      ]
+    }
+  ],
+  "dependencies": [
+    {
+      "module_name": "@minecraft/server",
+      "version": "1.12.0-beta"
+    },
+    {
+      "module_name": "@minecraft/server-ui",
+      "version": "1.2.0-beta"
+    }
+  ]
+}
