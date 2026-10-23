@@ -1877,6 +1877,29 @@ api.set(6, 0, 0, "tall_grass")
     assert r5["cells"] == 15, r5          # 3 阶 × 3 格宽 × (2+2+1 格深)
     print("屋顶/楼梯糖自测 OK")
 
+    # 建造进度转发: 只转发当前操作, 受开关与节流控制
+    _side, _sent = bot2.bridge.say_side, []
+    bot2.bridge.say_side = lambda *a, **k: _sent.append(a)
+    try:
+        bot2._build_active = "b1"
+        bot2._build_progress_at = 0
+        bot2.cfg["build_progress"] = True
+        bot2.cfg["build_progress_min_sec"] = 0
+        bot2._on_build_progress("b1", "d", 40, 100)
+        assert _sent and "40/100" in _sent[-1][1] and "核对现场" in _sent[-1][1], _sent
+        bot2._on_build_progress("b2", "v", 90, 100)      # 不是当前操作 -> 不转发
+        assert len(_sent) == 1, _sent
+        bot2._on_build_progress("b1", "w", 2, 8)         # 写入阶段用「批」
+        assert "2/8 批" in _sent[-1][1], _sent[-1]
+        bot2.cfg["build_progress"] = False
+        bot2._on_build_progress("b1", "v", 60, 100)      # 开关关掉 -> 不转发
+        assert len(_sent) == 2, _sent
+    finally:
+        bot2.bridge.say_side = _side
+        bot2._build_active = None
+        bot2.cfg["build_progress"] = True
+    print("建造进度转发自测 OK")
+
     # 模式门禁: 建造工具只在创造模式家族可见(用户明确要求)
     for mode in (MODE_NORMAL, MODE_PLAN, MODE_EXECUTE, MODE_ONESHOT):
         names = bot2._allowed_tools(mode)

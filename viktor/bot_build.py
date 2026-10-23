@@ -198,8 +198,12 @@ class BotBuildMixin:
         if not jid:
             return "缺少 operation_id(用 build_preview 返回的那个)。"
         rid = self.bus.next_id()
-        req = self._build_await(rid, f"scriptevent viktor:build commit {rid} {jid}", jid)
-        data = self._build_result("build_commit", req)
+        self._build_active = jid          # 让进度行知道该转发哪个操作
+        try:
+            req = self._build_await(rid, f"scriptevent viktor:build commit {rid} {jid}", jid)
+            data = self._build_result("build_commit", req)
+        finally:
+            self._build_active = None
         if isinstance(data, str):
             return data
         log(f"[建造] 提交 {jid} 写入 {data.get('changed')} 格, "
@@ -242,8 +246,12 @@ class BotBuildMixin:
             return err
         jid = str(args.get("operation_id") or "").strip() or "-"
         rid = self.bus.next_id()
-        req = self._build_await(rid, f"scriptevent viktor:build undo {rid} {jid}", jid)
-        data = self._build_result("build_undo", req)
+        self._build_active = jid
+        try:
+            req = self._build_await(rid, f"scriptevent viktor:build undo {rid} {jid}", jid)
+            data = self._build_result("build_undo", req)
+        finally:
+            self._build_active = None
         if isinstance(data, str):
             return data
         log(f"[建造] 撤销 {data.get('undoOf')} 还原 {data.get('changed')} 格")

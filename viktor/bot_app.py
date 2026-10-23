@@ -23,6 +23,7 @@ from .constants import (
     PLAN_WORD,
     RE_BRIDGE,
     RE_CHAT,
+    RE_BPROG,
     RE_HELLO,
     RE_JOIN,
     RE_LEAVE,
@@ -58,6 +59,10 @@ class BotAppMixin:
             return
         body = m.group(3)
 
+        if mm := RE_BPROG.search(body):
+            self._on_build_progress(mm.group(1), mm.group(2),
+                                    int(mm.group(3)), int(mm.group(4)))
+            return
         if mm := RE_LIST.match(body):
             count = int(mm.group(1))
             if count == 0 and self.players:
@@ -136,6 +141,22 @@ class BotAppMixin:
             # 消息本身不在这里写上下文: 由 worker 开轮时(或 Agent 循环的安全点)
             # 统一提交, 避免插进 assistant(tool_calls) 与 tool 中间拆散配对。
             self._enqueue(name, content)  # 每条聊天都交给 Agent 判断是否接话
+
+    def _on_build_progress(self, jid: str, phase: str, done: int, total: int):
+        """建造进度: 只转发当前正在提交的那次操作, 且节流(默认 2s 一条)。"""
+        if jid != getattr(self, "_build_active", None) or not self.cfg.get("build_progress", True):
+            return
+        now = time.time()
+        if now - getattr(self, "_build_progress_at", 0.0) < self.cfg.get("build_progress_min_sec", 2.0):
+            return
+        self._build_progress_at = now
+        pct = int(done * 100 / total) if total else 100
+        label = {"d": "核对现场", "w": "写入方块", "v": "校验结果"}.get(phase, "进行中")
+        unit = "批" if phase == "w" else "格"
+        self.bridge.say_side("[建造]", f"{label} {done}/{total} {unit}({pct}%) …",
+                             self.cfg.get("reply_chunk_len", 200),
+                             self.cfg.get("reply_max_chunks", 3))
+        log(f"[建造] 进度 {jid} {phase} {done}/{total}")
 
     # ---------- 主循环 ----------
 

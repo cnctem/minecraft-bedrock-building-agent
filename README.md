@@ -182,8 +182,8 @@ python3 bot.py --test         # 解析逻辑自测
 | `use_skill(name, file?, force?)` | 按需载入一本技能书（skill）的正文；`file` 展开其附带资料。系统在会话开头只列出技能名与适用场景，正文用时才载入 |
 | `search_wiki(query, lang?, limit?)` | 在 Minecraft Wiki 搜条目（默认中文 wiki，`lang="en"` 切英文），返回候选标题（含重定向提示）与摘要；再用 `read_wiki_page` 读正文。查配方/掉落/生成/机制等游戏事实 |
 | `read_wiki_page(title, section?, lang?)` | 读 wiki 页面正文。默认只回「开头摘要 + 章节目录」省上下文，用 `section` 精读某节（如「合成」「数据值」）；表格保留为 `\|` 分隔行、合成/烧炼配方渲染成网格。本服基岩版，以基岩版列为准 |
-| `build_preview(program, origin, facing?, name?, scan?)` | **仅创造模式**：把受限 Python 建造程序编译成期望方块并与世界做差异对比，**不写世界**。返回 operation_id、包围盒、差异（新放置/覆盖/已正确/未加载）、批量填充数、警告。给 `scan=[x1..z2]`（局部坐标框）会先预取世界快照，程序里就能用 `api.height/api.block/api.solid/api.air` 贴地形建 |
-| `build_commit(operation_id)` | **仅创造模式**：批量写入（`fillBlocks` + 贪心合并）并**自动复读校验**，返回 `verify.mismatch/holes/wrong` 与样本坐标；`mismatch==0` 才算完成 |
+| `build_preview(program, origin, facing?, name?, scan?, symmetry?)` | **仅创造模式**：把受限 Python 建造程序编译成期望方块并与世界做差异对比，**不写世界**。返回 operation_id、包围盒、差异（新放置/覆盖/已正确/未加载）、批量填充数、警告。给 `scan=[x1..z2]`（局部坐标框）会先预取世界快照，程序里就能用 `api.height/api.block/api.solid/api.air` 贴地形建。`symmetry="u"|"w"|"u:0"` 做镜像对称检查（写世界前抓设计错误） |
+| `build_commit(operation_id)` | **仅创造模式**：先逐格 diff（已正确的不重复写）再批量写入（`fillBlocks` + 贪心合并），最后**自动复读校验**，返回 `verify.mismatch/holes/wrong` 与样本坐标；`mismatch==0` 才算完成。大工程按阶段播报进度 |
 | `build_undo(operation_id?)` | **仅创造模式**：用提交前保存的方块体积还原（撤销栈 2 个，reload 清空） |
 | `build_status()` | **仅创造模式**：列出暂存/可撤销的建造操作 |
 | `pin_region(x1, z1, x2, z2)` | **仅创造/执行模式下可用**：把施工面设为常加载（ticking area，自动按 ≤100 区块切片）：防止玩家走开/离线后区块卸载导致 fill 失败。**生命周期 = 创造/执行模式**：离开这些模式（切回 normal 等）或会话结束时自动移除 |
@@ -430,6 +430,7 @@ BDS 控制台 **不回显玩家聊天**，所以用行为包 `viktor_bridge` 订
 | `bus_protocol` | 服务端请求总线协议：`auto`（默认，用 `viktor:hello` 探测）/ `v3`（跳过探测）/ `off`（禁用，查询报错）。v3 才有空间感知原语 |
 | `bus_reader_poll_sec` | 总线读线程 tail `server.log` 的轮询间隔（默认 0.05） |
 | `bus_batch_max` | 一次下发给服务端的查询请求上限（默认 8），保护服务端主线程 |
+| `build_progress` / `build_progress_min_sec` | 建造提交时是否播报进度、再次节流的最小间隔（默认 true / 2.0s） |
 | `normal_effort` / `creative_effort` / `creative_max_effort` | 各模式的思考强度（low / high / max） |
 | `oneshot_effort` / `oneshot_max_reply_tokens` / `oneshot_max_tool_rounds` / `oneshot_max_concurrent` | 一次性对话的思考强度、输出上限、工具轮次上限与最大并发数（默认 low / 6000 / 4 / 4） |
 | `parallel_tool_calls` | 是否告诉 API 允许一次返回多个工具调用（默认 true） |

@@ -18,6 +18,7 @@ RE_LIST = re.compile(r"^There are (\d+)/(\d+) players online")
 BUS_ROUTE_RE = re.compile(
     r"\[VIKTOR-(POS|INV|BLOCK|MAP|SLICE|INSPECT|FIND|CAPS|BUILD|SNAP)\] (r\d+)(?:[ \t](.*))?$")
 BUS_FRAME_RE = re.compile(r"^#(\d+)/(\d+) (.*)$", re.S)
+RE_BPROG = re.compile(r"\[VIKTOR-BPROG\] (\S+) ([dwv]) (\d+)/(\d+)")
 RE_HELLO = re.compile(r"\[VIKTOR-HELLO\] \S+ v(\d+)")
 PACK_PROTO_SPATIAL = 3  # 感知原语(heightmap/slice/inspect/find)所需的行为包协议
 PACK_PROTO_BUILD = 4    # 建造引擎(preview/commit/undo)所需的行为包协议

@@ -22,6 +22,7 @@ const FIND_TAG = "[VIKTOR-FIND]";      // 区域内搜方块坐标
 const CAPS_TAG = "[VIKTOR-CAPS]";      // 能力广播(协议/可用 API/各项上限)
 const BUILD_TAG = "[VIKTOR-BUILD]";    // 建造引擎回包(分帧 JSON)
 const SNAP_TAG = "[VIKTOR-SNAP]";      // 世界快照(供建造程序读地形)
+const BPROG_TAG = "[VIKTOR-BPROG]";    // 建造进度(独立 tag: 不进总线, 只给 bot 转发)
 // v3: 新增 heightmap/slice/inspect/find/caps; 查询回包改为「一个 JSON payload 分多帧」
 const PROTOCOL = "v4";
 // 分帧: 每帧 JSON 字符数。console.log 的行长没有官方保证, 700 是实测安全的保守值;
@@ -872,8 +873,18 @@ function buildWarnings(diff, cells) {
   return w;
 }
 
+// 建造进度: 超过 1.2 秒才报一次, 独立 tag(不进总线, 只给 bot 转发到聊天)。
+// phase: d=核对现场 w=写入 v=校验
+function buildProgress(jid, phase, done, total, state) {
+  const now = Date.now();
+  if (now - state.at < 1200) return;
+  state.at = now;
+  console.log(`${BPROG_TAG} ${jid} ${phase} ${done}/${total}`);
+}
+
 function* executeJob(rid, jid, op, dim, wantUndo, extra) {
   const t0 = Date.now();
+  const prog = { at: t0 };
   const out = { changed: 0, boxes: 0, failed: 0, aborted: false, noop: 0, skippedUnloaded: 0 };
   // 1) 差异预处理: 已经正确的格子标 KEEP(幂等: 重复提交不再写), 未加载的也不写;
   //    同时把「将被覆盖的当前方块」记下来 —— 撤销只还原真正改动过的格子。
@@ -910,13 +921,18 @@ function* executeJob(rid, jid, op, dim, wantUndo, extra) {
       }
       before.cells[i] = pi;
     }
-    if (++work >= CELLS_PER_TICK) { work = 0; yield; }
+    if (++work >= CELLS_PER_TICK) {
+      work = 0;
+      yield;
+      buildProgress(jid, "d", i + 1, op.volume, prog);
+    }
   }
   // 2) 只对差异部分做贪心合并 + fillBlocks
   const workOp = { ...op, cells };
   const boxes = planBoxes(workOp);
   out.boxes = boxes.length;
   const hasFill = typeof dim.fillBlocks === "function" && typeof mc.BlockVolume === "function";
+  let lastProg = Date.now();
   for (let bi = 0; bi < boxes.length; bi++) {
     const box = boxes[bi];
     const rec = builds.get(jid);
@@ -947,7 +963,13 @@ function* executeJob(rid, jid, op, dim, wantUndo, extra) {
     } catch (e) {
       out.failed++;
     }
-    if (bi % 8 === 7) yield;
+    if (bi % 8 === 7) {
+      yield;
+      buildProgress(jid, "w", bi + 1, boxes.length, prog);
+    } else if (bi === boxes.length - 1) {
+      yield;
+      buildProgress(jid, "w", boxes.length, boxes.length, prog);
+    }
   }
   yield;
   // 3) 校验: 对原始期望复读比对, 空洞优先
@@ -972,7 +994,11 @@ function* executeJob(rid, jid, op, dim, wantUndo, extra) {
         if (wrongs.length < BUILD_SAMPLES) wrongs.push([c.x, c.y, c.z, cur]);
       }
     }
-    if (++work >= CELLS_PER_TICK) { work = 0; yield; }
+    if (++work >= CELLS_PER_TICK) {
+      work = 0;
+      yield;
+      buildProgress(jid, "v", i + 1, op.volume, prog);
+    }
   }
   verify.samples = holes.concat(wrongs).slice(0, BUILD_SAMPLES);
   // 4) 撤销记录(只记真正改动过的格子)
