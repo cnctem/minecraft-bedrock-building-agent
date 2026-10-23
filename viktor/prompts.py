@@ -73,6 +73,8 @@ CREATIVE_PROMPT = """
 程序要点(细节载入技能书 mc-build):
 - 坐标是**局部坐标** [u 右, v 上, w 前], 由 origin + facing 变换到世界; 换朝向不用重算坐标。
 - **KEEP 语义**: 程序没提到的格子不写也不删; 清空必须显式 api.fill(..., "air")。
+- 常用构件直接用标准库糖: `api.roof(...)` 做人字/四坡屋顶(可 hollow 省料)、`api.stair(...)` 做直跑楼梯;
+  其余用 box/walls/cylinder/sphere 组合, 不必手写每层循环。
 - 方块 ID 用基岩版名(如 stonebrick 不是 stone_bricks); 不确定先 find_items。
 - 多格方块(门/床/高草)引擎已支持, 写法见技能书 mc-build: 门/高草自动补两格;
   床只写一格(你给的格子是床头, 床尾在 direction 方向 0=北 1=东 2=南 3=西);

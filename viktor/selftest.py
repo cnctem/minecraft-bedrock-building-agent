@@ -1858,6 +1858,25 @@ api.set(6, 0, 0, "tall_grass")
     assert s5["checks"]["floating"]["checked"] is False, s5["checks"]["floating"]
     print("对称/悬空校验自测 OK")
 
+    # 标准库糖: 屋顶(逐层内缩) 与 楼梯(逐阶升高)
+    _, r1 = B.compile_build('api.roof((0,0,0),(4,0,4),"stonebrick")',
+                            (0, 64, 0), "south", B.block_ids())
+    assert r1["cells"] == 45, r1          # 5×5 + 5×3 + 5×1
+    _, r2 = B.compile_build('api.roof((0,0,0),(4,0,4),"stonebrick",style="hip")',
+                            (0, 64, 0), "south", B.block_ids())
+    assert r2["cells"] == 35, r2          # 25 + 9 + 1
+    _, r3 = B.compile_build('api.roof((0,0,0),(4,0,4),"stonebrick",hollow=True)',
+                            (0, 64, 0), "south", B.block_ids())
+    assert r3["cells"] == 33, r3          # 16 + 12 + 5(逐层只铺外圈)
+    _, r4 = B.compile_build('api.roof((0,0,0),(4,0,4),"stonebrick",y=None)'
+                            if False else 'api.stair((0,0,0),(0,0,4),"stonebrick")',
+                            (0, 64, 0), "south", B.block_ids())
+    assert r4["cells"] == 5, r4           # 5 阶, 每阶 1 格深
+    _, r5 = B.compile_build('api.stair((0,0,0),(2,0,4),"stonebrick",rise=2,run=2)',
+                            (0, 64, 0), "south", B.block_ids())
+    assert r5["cells"] == 15, r5          # 3 阶 × 3 格宽 × (2+2+1 格深)
+    print("屋顶/楼梯糖自测 OK")
+
     # 模式门禁: 建造工具只在创造模式家族可见(用户明确要求)
     for mode in (MODE_NORMAL, MODE_PLAN, MODE_EXECUTE, MODE_ONESHOT):
         names = bot2._allowed_tools(mode)

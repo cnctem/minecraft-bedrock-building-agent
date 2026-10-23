@@ -48,6 +48,8 @@ api.pattern((1, 0, 1), (W - 2, H - 2, 1), ["oak_planks", "spruce_planks"])  # �
 | `api.sphere(center, r, block, hollow=False)` | 球/壳 |
 | `api.pyramid(a, b, height, block, hollow=True)` | 四棱锥(屋顶/塔尖) |
 | `api.pattern(a, b, [blocks], axis="v")` | 按坐标取模铺纹理 |
+| `api.roof(a, b, block, style="gable", ridge="u", height=None, hollow=False)` | **屋顶**：逐层内缩。`gable` 双坡（人字）/ `hip` 四坡 / `flat` 平顶；`ridge` 屋脊沿 u 或 w；`hollow=True` 只铺每层外圈（省料、留内部空间）。a/b 给屋檐那层的范围 |
+| `api.stair(a, b, block, axis="w", rise=1, run=1)` | **直跑楼梯**：沿 axis 每 `run` 格升 `rise` 格，一阶一格厚 |
 | `api.dir("front"/"back"/"left"/"right")` | 局部方向 → 世界方向名(给楼梯/门的状态用) |
 | `api.origin` / `api.facing` | 只读上下文 |
 
@@ -58,6 +60,14 @@ api.pattern((1, 0, 1), (W - 2, H - 2, 1), ["oak_planks", "spruce_planks"])  # �
 
 给 `build_preview` 传 `scan=[x1,y1,z1,x2,y2,z2]`（**局部坐标框**，体积 ≤65536）预取快照后，
 程序里就能读世界：
+
+```python
+# 9×7 小屋: 墙 + 人字屋顶 + 门口台阶
+api.box((0, 0, 0), (8, 4, 6), "oak_planks")
+api.fill((1, 0, 1), (7, 3, 5), "air")
+api.roof((-1, 4, -1), (9, 4, 7), "spruce_planks", style="gable", ridge="u")  # 带一圈出檐
+api.stair((3, 4, 7), (5, 4, 9), "stonebrick", axis="w")                       # 室外台阶
+```
 
 ```python
 # 地基跟着地形走: 每列从地面往下垫到 -3

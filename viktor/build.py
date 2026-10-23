@@ -162,6 +162,87 @@ class _Api:
         lo, hi = _norm(_pt(a), _pt(b))
         self._add({"op": "pyramid", "a": lo, "b": hi, "h": int(height), "k": str(block),
                    "hollow": bool(hollow), "s": states or None})
+    def roof(self, a, b, block, style="gable", ridge="u", height=None, hollow=False, states=None):
+        """屋顶: 逐层内缩的斜面。a/b 是屋顶底面范围(v 取屋檐那层)。
+
+        style: gable(双坡/人字) / hip(四坡) / flat(平顶)
+        ridge: 双坡屋脊沿 "u"(左右) 或 "w"(前后)
+        height: 屋顶高; 不传则按跨度自动(每层内缩 1 格)
+        hollow: True 只铺每层外圈(省料、留内部空间)
+        """
+        lo, hi = _norm(_pt(a), _pt(b))
+        u0, v0, w0 = lo
+        u1, v1, w1 = hi
+        style = str(style).lower()
+        if style == "flat":
+            self.fill((u0, v0, w0), (u1, v1, w1), block, states)
+            return
+        if style == "gable":
+            ridge = "w" if str(ridge).lower()[:1] == "w" else "u"
+            span = (w1 - w0 + 1) if ridge == "u" else (u1 - u0 + 1)
+            h = int(height) if height else (span + 1) // 2
+            for i in range(max(1, h)):
+                if ridge == "u":
+                    z0, z1 = w0 + i, w1 - i
+                    if z0 > z1:
+                        break
+                    x0, x1 = u0, u1
+                else:
+                    x0, x1 = u0 + i, u1 - i
+                    if x0 > x1:
+                        break
+                    z0, z1 = w0, w1
+                y = v0 + i
+                if hollow:
+                    self._ring(x0, x1, z0, z1, y, block, states)
+                else:
+                    self.fill((x0, y, z0), (x1, y, z1), block, states)
+            return
+        if style == "hip":
+            h = int(height) if height else (min(u1 - u0, w1 - w0) + 1) // 2 + 1
+            for i in range(max(1, h)):
+                x0, x1, z0, z1 = u0 + i, u1 - i, w0 + i, w1 - i
+                if x0 > x1 or z0 > z1:
+                    break
+                y = v0 + i
+                if hollow:
+                    self._ring(x0, x1, z0, z1, y, block, states)
+                else:
+                    self.fill((x0, y, z0), (x1, y, z1), block, states)
+            return
+        raise ValueError("roof 的 style 只能是 gable / hip / flat, 收到 %r" % (style,))
+
+    def stair(self, a, b, block, axis="w", rise=1, run=1, states=None):
+        """直跑楼梯: 沿 axis("w" 或 "u") 每 run 格升 rise 格, 一阶一格厚。"""
+        lo, hi = _norm(_pt(a), _pt(b))
+        u0, v0, w0 = lo
+        u1, v1, w1 = hi
+        rise = max(1, int(rise))
+        run = max(1, int(run))
+        if str(axis).lower()[:1] == "u":
+            n = u1 - u0 + 1
+            steps = (n + run - 1) // run
+            for k in range(steps):
+                x0 = u0 + k * run
+                x1 = min(u1, x0 + run - 1)
+                self.fill((x0, v0 + k * rise, w0), (x1, v0 + k * rise, w1), block, states)
+        else:
+            n = w1 - w0 + 1
+            steps = (n + run - 1) // run
+            for k in range(steps):
+                z0 = w0 + k * run
+                z1 = min(w1, z0 + run - 1)
+                self.fill((u0, v0 + k * rise, z0), (u1, v0 + k * rise, z1), block, states)
+
+    def _ring(self, x0, x1, z0, z1, y, block, states):
+        """单层外圈(给 hollow 屋顶用): 上下两条 + 左右两条。"""
+        self.fill((x0, y, z0), (x1, y, z0), block, states)
+        if z1 != z0:
+            self.fill((x0, y, z1), (x1, y, z1), block, states)
+        if x1 > x0 and z1 > z0:
+            self.fill((x0, y, z0 + 1), (x0, y, z1 - 1), block, states)
+            self.fill((x1, y, z0 + 1), (x1, y, z1 - 1), block, states)
+
     def pattern(self, a, b, blocks, axis="v", states=None):
         lo, hi = _norm(_pt(a), _pt(b))
         self._add({"op": "pattern", "a": lo, "b": hi, "k": [str(x) for x in blocks],
