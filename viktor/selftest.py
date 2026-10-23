@@ -1798,6 +1798,25 @@ for u in range(0, W, 3):
         assert "超过上限" in str(e), e
     print("建造沙箱/校验自测 OK")
 
+    # 读世界: 预取快照后程序里能问地形(离线构造 3×3×3 快照: 底层石头, 上面空气)
+    snap = {"o": [0, 64, 0], "s": [3, 3, 3], "p": ["stone", "air"], "rle": "0:9,1:18",
+            "unloaded": 0}
+    prog_snap = """
+h = api.height(1, 1)
+assert h == 0, h
+assert api.block(1, 0, 1) == "stone", api.block(1, 0, 1)
+assert api.solid(1, 1, 1) is False
+api.fill((0, 0, 0), (2, 0, 2), "stonebrick")
+"""
+    payload2, stats2 = B.compile_build(prog_snap, (0, 64, 0), "south", B.block_ids(), snap)
+    assert stats2["snapshot"] and stats2["cells"] == 9, stats2
+    # 未知方块("?")按空气处理, height 跳过它继续往下找
+    snap2 = {"o": [0, 64, 0], "s": [1, 2, 1], "p": ["?", "stone"], "rle": "0:1,1:1"}
+    _, stats3 = B.compile_build("h = api.height(0, 0)\napi.fill((0,0,0),(0,0,0),'stone')",
+                                (0, 64, 0), "south", B.block_ids(), snap2)
+    assert stats3["snapshot"], stats3
+    print("建造读世界(快照)自测 OK")
+
     # 模式门禁: 建造工具只在创造模式家族可见(用户明确要求)
     for mode in (MODE_NORMAL, MODE_PLAN, MODE_EXECUTE, MODE_ONESHOT):
         names = bot2._allowed_tools(mode)

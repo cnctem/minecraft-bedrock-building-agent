@@ -21,6 +21,7 @@ const INSPECT_TAG = "[VIKTOR-INSPECT]"; // 三维区域摘要 / 单元列表 / �
 const FIND_TAG = "[VIKTOR-FIND]";      // 区域内搜方块坐标
 const CAPS_TAG = "[VIKTOR-CAPS]";      // 能力广播(协议/可用 API/各项上限)
 const BUILD_TAG = "[VIKTOR-BUILD]";    // 建造引擎回包(分帧 JSON)
+const SNAP_TAG = "[VIKTOR-SNAP]";      // 世界快照(供建造程序读地形)
 // v3: 新增 heightmap/slice/inspect/find/caps; 查询回包改为「一个 JSON payload 分多帧」
 const PROTOCOL = "v4";
 // 分帧: 每帧 JSON 字符数。console.log 的行长没有官方保证, 700 是实测安全的保守值;
@@ -601,6 +602,54 @@ function runJob(job) {
 }
 
 
+
+// 稠密快照: 把一块区域的当前方块整体回传(palette + RLE), 供建造程序读世界
+// (贴地形做地基/判断哪里已有东西)。与建造 payload 同一套编码, 上限也一样。
+function* snapshotJob(rid, dim, xs, ys, zs) {
+  const pal = makePalette();
+  pal.id("?");   // 索引 0 = 未知(未加载), 与 RLE 的缺省值 0 对齐
+  const sx = xs[1] - xs[0] + 1, sy = ys[1] - ys[0] + 1, sz = zs[1] - zs[0] + 1;
+  const cells = new Uint8Array(sx * sy * sz);
+  let unloaded = 0, work = 0, i = 0;
+  for (let y = ys[0]; y <= ys[1]; y++) {
+    for (let z = zs[0]; z <= zs[1]; z++) {
+      for (let x = xs[0]; x <= xs[1]; x++) {
+        const b = readBlock(dim, x, y, z);
+        if (!b) {
+          unloaded++;
+        } else {
+          cells[i] = pal.id(b.typeId);
+        }
+        i++;
+        if (++work >= CELLS_PER_TICK) { work = 0; yield; }
+      }
+    }
+  }
+  emitPayload(SNAP_TAG, rid, {
+    ok: true, dim: dim.id, o: [xs[0], ys[0], zs[0]], s: [sx, sy, sz],
+    p: pal.list, rle: encodeRle(cells), unloaded,
+  });
+}
+
+function snapshotRegion(message) {
+  const { id, rest } = takeId(message);
+  const parts = String(rest || "").trim().split(/\s+/).filter(Boolean);
+  const box = ints(parts, 0, 6);
+  if (!box) {
+    fail(SNAP_TAG, id, "参数需为 x1 y1 z1 x2 y2 z2 [维度]");
+    return;
+  }
+  const xs = [Math.min(box[0], box[3]), Math.max(box[0], box[3])];
+  const ys = [Math.min(box[1], box[4]), Math.max(box[1], box[4])];
+  const zs = [Math.min(box[2], box[5]), Math.max(box[2], box[5])];
+  const volume = (xs[1] - xs[0] + 1) * (ys[1] - ys[0] + 1) * (zs[1] - zs[0] + 1);
+  if (volume > BUILD_MAX_VOLUME) {
+    fail(SNAP_TAG, id, `快照体积 ${volume} 超过上限 ${BUILD_MAX_VOLUME}, 请缩小 scan 范围`);
+    return;
+  }
+  runJob(snapshotJob(id, resolveDimension(parts[6]), xs, ys, zs));
+}
+
 // ---------- v4: 建造引擎 ----------
 // 分工: bot 负责把「建造程序」编译成期望体素(纯几何), 这里负责
 //   预览(diff) → 提交(贪心合并 + fillBlocks 时间切片) → 校验(复读比对) → 撤销(before 体积)
@@ -1177,6 +1226,7 @@ system.afterEvents.scriptEventReceive.subscribe((ev) => {
   else if (ev.id === "viktor:find") findBlocks(ev.message);
   else if (ev.id === "viktor:caps") reportCaps(ev.message);
   else if (ev.id === "viktor:build") handleBuild(ev.message);
+  else if (ev.id === "viktor:snapshot") snapshotRegion(ev.message);
   else if (ev.id === "viktor:menu") handleMenu(ev.message);
   else if (ev.id === "viktor:ids") dumpIds();
 }, { namespaces: ["viktor"] });

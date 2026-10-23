@@ -54,6 +54,30 @@ api.pattern((1, 0, 1), (W - 2, H - 2, 1), ["oak_planks", "spruce_planks"])  # �
 语言子集：`for / if / 函数 / 算术`，`math.sin/cos/sqrt/floor/pi`，`range`。
 **没有** `import`、文件、网络、`exec/eval/open`。死循环会被 8 秒超时杀掉。
 
+## 1.5 读世界(贴地形建)
+
+给 `build_preview` 传 `scan=[x1,y1,z1,x2,y2,z2]`（**局部坐标框**，体积 ≤65536）预取快照后，
+程序里就能读世界：
+
+```python
+# 地基跟着地形走: 每列从地面往下垫到 -3
+for u in range(0, W):
+    for w in range(0, D):
+        h = api.height(u, w)
+        if h is not None:
+            api.fill((u, h, w), (u, min(h, -1), w), "stonebrick")
+```
+
+| 方法 | 返回 |
+|---|---|
+| `api.height(u, w)` | 该列在快照范围内最高的非空气方块的局部 v；整列空返回 `None` |
+| `api.block(u, v, w)` | 该格的方块名（`"air"` / `"stonebrick"` …）；超出快照返回 `"?"` |
+| `api.solid(u, v, w)` | 是否实体（空气/水/岩浆/未知都算 False） |
+| `api.air(u, v, w)` | 是否空气（或超出快照） |
+
+注意：快照是**预览开始时**的只读副本，程序里看不到自己刚放下的方块；
+要先看效果就分两个模块（先建 → 再 preview 下一段）。
+
 ## 2. 三条必须记住的语义
 
 1. **KEEP**：程序没提到的格子**不写也不删**。清空必须 `api.fill(..., "air")`。

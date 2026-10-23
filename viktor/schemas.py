@@ -230,6 +230,9 @@ BUILD_PREVIEW_SCHEMA = {
             "  api.pattern(a,b,[blocks],axis='v') / api.dir('front'|'back'|'left'|'right')\n"
             "  坐标是**局部坐标** [u 右, v 上, w 前]，由 origin + facing 变换到世界坐标。\n"
             "  可用 for/if/函数/算术/math.sin 等；**没有** import/文件/网络。\n"
+            "  **读世界**：传 scan=[x1,y1,z1,x2,y2,z2]（局部坐标框）预取快照后，程序里可用\n"
+            "  api.height(u,w)（该列最高非空气方块的局部 v，空列 None）/ api.block(u,v,w)\n"
+            "  / api.solid(u,v,w) / api.air(u,v,w) —— 用来贴地形做地基、避开已有建筑。\n"
             "**KEEP 语义**：程序没提到的格子不写也不删；清空必须显式 api.fill(...,'air')。\n"
             "返回 operation_id、包围盒、差异（新放置/覆盖/已正确/未加载）、执行计划与警告。"
             "看完差异确认无误，再调 build_commit 提交；要改就改程序重新 preview。"
@@ -244,6 +247,9 @@ BUILD_PREVIEW_SCHEMA = {
                 "facing": {"type": "string", "enum": ["north", "south", "east", "west"],
                            "description": "建筑正面朝向，默认 south；决定局部 u/w 到世界 x/z 的映射"},
                 "name": {"type": "string", "description": "可选：给这次建造起个名字，便于 build_status 辨认"},
+                "scan": {"type": "array", "items": {"type": "integer"},
+                         "description": ("可选：预取世界快照的局部坐标框 [x1,y1,z1,x2,y2,z2]，"
+                                         "给了程序里才能用 api.height/api.block；体积 ≤65536 格")},
             },
             "required": ["program", "origin"],
         },

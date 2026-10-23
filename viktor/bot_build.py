@@ -82,6 +82,25 @@ class BotBuildMixin:
 
     # ---------- 工具 ----------
 
+    def _snapshot_fetch(self, box: tuple, origin: tuple, facing: str) -> dict | str:
+        """按局部坐标框预取世界快照(dense palette+RLE), 供程序读地形。"""
+        lx0, ly0, lz0, lx1, ly1, lz1 = box
+        corners = [build.to_world(origin, facing, u, v, w)
+                   for u in (lx0, lx1) for v in (ly0, ly1) for w in (lz0, lz1)]
+        xs = [c[0] for c in corners]
+        ys = [c[1] for c in corners]
+        zs = [c[2] for c in corners]
+        wb = (min(xs), min(ys), min(zs), max(xs), max(ys), max(zs))
+        volume = ((wb[3] - wb[0] + 1) * (wb[4] - wb[1] + 1) * (wb[5] - wb[2] + 1))
+        if volume > build.MAX_VOLUME:
+            return f"scan 范围 {volume} 格超过上限 {build.MAX_VOLUME}, 请缩小"
+        rid = self.bus.next_id()
+        cmd = (f"scriptevent viktor:snapshot {rid} {wb[0]} {wb[1]} {wb[2]}"
+               f" {wb[3]} {wb[4]} {wb[5]} overworld")
+        req = self._build_await(rid, cmd)
+        data = self._build_result("snapshot", req)
+        return data
+
     def _tool_build_preview(self, args: dict) -> str:
         if err := self._build_ready():
             return err
@@ -91,9 +110,22 @@ class BotBuildMixin:
         origin = args.get("origin") or []
         facing = str(args.get("facing") or "south").lower()
         name = str(args.get("name") or "").strip()[:40]
+        snapshot = None
+        scan = args.get("scan")
+        if scan:
+            try:
+                box = tuple(int(v) for v in scan)
+                assert len(box) == 6
+            except (TypeError, ValueError, AssertionError):
+                return "scan 需要 6 个整数 [x1, y1, z1, x2, y2, z2](局部坐标框)。"
+            snap = self._snapshot_fetch(box, tuple(int(v) for v in origin), facing)
+            if isinstance(snap, str):
+                return snap
+            snapshot = snap
         try:
             payload, stats = build.compile_build(
-                program, origin, facing, build.block_ids() or capabilities.item_ids())
+                program, origin, facing, build.block_ids() or capabilities.item_ids(),
+                snapshot)
         except build.BuildError as e:
             return f"建造程序编译失败: {e}"
         jid = self._new_jid()
@@ -126,6 +158,9 @@ class BotBuildMixin:
                    f"已正确 {diff.get('noop', 0)} 格 / 未加载 {diff.get('unloaded', 0)} 格")
         out.append(f"执行计划: {(data.get('plan') or {}).get('boxes', '?')} 个批量填充"
                    f"(程序 {stats['ops']} 个形状)")
+        if stats.get("snapshot_unloaded"):
+            out.append(f"⚠ 快照里有 {stats['snapshot_unloaded']} 格未加载, "
+                       "这些列的 api.height 不可靠(必要时缩小 scan 或先 pin_region)")
         for w in data.get("warnings") or []:
             out.append(f"⚠ {w}")
         samples = data.get("samples") or {}

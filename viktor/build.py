@@ -74,6 +74,7 @@ _ALLOWED_NODES = {
     ast.List, ast.Tuple, ast.Dict, ast.Set, ast.ListComp, ast.DictComp, ast.SetComp,
     ast.GeneratorExp, ast.comprehension, ast.IfExp, ast.Pass, ast.Break, ast.Continue,
     ast.JoinedStr, ast.FormattedValue, ast.Slice, ast.keyword, ast.Starred,
+    ast.arg, ast.arguments, ast.NamedExpr, ast.Assert,  # 函数/海象/自检断言
     ast.Add, ast.Sub, ast.Mult, ast.Div, ast.FloorDiv, ast.Mod, ast.Pow,
     ast.USub, ast.UAdd, ast.Not, ast.And, ast.Or, ast.Eq, ast.NotEq, ast.Lt, ast.LtE,
     ast.Gt, ast.GtE, ast.In, ast.NotIn, ast.Is, ast.IsNot, ast.Invert, ast.BitAnd,
@@ -89,7 +90,9 @@ def validate_ast(source: str) -> None:
         raise BuildError(f"程序语法错误(第 {e.lineno} 行): {e.msg}")
     for node in ast.walk(tree):
         if type(node) not in _ALLOWED_NODES:
-            raise BuildError(f"程序里不允许使用 {type(node).__name__}(第 {getattr(node, 'lineno', '?')} 行)")
+            line = getattr(node, "lineno", None)
+            where = f"第 {line} 行" if line else "程序里"
+            raise BuildError(f"{where}不允许使用 {type(node).__name__}")
         if isinstance(node, ast.Name) and node.id in _FORBIDDEN_NAMES:
             raise BuildError(f"程序里不允许使用 {node.id}")
         if isinstance(node, ast.Attribute) and node.attr.startswith("_"):
@@ -169,10 +172,82 @@ class _Api:
         }
         return table.get(f, table["south"]).get(w, "south")
 
+def _decode_rle(text, total):
+    out = bytearray(total)
+    pos = 0
+    if text:
+        for part in str(text).split(","):
+            if not part:
+                continue
+            a, b = part.split(":")
+            v = int(a, 36)
+            n = int(b, 36)
+            end = min(total, pos + n)
+            for i in range(pos, end):
+                out[i] = v
+            pos = end
+    return out
+
+class _Snap:
+    """只读世界快照(由 build_preview 的 scan 参数预取)。坐标同样用局部 u/v/w。"""
+    def __init__(self, data, origin, facing):
+        self.o = data["o"]
+        self.s = data["s"]
+        self.p = data["p"]
+        self.cells = _decode_rle(data.get("rle"), self.s[0] * self.s[1] * self.s[2])
+        self.origin = origin
+        self.facing = facing
+        self._air = set(i for i, n in enumerate(self.p) if str(n) in ("air", "cave_air", "void_air"))
+    def _world(self, u, v, w):
+        ox, oy, oz = self.origin
+        f = self.facing
+        if f == "south":
+            return ox + u, oy + v, oz + w
+        if f == "north":
+            return ox - u, oy + v, oz - w
+        if f == "east":
+            return ox + w, oy + v, oz - u
+        return ox - w, oy + v, oz + u
+    def _idx(self, x, y, z):
+        ox, oy, oz = self.o
+        sx, sy, sz = self.s
+        lx, ly, lz = x - ox, y - oy, z - oz
+        if lx < 0 or ly < 0 or lz < 0 or lx >= sx or ly >= sy or lz >= sz:
+            return -1
+        return (ly * sz + lz) * sx + lx
+    def block(self, u, v, w):
+        x, y, z = self._world(u, v, w)
+        i = self._idx(x, y, z)
+        return "?" if i < 0 else self.p[self.cells[i]]
+    def air(self, u, v, w):
+        return self.block(u, v, w) in ("air", "cave_air", "void_air", "?")   # "?" = 未知
+    def solid(self, u, v, w):
+        b = self.block(u, v, w)
+        return b not in ("air", "cave_air", "void_air", "?", "water", "lava", "flowing_water", "flowing_lava")
+    def height(self, u, w):
+        """该列在快照范围内最高的非空气方块的局部 v; 整列为空返回 None。"""
+        sy = self.s[1]
+        base_v = self.o[1] - self.origin[1]   # 快照底层对应的局部 v
+        for ly in range(sy - 1, -1, -1):
+            v = base_v + ly
+            x, y, z = self._world(u, v, w)
+            i = self._idx(x, y, z)
+            if i < 0:
+                continue
+            if self.cells[i] not in self._air and self.p[self.cells[i]] != "?":
+                return v
+        return None
+
 api = _Api()
 data = json.loads(sys.stdin.read())
 api.origin = tuple(data.get("origin") or (0, 0, 0))
 api.facing = str(data.get("facing") or "south").lower()
+snap = _Snap(data["snap"], api.origin, api.facing) if data.get("snap") else None
+if snap is not None:
+    api.block = snap.block
+    api.air = snap.air
+    api.solid = snap.solid
+    api.height = snap.height
 g = {"api": api, "math": math, "range": range, "len": len, "min": min, "max": max,
      "abs": abs, "int": int, "float": float, "round": round, "sum": sum,
      "enumerate": enumerate, "zip": zip, "list": list, "dict": dict, "tuple": tuple,
@@ -199,13 +274,13 @@ def _limit_resources():
         pass
 
 
-def run_program(program: str, origin: tuple, facing: str) -> list:
-    """在隔离子进程里执行程序, 返回形状描述(ops)。"""
+def run_program(program: str, origin: tuple, facing: str, snapshot: dict | None = None) -> list:
+    """在隔离子进程里执行程序, 返回形状描述(ops)。snapshot 非空时程序可读世界。"""
     if len(program.encode("utf-8")) > MAX_PROGRAM:
         raise BuildError(f"程序太长(>{MAX_PROGRAM} 字节), 请用循环/函数压缩")
     validate_ast(program)
     payload = json.dumps({"program": program, "origin": list(origin),
-                          "facing": facing}, ensure_ascii=False)
+                          "facing": facing, "snap": snapshot}, ensure_ascii=False)
     try:
         proc = subprocess.run(
             [sys.executable, "-I", "-S", "-c", _PRELUDE, str(MAX_OPS)],
@@ -503,7 +578,8 @@ def _b36(n: int) -> str:
     return "".join(reversed(out))
 
 
-def compile_build(program: str, origin: tuple, facing: str, valid_blocks=None) -> tuple:
+def compile_build(program: str, origin: tuple, facing: str, valid_blocks=None,
+                  snapshot: dict | None = None) -> tuple:
     """程序 → (payload, stats)。payload 直接上行给行为包。"""
     facing = (facing or "south").lower()
     if facing not in FACINGS:
@@ -514,7 +590,7 @@ def compile_build(program: str, origin: tuple, facing: str, valid_blocks=None) -
         raise BuildError("origin 必须是三个整数 [x, y, z]")
     if len(origin) != 3:
         raise BuildError("origin 必须是三个整数 [x, y, z]")
-    ops = run_program(program, origin, facing)
+    ops = run_program(program, origin, facing, snapshot)
     palette, cells, bounds = voxelize(ops, origin, facing, valid_blocks)
     payload = encode(palette, cells, bounds, origin, facing)
     stats = {
@@ -523,5 +599,7 @@ def compile_build(program: str, origin: tuple, facing: str, valid_blocks=None) -
                                    bounds[4] - bounds[1] + 1,
                                    bounds[5] - bounds[2] + 1),
         "payload_bytes": len(json.dumps(payload, ensure_ascii=False)),
+        "snapshot": bool(snapshot),
+        "snapshot_unloaded": (snapshot or {}).get("unloaded", 0),
     }
     return payload, stats

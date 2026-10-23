@@ -182,7 +182,7 @@ python3 bot.py --test         # 解析逻辑自测
 | `use_skill(name, file?, force?)` | 按需载入一本技能书（skill）的正文；`file` 展开其附带资料。系统在会话开头只列出技能名与适用场景，正文用时才载入 |
 | `search_wiki(query, lang?, limit?)` | 在 Minecraft Wiki 搜条目（默认中文 wiki，`lang="en"` 切英文），返回候选标题（含重定向提示）与摘要；再用 `read_wiki_page` 读正文。查配方/掉落/生成/机制等游戏事实 |
 | `read_wiki_page(title, section?, lang?)` | 读 wiki 页面正文。默认只回「开头摘要 + 章节目录」省上下文，用 `section` 精读某节（如「合成」「数据值」）；表格保留为 `\|` 分隔行、合成/烧炼配方渲染成网格。本服基岩版，以基岩版列为准 |
-| `build_preview(program, origin, facing?, name?)` | **仅创造模式**：把受限 Python 建造程序编译成期望方块并与世界做差异对比，**不写世界**。返回 operation_id、包围盒、差异（新放置/覆盖/已正确/未加载）、批量填充数、警告 |
+| `build_preview(program, origin, facing?, name?, scan?)` | **仅创造模式**：把受限 Python 建造程序编译成期望方块并与世界做差异对比，**不写世界**。返回 operation_id、包围盒、差异（新放置/覆盖/已正确/未加载）、批量填充数、警告。给 `scan=[x1..z2]`（局部坐标框）会先预取世界快照，程序里就能用 `api.height/api.block/api.solid/api.air` 贴地形建 |
 | `build_commit(operation_id)` | **仅创造模式**：批量写入（`fillBlocks` + 贪心合并）并**自动复读校验**，返回 `verify.mismatch/holes/wrong` 与样本坐标；`mismatch==0` 才算完成 |
 | `build_undo(operation_id?)` | **仅创造模式**：用提交前保存的方块体积还原（撤销栈 2 个，reload 清空） |
 | `build_status()` | **仅创造模式**：列出暂存/可撤销的建造操作 |
@@ -285,6 +285,7 @@ BDS 控制台 **不回显玩家聊天**，所以用行为包 `viktor_bridge` 订
 - `scriptevent viktor:inspect [id] <x1> <y1> <z1> <x2> <y2> <z2> [维度] [filter] [detail] [limit]` → `[VIKTOR-INSPECT]` + JSON：类型计数；给 `filter` 时回 `match`/`mismatch` 与不符合项坐标（空洞、放错）；`detail=cells` 回单元清单。
 - `scriptevent viktor:find [id] <方块ID> <x1> <y1> <z1> <x2> <y2> <z2> [维度] [limit]` → `[VIKTOR-FIND]` + JSON：匹配总数与坐标（子串匹配，可写 `ore`）。
 - `scriptevent viktor:caps [id]` → `[VIKTOR-CAPS]` + JSON：协议版本、可用 API（`runJob`/`fillBlocks`）、各项上限（能力广播）。
+- `scriptevent viktor:snapshot [id] <x1 y1 z1 x2 y2 z2> [维度]` → `[VIKTOR-SNAP]` + JSON：稠密快照（palette + RLE，≤65536 格），供建造程序读世界；索引 0 固定为 `?`（未加载）。
 - **建造引擎（v4）**：`viktor:build put <jid> <i>/<n> <片段>`（上行分帧）→ `preview` / `commit` / `undo` / `list` / `abort` / `drop` → `[VIKTOR-BUILD] <rid>` + 分帧 JSON。
   上行必须分帧：`[实测]` 单条 `scriptevent` 消息体 ≤700 字符可用，750 整条被丢弃（全行约 768 字节），所以每帧 ≤560 字符、**一帧一次 `screen stuff`**。
   期望体积编码：`palette`（索引 0 固定 = KEEP 不写）+ 分层 RLE（`idx:count`，base36）；提交时按层贪心合并成单方块长方体再调 `fillBlocks`。

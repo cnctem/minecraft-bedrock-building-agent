@@ -16,7 +16,7 @@ RE_LIST = re.compile(r"^There are (\d+)/(\d+) players online")
 # 协议 v3: 行为包把请求 id 原样回显在每一行里, 供 ServerBus 按 id 路由;
 # 查询回包是「一个 JSON payload 分多帧」(`#i/n <片段>` 行 + DONE), 由 bus 重组。
 BUS_ROUTE_RE = re.compile(
-    r"\[VIKTOR-(POS|INV|BLOCK|MAP|SLICE|INSPECT|FIND|CAPS|BUILD)\] (r\d+)(?:[ \t](.*))?$")
+    r"\[VIKTOR-(POS|INV|BLOCK|MAP|SLICE|INSPECT|FIND|CAPS|BUILD|SNAP)\] (r\d+)(?:[ \t](.*))?$")
 BUS_FRAME_RE = re.compile(r"^#(\d+)/(\d+) (.*)$", re.S)
 RE_HELLO = re.compile(r"\[VIKTOR-HELLO\] \S+ v(\d+)")
 PACK_PROTO_SPATIAL = 3  # 感知原语(heightmap/slice/inspect/find)所需的行为包协议
@@ -83,6 +83,7 @@ BUS_TIMEOUT_TEXT = {
     "build_commit": "行为包没有回应提交结果(可能脚本未加载); 若已写入一部分, 可用 build_undo 还原。",
     "build_undo": "行为包没有回应撤销结果(可能脚本未加载)。",
     "build_status": "行为包没有回应操作列表(可能脚本未加载)。",
+    "snapshot": "行为包没有回应世界快照(可能脚本未加载, 或 scan 范围太大)。",
 }
 ONESHOT_TRIGGER = re.compile(r"^1(?:[ \u3000]+|$)")  # "1 " / "1　" 开头, 或单一个 "1" = 一次性对话
 ONESHOT_FORCE_STOP = re.compile(r"^1[ \u3000]+强制停止$")  # 停止全部一次性对话
