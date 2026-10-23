@@ -88,7 +88,7 @@ TOOLS = {
                                "build_preview", "build_commit", "build_undo", "build_status"}},
     # 建造引擎(含 Python 沙箱)只在创造模式家族暴露: 其它模式连工具名都看不到
     "no_build": {"except": {"build_preview", "build_commit", "build_undo", "build_status",
-                            "render_build"}},
+                            "render_build", "build_blueprint"}},
 }
 
 # 模式表: 只组合上面的 profile。next_modes = set_mode 允许切到的目标(其它模式对模型“不可知”);

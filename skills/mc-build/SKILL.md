@@ -113,6 +113,10 @@ render_build(operation_id="b123-1", views=["front", "iso"])
 
 比例不对、屋顶收口别扭、门窗节奏乱了——在这一步就该改程序，而不是建完再返工。
 
+**给玩家看的**：`build_blueprint(operation_id, view="front", at=[x,y,z], direction="south")`
+会把图铺成彩色混凝土马赛克墙（1 像素 1 格，`step=2` 减半）。它同样先预览、再
+`build_commit`、`build_undo` 可撤。玩家说"先画个样子给我看/在外面立个图"时用它。
+
 ## 2. 三条必须记住的语义
 
 1. **KEEP**：程序没提到的格子**不写也不删**。清空必须 `api.fill(..., "air")`。

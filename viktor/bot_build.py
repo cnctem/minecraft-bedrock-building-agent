@@ -276,6 +276,55 @@ class BotBuildMixin:
         log(f"[渲染] 区域 {xs[0]},{ys[0]},{zs[0]} views={views} cells={len(cells)}")
         return "\n".join(out)
 
+    def _tool_build_blueprint(self, args: dict) -> str:
+        """把渲染出的字符图做成彩色混凝土马赛克墙(走同一套 preview/commit/undo)。"""
+        if err := self._build_ready():
+            return err
+        jid_src = str(args.get("operation_id") or "").strip()
+        payload = getattr(self, "_build_payloads", {}).get(jid_src)
+        if payload is None:
+            return f"找不到 {jid_src} 的编译结果; 先 build_preview 一次。"
+        views, err = self._render_args(args)
+        if err:
+            return err
+        view = views[0]
+        try:
+            at = [int(v) for v in (args.get("at") or [])]
+            assert len(at) == 3
+        except (TypeError, ValueError, AssertionError):
+            return "at 需要三个整数 [x, y, z](墙面左下角的世界坐标)。"
+        direction = str(args.get("direction") or "south").lower()
+        if direction not in ("north", "south", "east", "west"):
+            return "direction 只能是 north/south/east/west。"
+        palette, cells, bounds = build.decode_payload(payload)
+        pal_out, cells_out, bb, w, h = render.blueprint_cells(
+            palette, cells, bounds, view, tuple(at), direction,
+            step=int(args.get("step") or 1))
+        if not cells_out:
+            return "这张图是空的, 没东西可画。"
+        step = max(1, int(args.get("step") or 1))
+        new_payload = build.encode(pal_out, cells_out, bb, tuple(at), "south")
+        jid = self._new_jid()
+        try:
+            frames = self._build_upload(jid, new_payload)
+        except build.BuildError as e:
+            return str(e)
+        rid = self.bus.next_id()
+        data = self._build_result("build_preview",
+                                  self._build_await(rid, f"scriptevent viktor:build preview {rid} {jid}"))
+        if isinstance(data, str):
+            return data
+        nm = f"蓝图-{self._build_name(jid_src) or jid_src}-{view}"
+        self._build_name(jid, nm)
+        self._build_payloads[jid] = new_payload
+        data["name"] = nm
+        stats = {"size": (bb[3]-bb[0]+1, bb[4]-bb[1]+1, bb[5]-bb[2]+1),
+                 "ops": w * h, "cells": len(cells_out), "palette": len(pal_out)-1}
+        log(f"[建造] 蓝图 {jid} {nm} {w}x{h} step={step} {frames}帧")
+        return (f"蓝图墙已生成(预览): {w}×{h} 像素, 1/step={step}, "
+                f"{'浅灰=石 棕=木 绿=植 蓝=水 淡蓝=玻璃 黄=光/金 红=火 白=雪/石英 品红=羊毛'}\n"
+                + self._render_build_preview(jid, data, stats))
+
     def _tool_build_commit(self, args: dict) -> str:
         if err := self._build_ready():
             return err

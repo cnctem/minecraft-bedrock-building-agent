@@ -57,6 +57,74 @@ def block_color(name: str) -> tuple:
     return (90 + (h & 0x3F), 90 + ((h >> 6) & 0x3F), 90 + ((h >> 12) & 0x3F))
 
 
+# 蓝图墙用色: 方块族 -> 混凝土（16 色够表达石/木/叶/水/玻璃/金属等大类）
+_BLUEPRINT = [
+    (("stone", "cobble", "deepslate", "andesite", "granite", "diorite", "tuff", "basalt",
+      "gravel"), "light_gray_concrete"),
+    (("brick", "terracotta"), "orange_concrete"),
+    (("planks", "log", "wood", "bamboo"), "brown_concrete"),
+    (("leaves", "moss", "grass", "fern", "vine", "azalea", "flower"), "green_concrete"),
+    (("water", "ice"), "blue_concrete"),
+    (("glass",), "light_blue_concrete"),
+    (("sand",), "yellow_concrete"),
+    (("snow", "quartz", "white", "iron", "copper"), "white_concrete"),
+    (("lava", "magma", "fire", "redstone"), "red_concrete"),
+    (("glowstone", "sea_lantern", "lantern", "torch", "candle", "shroomlight"), "yellow_concrete"),
+    (("netherite", "black", "obsidian"), "black_concrete"),
+    (("gold", "brass"), "yellow_concrete"),
+    (("purple", "amethyst"), "purple_concrete"),
+    (("wool", "carpet", "concrete"), "magenta_concrete"),
+]
+
+
+def blueprint_block(name: str) -> str:
+    """方块 -> 蓝图墙用的混凝土颜色。空气/未知走背景色。"""
+    base = name_of(name)
+    if not base or base in AIR_TYPES:
+        return "white_concrete"
+    for keys, block in _BLUEPRINT:
+        if any(k in base for k in keys):
+            return block
+    return "gray_concrete"
+
+
+def blueprint_cells(palette: list, cells: dict, bounds: tuple, view: str,
+                    at: tuple, direction: str = "south", step: int = 1):
+    """把某个视角的图变成 1 格厚马赛克墙。
+
+    返回 (palette_out, cells_out, bounds_out, w, h)。坐标为世界坐标。
+    at = 墙面左下角; direction = 墙面朝向。
+    """
+    rows, _note = _grid(palette, cells, bounds, view)
+    step = max(1, int(step))
+    while max(len(rows[0]), len(rows)) // step > 96:
+        step += 1
+    rows = [r[::step] for r in rows[::step]]
+    h, w = len(rows), len(rows[0])
+    pal_out, idx, cells_out = [None], {}, {}
+    for r, row in enumerate(rows):
+        for c, pi in enumerate(row):
+            name = name_of(palette[pi]) if pi is not None else ""
+            block = "minecraft:" + blueprint_block(name)
+            if block not in idx:
+                idx[block] = len(pal_out)
+                pal_out.append({"b": block})
+            y = at[1] + (h - 1 - r)
+            if direction == "south":
+                pos = (at[0] + c, y, at[2])
+            elif direction == "north":
+                pos = (at[0] - c, y, at[2])
+            elif direction == "east":
+                pos = (at[0], y, at[2] - c)
+            else:
+                pos = (at[0], y, at[2] + c)
+            cells_out[pos] = idx[block]
+    xs = [p[0] for p in cells_out] or [at[0]]
+    ys = [p[1] for p in cells_out] or [at[1]]
+    zs = [p[2] for p in cells_out] or [at[2]]
+    return pal_out, cells_out, (min(xs), min(ys), min(zs), max(xs), max(ys), max(zs)), w, h
+
+
 def symbols_for(palette: list) -> list:
     """调色板索引 -> 单字符。空气固定 '.', 其余按顺序分配。"""
     out, k = [], 0

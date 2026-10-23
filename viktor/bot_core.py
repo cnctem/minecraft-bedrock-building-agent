@@ -21,6 +21,7 @@ from .schemas import (
     BUILD_PREVIEW_SCHEMA,
     BUILD_STATUS_SCHEMA,
     BUILD_UNDO_SCHEMA,
+    BUILD_BLUEPRINT_SCHEMA,
     RENDER_BUILD_SCHEMA,
     RENDER_REGION_SCHEMA,
     FIND_BLOCKS_SCHEMA,
@@ -83,6 +84,8 @@ class BotCoreMixin:
                              self._tool_build_undo, concurrency="serial")
         capabilities.register("build_status", BUILD_STATUS_SCHEMA,
                              self._tool_build_status, concurrency="serial")
+        capabilities.register("build_blueprint", BUILD_BLUEPRINT_SCHEMA,
+                             self._tool_build_blueprint, concurrency="serial")
         capabilities.register("render_build", RENDER_BUILD_SCHEMA,
                              self._tool_render_build, concurrency="parallel")
         capabilities.register("render_region", RENDER_REGION_SCHEMA,

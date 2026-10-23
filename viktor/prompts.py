@@ -66,7 +66,8 @@ CREATIVE_PROMPT = """
 2. 远地方先 pin_region 覆盖施工面(未加载的格子既不会写也不会被校验)。
 3. build_preview(program, origin=[x,y,z], facing=...) —— **不写世界**, 回差异(新放置/覆盖/已正确/未加载)、
    批量填充数、警告。看完再决定。体量大/造型复杂时, 先用 render_build 渲染 front/iso 看一眼
-   比例与屋顶收口, 别建完才发现不对劲。
+   比例与屋顶收口, 别建完才发现不对劲。玩家要求"先看个样子/立个图"时,
+   用 build_blueprint 把立面铺成混凝土马赛克墙(同样预览→提交→可撤销)。
 4. build_commit(operation_id) —— 批量写入 + 自动复读校验。
 5. **只有 verify.mismatch == 0 才能说完成**。不为 0 就按 holes(空洞)/wrong(放错)的样本坐标写补丁程序再来一遍。
 6. 写错了/玩家反悔: build_undo 还原(撤销栈只留最近 2 个, reload 会清空)。

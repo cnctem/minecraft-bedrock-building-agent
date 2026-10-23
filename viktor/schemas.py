@@ -216,6 +216,36 @@ FIND_BLOCKS_SCHEMA = {
     },
 }
 
+BUILD_BLUEPRINT_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "build_blueprint",
+        "description": (
+            "【视觉反馈·游戏内】把一个预览过的建造计划画成**彩色混凝土马赛克墙**（蓝图），"
+            "玩家在游戏里直接能看到。\n"
+            "走和建造相同的事务: 先生成预览(返回 operation_id), 再 build_commit 才真正写入, "
+            "不满意 build_undo 可撤。\n"
+            "view: front/back/left/right/top/iso; at: 墙面**左下角**世界坐标; "
+            "direction: 墙面朝向(north/south/east/west); step>1 时降采样(墙更小)。\n"
+            "配色: 浅灰=石 棕=木 绿=植物 蓝=水 淡蓝=玻璃 黄=光/金 红=火 橙=砖 白=雪/石英 品红=羊毛。"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "operation_id": {"type": "string", "description": "要画成蓝图的建造操作"},
+                "view": {"type": "string", "enum": ["front", "back", "left", "right", "top", "iso"],
+                         "description": "画哪个视角, 默认 front"},
+                "at": {"type": "array", "items": {"type": "integer"},
+                       "description": "墙面左下角世界坐标 [x, y, z]"},
+                "direction": {"type": "string", "enum": ["north", "south", "east", "west"],
+                              "description": "墙面朝向, 默认 south"},
+                "step": {"type": "integer", "description": "降采样步长, 默认 1(1 像素 1 格)"},
+            },
+            "required": ["operation_id", "at"],
+        },
+    },
+}
+
 RENDER_BUILD_SCHEMA = {
     "type": "function",
     "function": {

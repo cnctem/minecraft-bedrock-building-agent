@@ -1926,6 +1926,20 @@ api.set(6, 0, 0, "tall_grass")
     png.unlink(missing_ok=True)
     print("视觉反馈(渲染/PNG)自测 OK")
 
+    # 蓝图墙: 马赛克配色与朝向
+    palB, celB, bbB, wB, hB = R.blueprint_cells(pal3, cel3, bnd3, "front",
+                                                (10, 70, 5), "south")
+    assert (wB, hB) == (3, 2), (wB, hB)
+    assert len(celB) == 6, celB                     # 全像素铺满(含背景)
+    blocks = {str(e["b"]) for e in palB[1:]}
+    assert "minecraft:brown_concrete" in blocks, blocks   # 木板 -> 棕
+    assert "minecraft:light_gray_concrete" in blocks, blocks  # 石头 -> 浅灰
+    assert all(z == 5 for (_x, _y, z) in celB), celB       # 朝南 -> 同一 z 平面
+    _p, celE, _b, _w, _h = R.blueprint_cells(pal3, cel3, bnd3, "front",
+                                             (10, 70, 5), "east")
+    assert all(x == 10 for (x, _y, _z) in celE), celE      # 朝东 -> 同一 x 平面
+    print("蓝图墙(马赛克)自测 OK")
+
     # 模式门禁: 建造工具只在创造模式家族可见(用户明确要求)
     for mode in (MODE_NORMAL, MODE_PLAN, MODE_EXECUTE, MODE_ONESHOT):
         names = bot2._allowed_tools(mode)
