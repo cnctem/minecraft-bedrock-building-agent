@@ -98,6 +98,21 @@ for u in range(0, W):
 对称性检查是**写世界之前**抓设计错误最便宜的手段：先 `symmetry` 预览一遍，比建完再改省得多。
 悬空检查只在快照覆盖范围内判断，`scan` 要比建造范围大一圈。
 
+## 1.7 动手前先"看"一眼(视觉反馈)
+
+`build_preview` 之后、`build_commit` 之前，可用 `render_build` 把计划渲染成字符图：
+
+```text
+render_build(operation_id="b123-1", views=["front", "iso"])
+```
+
+- `front/back/left/right` 立面、`top` 俯视、`iso` 等距立体（看屋顶与体块最直观）
+- 字符图里 `.` 是空气，其余符号看图例；超宽会自动降采样
+- 同时导出 PNG 到服务器 `logs/renders/`（玩家游戏内看不到，但运营/留档可用）
+- 看已建好的东西用 `render_region(x1,y1,z1,x2,y2,z2, views=["iso"])`
+
+比例不对、屋顶收口别扭、门窗节奏乱了——在这一步就该改程序，而不是建完再返工。
+
 ## 2. 三条必须记住的语义
 
 1. **KEEP**：程序没提到的格子**不写也不删**。清空必须 `api.fill(..., "air")`。

@@ -818,6 +818,41 @@ def _b36(n: int) -> str:
     return "".join(reversed(out))
 
 
+def decode_volume(o, s, palette: list, rle: str, skip_zero: bool = True):
+    """palette + 分层 RLE -> (palette, cells, bounds)。渲染/测试用(与行为包同一套解码)。"""
+    sx, sy, sz = int(s[0]), int(s[1]), int(s[2])
+    total = sx * sy * sz
+    dense = bytearray(total)
+    pos = 0
+    if rle:
+        for part in str(rle).split(","):
+            if not part:
+                continue
+            a, b = part.split(":")
+            v, n = int(a, 36), int(b, 36)
+            end = min(total, pos + n)
+            for i in range(pos, end):
+                dense[i] = v
+            pos = end
+    cells = {}
+    layer = sx * sz
+    for i, v in enumerate(dense):
+        if skip_zero and v == 0:
+            continue
+        y = int(o[1]) + i // layer
+        rem = i % layer
+        cells[(int(o[0]) + rem % sx, y, int(o[2]) + rem // sx)] = v
+    bounds = (int(o[0]), int(o[1]), int(o[2]),
+              int(o[0]) + sx - 1, int(o[1]) + sy - 1, int(o[2]) + sz - 1)
+    return list(palette), cells, bounds
+
+
+def decode_payload(payload: dict):
+    """建造 payload(索引 0 = KEEP) -> (palette, cells, bounds)。"""
+    return decode_volume(payload["o"], payload["s"],
+                         [None] + list(payload.get("p") or ()), payload.get("rle") or "")
+
+
 def compile_build(program: str, origin: tuple, facing: str, valid_blocks=None,
                   snapshot: dict | None = None, symmetry: str | None = None) -> tuple:
     """程序 → (payload, stats)。payload 直接上行给行为包。"""

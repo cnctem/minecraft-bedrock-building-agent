@@ -216,6 +216,54 @@ FIND_BLOCKS_SCHEMA = {
     },
 }
 
+RENDER_BUILD_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "render_build",
+        "description": (
+            "【视觉反馈】把 build_preview 编译好的建造计划渲染成**字符图**（并可导出 PNG）。"
+            "不读世界、不写世界，随时可用；用来在动手前看比例、屋顶收口、立面节奏、体块关系。\n"
+            "views 可选: front(正面) / back(背面) / left / right(侧立面) / top(俯视) / iso(等距立体)。\n"
+            "字符图里 '.' 是空气, 其余符号见「图例」。大图会自动降采样。\n"
+            "PNG 会写到服务器 logs/renders/ 下(玩家看不了游戏内, 但要留档/给运营看时有用)。"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "operation_id": {"type": "string", "description": "build_preview 返回的 operation_id"},
+                "views": {"type": "array", "items": {"type": "string"},
+                          "description": "视角列表, 默认 [\"front\", \"top\"]"},
+                "scale": {"type": "integer", "description": "PNG 放大倍数, 默认 6"},
+            },
+            "required": ["operation_id"],
+        },
+    },
+}
+
+RENDER_REGION_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "render_region",
+        "description": (
+            "【视觉反馈】把世界里的一块区域渲染成字符图 + PNG（只读，用稠密快照）。\n"
+            "视角同 render_build: front/back/left/right/top/iso。\n"
+            "用途: 看玩家已有建筑的整体形态、比例、体块关系; 逐格细节仍用 get_slice/inspect_region。\n"
+            "区域体积 ≤65536 格; 未加载的格子按空气处理并会在标题里注明。"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "x1": {"type": "integer"}, "y1": {"type": "integer"}, "z1": {"type": "integer"},
+                "x2": {"type": "integer"}, "y2": {"type": "integer"}, "z2": {"type": "integer"},
+                "views": {"type": "array", "items": {"type": "string"},
+                          "description": "视角列表, 默认 [\"front\", \"top\"]"},
+                "scale": {"type": "integer", "description": "PNG 放大倍数, 默认 4"},
+            },
+            "required": ["x1", "y1", "z1", "x2", "y2", "z2"],
+        },
+    },
+}
+
 BUILD_PREVIEW_SCHEMA = {
     "type": "function",
     "function": {

@@ -186,6 +186,8 @@ python3 bot.py --test         # 解析逻辑自测
 | `build_commit(operation_id)` | **仅创造模式**：先逐格 diff（已正确的不重复写）再批量写入（`fillBlocks` + 贪心合并），最后**自动复读校验**，返回 `verify.mismatch/holes/wrong` 与样本坐标；`mismatch==0` 才算完成。大工程按阶段播报进度 |
 | `build_undo(operation_id?)` | **仅创造模式**：用提交前保存的方块体积还原（撤销栈 2 个，reload 清空） |
 | `build_status()` | **仅创造模式**：列出暂存/可撤销的建造操作 |
+| `render_build(operation_id, views?, scale?)` | **仅创造模式**：把编译好的建造计划渲染成字符图（front/back/left/right/top/iso）并导出 PNG 到 `logs/renders/`。**不读世界、不写世界**，动手前看比例与体块 |
+| `render_region(x1..z2, views?, scale?)` | 把世界里的一块区域渲染成字符图 + PNG（只读，走稠密快照）。看已建建筑的整体形态 |
 | `pin_region(x1, z1, x2, z2)` | **仅创造/执行模式下可用**：把施工面设为常加载（ticking area，自动按 ≤100 区块切片）：防止玩家走开/离线后区块卸载导致 fill 失败。**生命周期 = 创造/执行模式**：离开这些模式（切回 normal 等）或会话结束时自动移除 |
 | `set_mode(mode, reason?)` | 切换运行模式；可选目标按当前模式动态注入（普通↔创造/创造max；计划→执行；一次性无此工具） |
 | `ptc(calls, stop_on_error?)` | 批量工具调用：一次提交多条调用，合并成一条结果。**互不依赖的调用（查询/读 wiki/读资料）默认并行执行**，只等最慢一个；有副作用的调用（MC 指令、改状态、写记忆）**按数组顺序串行执行并充当屏障**，不会与前后调用并发（省往返与上下文） |

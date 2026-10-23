@@ -1905,6 +1905,27 @@ api.set(6, 0, 0, "tall_grass")
         bot2.cfg["build_progress"] = True
     print("建造进度转发自测 OK")
 
+    # 视觉反馈: 编解码往返 + 三种视角 + PNG 写入
+    from . import render as R
+    p3, st3 = B.compile_build('api.fill((0,0,0),(2,0,2),"stonebrick")\n'
+                              'api.fill((0,1,0),(2,1,0),"oak_planks")',
+                              (0, 64, 0), "south", B.block_ids())
+    pal3, cel3, bnd3 = B.decode_payload(p3)
+    assert len(cel3) == st3["cells"], (len(cel3), st3["cells"])
+    front = R.ascii_view(pal3, cel3, bnd3, "front")
+    assert "stonebrick" in front and "oak_planks" in front, front
+    assert front.splitlines()[1] == "===" and front.splitlines()[2] == "###", front
+    top = R.ascii_view(pal3, cel3, bnd3, "top")
+    assert top.count("=") >= 3, top                            # 俯视看到顶层木板
+    iso = R.ascii_view(pal3, cel3, bnd3, "iso")
+    assert "等距视图" in iso and "=" in iso, iso
+    png = R.write_png("/tmp/viktor-render-test.png", R._pixels(pal3, cel3, bnd3, "front"), 2)
+    raw = png.read_bytes()
+    assert raw[:8] == b"\x89PNG\r\n\x1a\n" and raw[12:16] == b"IHDR", raw[:16]
+    assert int.from_bytes(raw[16:20], "big") == 6, raw[16:20]      # 3 列 × scale 2
+    png.unlink(missing_ok=True)
+    print("视觉反馈(渲染/PNG)自测 OK")
+
     # 模式门禁: 建造工具只在创造模式家族可见(用户明确要求)
     for mode in (MODE_NORMAL, MODE_PLAN, MODE_EXECUTE, MODE_ONESHOT):
         names = bot2._allowed_tools(mode)

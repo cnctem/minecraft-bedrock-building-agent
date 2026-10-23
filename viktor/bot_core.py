@@ -21,6 +21,8 @@ from .schemas import (
     BUILD_PREVIEW_SCHEMA,
     BUILD_STATUS_SCHEMA,
     BUILD_UNDO_SCHEMA,
+    RENDER_BUILD_SCHEMA,
+    RENDER_REGION_SCHEMA,
     FIND_BLOCKS_SCHEMA,
     GET_BLOCK_SCHEMA,
     GET_HAND_SCHEMA,
@@ -81,6 +83,10 @@ class BotCoreMixin:
                              self._tool_build_undo, concurrency="serial")
         capabilities.register("build_status", BUILD_STATUS_SCHEMA,
                              self._tool_build_status, concurrency="serial")
+        capabilities.register("render_build", RENDER_BUILD_SCHEMA,
+                             self._tool_render_build, concurrency="parallel")
+        capabilities.register("render_region", RENDER_REGION_SCHEMA,
+                             self._tool_render_region, concurrency="bus")
         capabilities.register("pin_region", PIN_REGION_SCHEMA, self._tool_pin_region,
                              concurrency="serial")
         capabilities.register("search_wiki", SEARCH_WIKI_SCHEMA, self._tool_search_wiki,

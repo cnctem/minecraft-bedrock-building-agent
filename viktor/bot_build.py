@@ -12,13 +12,14 @@ import time
 
 import capabilities
 
-from . import build
+from . import build, render
 from .bus import Req
 from .constants import (
     BUILD_FRAME_CHARS,
     BUILD_TIMEOUT_SEC,
     PACK_PROTO_BUILD,
 )
+from . import paths
 from .paths import log
 
 
@@ -140,6 +141,10 @@ class BotBuildMixin:
         if isinstance(data, str):
             return data
         data["name"] = self._build_name(jid, name)
+        # 存下编译结果: render_build 直接用它渲染(不需要再问行为包)
+        if not hasattr(self, "_build_payloads"):
+            self._build_payloads = {}
+        self._build_payloads[jid] = payload
         log(f"[建造] 预览 {jid} {name} {stats['size']} {stats['cells']}格 "
             f"{frames}帧 {stats['payload_bytes']}B")
         return self._render_build_preview(jid, data, stats)
@@ -189,6 +194,86 @@ class BotBuildMixin:
             out.append("提示: 未加载的格子既不会写也不会被校验; 远处施工先 pin_region 覆盖。")
         out.append(f"确认无误后调用 build_commit(operation_id=\"{jid}\"); "
                    "要改就先改程序再 build_preview。")
+        return "\n".join(out)
+
+    VIEWS = ("front", "back", "left", "right", "top", "iso")
+
+    def _render_args(self, args: dict) -> tuple:
+        views = args.get("views") or ["front", "top"]
+        if isinstance(views, str):
+            views = [views]
+        views = [str(v).strip().lower() for v in views if str(v).strip()]
+        bad = [v for v in views if v not in self.VIEWS]
+        if bad:
+            return [], f"未知视角 {', '.join(bad)}; 可用: {', '.join(self.VIEWS)}"
+        return (views or ["front"]), ""
+
+    def _tool_render_build(self, args: dict) -> str:
+        """把预览过的建造计划渲染成字符图/PNG(不读世界, 不写世界)。"""
+        jid = str(args.get("operation_id") or "").strip()
+        payloads = getattr(self, "_build_payloads", {})
+        payload = payloads.get(jid)
+        if payload is None:
+            return (f"找不到 {jid} 的编译结果(可能在 bot 重启前生成的); "
+                    "重新 build_preview 一次再渲染。")
+        views, err = self._render_args(args)
+        if err:
+            return err
+        try:
+            palette, cells, bounds = build.decode_payload(payload)
+            text, pngs = render.render(
+                palette, cells, bounds, views,
+                paths.LOG_PATH.parent / "renders", name=jid,
+                scale=int(args.get("scale") or 6))
+        except Exception as e:
+            return f"渲染失败: {e}"
+        out = [f"渲染 {jid} 「{self._build_name(jid) or '未命名'}」 "
+               f"{len(cells)} 格, 包围盒 {bounds[3]-bounds[0]+1}×{bounds[4]-bounds[1]+1}×{bounds[5]-bounds[2]+1}",
+               text]
+        if pngs:
+            out.append("PNG: " + ", ".join(str(p) for p in pngs))
+        log(f"[渲染] {jid} views={views} cells={len(cells)} png={len(pngs)}")
+        return "\n".join(out)
+
+    def _tool_render_region(self, args: dict) -> str:
+        """把世界里的一块区域渲染成字符图(只读; 用稠密快照)。"""
+        if err := self._require_spatial():
+            return err
+        try:
+            box = tuple(int(args[k]) for k in ("x1", "y1", "z1", "x2", "y2", "z2"))
+        except (KeyError, TypeError, ValueError):
+            return "需要整数坐标 x1 y1 z1 x2 y2 z2。"
+        views, err = self._render_args(args)
+        if err:
+            return err
+        xs = (min(box[0], box[3]), max(box[0], box[3]))
+        ys = (min(box[1], box[4]), max(box[1], box[4]))
+        zs = (min(box[2], box[5]), max(box[2], box[5]))
+        vol = ((xs[1]-xs[0]+1) * (ys[1]-ys[0]+1) * (zs[1]-zs[0]+1))
+        if vol > build.MAX_VOLUME:
+            return f"区域 {vol} 格超过上限 {build.MAX_VOLUME}, 请缩小范围。"
+        rid = self.bus.next_id()
+        cmd = (f"scriptevent viktor:snapshot {rid} {xs[0]} {ys[0]} {zs[0]}"
+               f" {xs[1]} {ys[1]} {zs[1]} overworld")
+        data = self._build_result("snapshot", self._build_await(rid, cmd))
+        if isinstance(data, str):
+            return data
+        try:
+            palette, cells, bounds = build.decode_volume(
+                data["o"], data["s"], data["p"], data.get("rle") or "")
+            text, pngs = render.render(
+                palette, cells, bounds, views,
+                paths.LOG_PATH.parent / "renders",
+                name=f"region-{xs[0]}_{ys[0]}_{zs[0]}",
+                scale=int(args.get("scale") or 4))
+        except Exception as e:
+            return f"渲染失败: {e}"
+        out = [f"区域渲染 ({xs[0]}, {ys[0]}, {zs[0]})..({xs[1]}, {ys[1]}, {zs[1]}) "
+               f"{vol} 格" + (f", 未加载 {data.get('unloaded')} 格" if data.get("unloaded") else ""),
+               text]
+        if pngs:
+            out.append("PNG: " + ", ".join(str(p) for p in pngs))
+        log(f"[渲染] 区域 {xs[0]},{ys[0]},{zs[0]} views={views} cells={len(cells)}")
         return "\n".join(out)
 
     def _tool_build_commit(self, args: dict) -> str:
