@@ -22,7 +22,10 @@
 | `manifest.json`（依赖/版本/UUID） | 必须**重启服务端**，`reload` 不重读 manifest |
 
 改完先 `node --check scripts/main.js` 过一遍语法（BDS 报错信息很难读），再 `reload`；
-`reload` 后用 `scriptevent viktor:hello test` 验一下握手是否还回 `[VIKTOR-HELLO] test v2`。
+`reload` 后用 `scriptevent viktor:hello test` 验一下握手是否还回 `[VIKTOR-HELLO] test v4`。
+
+依赖版本（BDS 1.21.132.3）：`@minecraft/server` = `2.5.0-beta`，`@minecraft/server-ui` = `2.1.0-beta`。
+稳定版 `2.4.0`/`2.0.0` 能加载但 `world.beforeEvents.chatSend` 为 undefined（聊天桥会失效），不要改回去。
 
 ## 协议
 
