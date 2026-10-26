@@ -2136,6 +2136,160 @@ api.set(6, 0, 0, "tall_grass")
     assert "108 格本来就对" in idem, idem
     print("建造渲染自测 OK")
 
+    # ===== 模型切换自测(会话级模型: 清空 / 清空k / 清空g) =====
+    from . import models as _models
+    # 触发词精确匹配: 认不出来的(清空x / 清空 k)当普通聊天, 不清上下文
+    assert _models.resolve_trigger(bot2.cfg, "清空") == "flash"
+    assert _models.resolve_trigger(bot2.cfg, "清空k") == "kimi"
+    assert _models.resolve_trigger(bot2.cfg, "清空g") == "gpt"
+    assert _models.resolve_trigger(bot2.cfg, "清空x") is None
+    assert _models.resolve_trigger(bot2.cfg, "清空 k") is None, "必须精确匹配, 不认空格"
+    assert _models.resolve_trigger(bot2.cfg, "清空一下") is None
+    said = []
+    orig_say4 = bot2.bridge.say_as_viktor
+    bot2.bridge.say_as_viktor = lambda text, *a, **k: said.append(text)
+    if not bot2.session:
+        bot2.players.add("T")
+        bot2._start_session()
+    bot2.agent_busy = False
+    bot2.pending.clear()
+    # gpt 预留未接通: 不清空、不换模型, 只提示
+    bot2.model_alias = "flash"
+    before = len(bot2.session.messages)
+    bot2._on_clear("Tester", "gpt")
+    assert bot2.model_alias == "flash" and said and "还没有接通" in said[0], said
+    assert len(bot2.session.messages) >= before, "未接通的模型不应清空上下文"
+    # 有任务在跑: 清空k 无效(和普通清空同一并发规则), 模型不变
+    said.clear()
+    bot2.agent_busy = True
+    bot2._on_clear("Tester", "kimi")
+    assert bot2.model_alias == "flash" and "清空无效" in said[-1], said
+    bot2.agent_busy = False
+    # 清空k: 开新会话 + 换模型 + [系统]提示里点名模型
+    said.clear()
+    bot2._on_clear("Tester", "kimi")
+    assert bot2.model_alias == "kimi" and bot2.session.model == "kimi", bot2.model_alias
+    assert "Kimi" in said[-1], said
+    # 模型档案: 模型名/窗口/输出上限都按 kimi 来(窗口故意设 262144 控成本)
+    kspec = bot2._model_spec()
+    assert kspec["model"] == "k3.1-pro" and kspec["context_window_tokens"] == 262144
+    assert kspec["api_base"] == "https://api.kimi.com/coding/v1"
+    assert kspec["reasoning_content"] is False
+    # 请求体差异: 模型名 / reasoning_effort / 温度固定 1 / 不发 deepseek 的 effort
+    bot2.mode = MODE_NORMAL
+    kp = bot2._mode_params()
+    kpayload = json.loads(bot2._build_payload([], kp))
+    assert kpayload["model"] == "k3.1-pro" and kpayload["reasoning_effort"] == "low", kpayload
+    assert "effort" not in kpayload and kpayload["temperature"] == 1, kpayload
+    bot2.mode = MODE_CREATIVE
+    assert json.loads(bot2._build_payload([], bot2._mode_params()))["reasoning_effort"] == "high"
+    bot2.mode = MODE_CREATIVE_MAX
+    assert json.loads(bot2._build_payload([], bot2._mode_params()))["reasoning_effort"] == "max"
+    bot2.mode = MODE_NORMAL
+    assert kp["max_tokens"] <= kspec["max_output_tokens"] == 32768
+    assert bot2._input_token_budget() < 262144, "输入预算应按 kimi 的窗口算"
+    # 一次性对话固定用默认模型(flash), 不受主会话当前模型影响
+    bot2.model_alias = "kimi"
+    bot2._tls.oneshot = True
+    assert bot2._model_spec()["alias"] == "flash", "一次性对话应固定 flash"
+    del bot2._tls.oneshot
+    bot2.model_alias = "flash"
+    # 不需要回传思考链的模型: 压缩时不补 reasoning_content(省输入 token)
+    cmsgs = [{"role": "user", "content": "T: 好"},
+             {"role": "assistant", "content": None, "reasoning_content": "想想",
+              "tool_calls": [{"id": "c1", "type": "function",
+                              "function": {"name": "send_chat_message",
+                                           "arguments": json.dumps({"text": "嗯"},
+                                                                   ensure_ascii=False)}}]},
+             {"role": "tool", "tool_call_id": "c1", "content": "ok"}]
+    kept_k, _ = Session.compact(cmsgs, keep_reasoning=False)
+    kept_d, _ = Session.compact(cmsgs, keep_reasoning=True)
+    assert "reasoning_content" not in kept_k[1], kept_k
+    assert kept_d[1].get("reasoning_content") == "", kept_d
+    # 落盘记录会话模型; 恢复会话按落盘的模型切过去(跨模型恢复不会灌错口径)
+    msess = Session(4242, model="kimi")
+    msess.add_user("T: 你好")
+    msess.messages.append({"role": "assistant", "content": None, "tool_calls": [
+        {"id": "m1", "type": "function",
+         "function": {"name": "stay_silent", "arguments": "{}"}}]})
+    msess.messages.append({"role": "tool", "tool_call_id": "m1", "content": "ok"})
+    mp = msess.dump()
+    assert mp is not None, "有对话应落盘"
+    assert json.loads(mp.read_text(encoding="utf-8").splitlines()[0])["_meta"]["model"] == "kimi"
+    saved_alias, saved_session = bot2.model_alias, bot2.session
+    bot2.model_alias = "flash"
+    bot2.resume_session(str(mp))
+    assert bot2.model_alias == "kimi" and bot2.session.model == "kimi", bot2.model_alias
+    assert all("reasoning_content" not in m for m in bot2.session.messages
+               if m["role"] == "assistant"), "kimi 会话恢复不该补思考链"
+    # 「恢复会话d」: 强制用默认模型灌回同一段 kimi 对话(模型不可用/想省钱时用),
+    # 并且要给 assistant 补 reasoning_content(DeepSeek 思考模式 + tools 的要求)
+    bot2.agent_busy = False
+    bot2.pending.clear()
+    said.clear()
+    bot2._on_restore_session("Tester", force_default=True)
+    assert bot2.model_alias == "flash" and bot2.session.model == "flash", bot2.model_alias
+    assert all(m.get("reasoning_content") == "" for m in bot2.session.messages
+               if m["role"] == "assistant"), "强制默认模型恢复时应补思考链字段"
+    assert said and "原会话是 kimi" in said[-1], said
+    bot2.model_alias, bot2.session = saved_alias, saved_session
+    mp.unlink(missing_ok=True)
+    # 控制词分发: 「恢复会话d」走程序分支, 不进待处理队列(不进上下文)
+    bot2.agent_busy = False
+    bot2.pending.clear()
+    said.clear()
+    bot2.process_line("[2026-10-26 21:00:00:000 INFO] <Tester> 恢复会话d")
+    assert not bot2.pending, "控制词不该进队列"
+    assert bot2.model_alias == "flash", bot2.model_alias
+    assert said and "已恢复上一段会话" in said[-1], said
+    bot2.model_alias, bot2.session = saved_alias, saved_session
+    bot2.bridge.say_as_viktor = orig_say4
+    print("模型切换自测 OK(清空 / 清空k / 清空g 预留)")
+
+    # ===== 模型报错提示自测(400/429/其他 -> 原样转发一句 [系统]) =====
+    bot2.model_alias = "kimi"
+    _n429 = bot2._api_failure_note(Exception(
+        'HTTP 429: {"error":{"message":"Rate limit reached for requests"}}'))
+    assert "429" in _n429 and "Kimi" in _n429 and "Rate limit reached" in _n429, _n429
+    assert "清空" not in _n429 and "恢复会话d" not in _n429, "只转发模型返回的内容, 不罗列建议"
+    # 原因按 [:40] 截断(不把整段 JSON 刷进聊天)
+    _n400 = bot2._api_failure_note(Exception(
+        'HTTP 400: {"error":{"message":"' + "X" * 120 + '"}}'))
+    assert "400" in _n400 and "X" * 40 in _n400 and "X" * 41 not in _n400, _n400
+    # 非 HTTP 异常(超时/DNS/解析)也必须说话, 不能只在日志里
+    _nnet = bot2._api_failure_note(RuntimeError("URLError: <urlopen error timed out>"))
+    assert "URLError" in _nnet and "kimi" in _nnet, _nnet
+    bot2.model_alias = "flash"
+    # 错误正文解析: JSON 里抠 error.message; 非 JSON 压成一行
+    assert bot2._error_detail('{"error":{"message":"Insufficient Balance"}}') \
+        == "Insufficient Balance"
+    assert bot2._error_detail("line1\nline2  x") == "line1 line2 x"
+    # worker 出错: 必须发一条带状态码的 [系统], 且不影响后续(不进上下文/busy 复位)
+    bot2.session = Session(3001)
+    bot2.session.add_system(memory_note())
+    bot2.pending.clear()
+    bot2.pending.append(("A", "查一下坐标"))
+    bot2.running = True
+    _orig_call_api, _orig_sys_err = bot2.call_api, bot2._sys
+    _errs = []
+    bot2.call_api = lambda: (_ for _ in ()).throw(
+        RuntimeError('HTTP 429: {"error":{"message":"Rate limit reached"}}'))
+    bot2._sys = lambda text: _errs.append(text)
+    import threading as _th3
+    _wt = _th3.Thread(target=bot2._worker, daemon=True)
+    _wt.start()
+    time.sleep(0.5)
+    bot2.running = False
+    with bot2.cv:
+        bot2.cv.notify_all()
+    _wt.join(timeout=2)
+    bot2.call_api, bot2._sys = _orig_call_api, _orig_sys_err
+    assert _errs and "429" in _errs[0] and "没处理" in _errs[0], _errs
+    assert not bot2.agent_busy, "出错后必须复位 busy"
+    assert not any(m.get("role") == "assistant" for m in bot2.session.messages), \
+        "API 出错不应写 assistant 消息"
+    print("模型报错提示自测 OK(400/429/其他 -> [系统])")
+
     r = bot2._tool_run_command({"command": "list"})
     assert r.strip() and "禁止" not in r, r
     print(r)

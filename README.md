@@ -41,9 +41,9 @@ bot.py(入口) → viktor.selftest(--test)
         viktor.Bot = BotCoreMixin + BotControlMixin + BotToolsMixin
                      + BotAgentMixin + BotAppMixin    ← 职责 mixin, 彼此不 import,
                    │                                     只用 self.* 经 MRO 协作
-        session / bus / bridge / config / profiles
+        session / bus / bridge / config / profiles / models
                    │
-        paths / constants / prompts / schemas          ← 叶子层(不依赖项目内其它模块)
+        paths / constants / prompts / schemas / models ← 叶子层(不依赖项目内其它模块)
 ```
 
 | 模块 | 职责 |
@@ -51,11 +51,12 @@ bot.py(入口) → viktor.selftest(--test)
 | `viktor/bot_core.py` | 构造、请求上下文(`_tls` 回落)、会话生命周期、待处理队列 |
 | `viktor/bot_control.py` | 控制词(停止/清空/压缩/计划模式/恢复会话)、一次性对话调度 |
 | `viktor/bot_tools.py` | 全部 `_tool_*` handler：聊天/查询(bus)/指令/常加载/备份/模式切换 |
-| `viktor/bot_agent.py` | 模式参数、DeepSeek function calling 循环、worker 与收尾汇报 |
+| `viktor/bot_agent.py` | 模式参数、function calling 循环、worker 与收尾汇报（请求按当前模型档案拼） |
 | `viktor/bot_app.py` | `logs/server.log` tail 解析、启动握手、主循环 |
 | `viktor/session.py` | `Session`(append-only 上下文) 与 `OneShotContext` |
 | `viktor/bus.py` / `viktor/bridge.py` | 服务端请求总线 / `screen` 注入与 `tellraw` |
 | `viktor/profiles.py` | 模式组合表：提示词 × 限制 × 工具白名单 |
+| `viktor/models.py` | 模型档案：触发词 / 模型 ID / Base URL / key / 窗口 / 输出上限 / 思考强度映射 / 是否回传思考链 / 温度 |
 | `viktor/prompts.py` / `viktor/schemas.py` / `viktor/constants.py` / `viktor/paths.py` | 提示词 / 工具 schema / 常量 / 路径与日志(叶子层) |
 | `capabilities.py` | 能力注册表(工具注册、ptc、记忆、技能书、物品速查) |
 
@@ -331,7 +332,7 @@ BDS 控制台 **不回显玩家聊天**，所以用行为包 `viktor_bridge` 订
 - 所有大范围查询都用 `system.runJob` 按 `CELLS_PER_TICK=512` 切片让出主线程，不卡世界。
 - `scriptevent viktor:ids` → 分块输出全部物品/方块 ID（`[VIKTOR-IDS] ITEMS/BLOCKS …`、末行 `DONE`），供离线重建 ID 速查表
 
-需要 `@minecraft/server` 的 **beta** 模块与 `level.dat` 里的实验开关。
+需要 **beta** 模块（BDS 1.21.132.3 的稳定版只有 server `2.4.0` / ui `2.0.0`，`chatSend` 只在 beta 里有，故现用 server `2.5.0-beta` + ui `2.1.0-beta`）与 `level.dat` 里的实验开关。
 修改脚本后用控制台 `reload` 热重载，不必重启服务器（改 `manifest.json` 依赖才需重启）。
 
 行为包源码就放在本仓库 `behavior_pack/viktor_bridge/`（见该目录 [README](behavior_pack/README.md)），
@@ -383,7 +384,7 @@ BDS 控制台 **不回显玩家聊天**，所以用行为包 `viktor_bridge` 订
 
 控制词消息**不进上下文**，以免在多线程追加时插到工具序列中间。
 
-## 清空（重置会话）
+## 清空（重置会话）与模型切换
 
 玩家单独发一条 **`清空`**（完全匹配）时，不走模型，直接对整个会话做**完整初始化**——
 和「玩家数 0 → 1」开新会话完全一致：
@@ -394,6 +395,30 @@ BDS 控制台 **不回显玩家聊天**，所以用行为包 `viktor_bridge` 订
 
 上下文超过输入预算时先自动**压缩**（见下节）；压缩后仍超预算（例如玩家消息本身就超）才由
 `_maybe_compact_for_size()` 触发**同一套完整初始化**。清空/自动清空后旧会话已落盘，可用下面的 `恢复会话` 找回。
+
+### 换模型（`清空k` 等带后缀的触发词）
+
+模型是**会话级**的：只能在开新会话时选定，**会话内不能切换**（中途换模型会让缓存与思考链口径全部失效）。
+所以「清空」系列控制词同时兼任模型选择，其它写法都不生效（必须完全匹配，`清空 k`、`清空x` 都当普通聊天）：
+
+| 触发词 | 模型 | 说明 |
+|---|---|---|
+| `清空` | `flash` / DeepSeek Flash（`deepseek-flash`） | 默认模型，也是玩家进服自动开新会话用的模型 |
+| `清空k` | `kimi` / Kimi K3.1 Pro（`k3.1-pro`） | Kimi Code 订阅（`https://api.kimi.com/coding/v1`），窗口按 262144 主动限流控成本 |
+| `清空g` | `gpt` / GPT-6 Astra（`gpt-6-astra`） | **预留未接通**：档案里 `enabled: false`，发了只回一句“还没有接通”，不清空、不换模型 |
+
+- 每个模型的触发词、模型 ID、Base URL、API key、上下文窗口、输出上限、思考强度字段与映射、
+  是否需要回传思考链、采样温度，都在 `config.json` 的 `models` 段里（见“配置”）。
+- 同一个「清空」并发规则：有任务在跑（`agent_busy` 或队列有待处理消息）时**清空无效**，
+  模型也不变——先「停止」/「强制停止」再清。
+- 清空回执里会点名新模型：`[系统] 上下文已清空(丢弃 N 条消息), 现在用 Kimi K3.1 Pro 模型。…`
+- **一次性对话（`1 ...`）永远用默认模型 `flash`**，不受当前会话模型影响，也不能切换。
+- 会话落盘（`logs/sessions/*.jsonl`）首行 `_meta` 记着这段会话的模型；「恢复会话」会**按落盘时的模型**
+  把当前模型切过去，避免把 Kimi 的历史（不回传思考链）灌进 DeepSeek 会话（会 400）。
+- 思考强度：模式只产出 `low/high/max` 三档，由模型档案的 `effort_param` / `effort_map` 决定怎么发。
+  DeepSeek 用顶层 `effort`；Kimi 用 `reasoning_effort`（其文档规定 low/high/max，且**只允许温度 1**，
+  所以 kimi 档案里 `temperature: 1`）；Kimi 的 `reasoning_content` 不需要回传（实测可省略），
+  因此 `reasoning_content: false`——既省输入 token，也不影响后续轮次。
 
 ## 压缩（保留对话，移除过程）
 
@@ -426,9 +451,21 @@ BDS 控制台 **不回显玩家聊天**，所以用行为包 `viktor_bridge` 订
 
 - 每次完整初始化（`0→1` / `清空` / 超预算兜底清空）都会把旧会话落盘到 `logs/sessions/session-*.jsonl`；`恢复会话`（与 `restart.sh` 自动恢复）取其中最新的一个；压缩留档 `compact-*.jsonl` 不参与。
   **只有系统注记、没有实际对话的会话不落盘**（玩家进服后立刻退出/重启不会留下空文件），恢复时也会跳过历史遗留的这类空会话文件。
+- **模型**：默认按落盘会话自己记录的模型恢复（`_meta.model`，老文件没有就当默认模型）——
+  这样 Kimi 会话恢复出来还是 Kimi，思考链口径不会串。想强制换回默认模型就用 **`恢复会话d`**（见下）。
 - 模式也从那条会话最后一条模式注记（`# 当前模式: …`）推断恢复。
 - 旧版落盘里带 `tool_calls` 的 assistant 可能缺 `reasoning_content`，恢复时统一补空串，避免思考模式 + tools 报 400。
 - 新会话开始（`0→1` 进服）会回一条 `[系统] 新会话已开始。发送「恢复会话」可找回上一段对话。`
+
+### `恢复会话d`（强制用默认模型接着聊）
+
+`恢复会话d`（完全匹配，任何玩家，不走模型）和 `恢复会话` 做同一件事，唯一区别是**忽略落盘会话记录的模型，
+强制用默认模型 `flash` 灌回**：
+
+- 典型场景：Kimi 那边欠费/限流/临时想省钱，但那段对话还想接着用；默认入口会把它恢复成 Kimi，带 `d` 就是 DeepSeek。
+- 思考链口径会自动对齐：Kimi 的历史里没有 `reasoning_content`，强制恢复成 DeepSeek 时按 DeepSeek 的要求
+  统一补空串（否则思考模式 + tools 会 400）；反之恢复成 Kimi 时会把该字段剥掉，省输入 token。
+- 回执里会点名换模型的原因：`[系统] 已恢复上一段会话(…, 模型 flash(DeepSeek Flash)(原会话是 kimi(Kimi K3.1 Pro), 已按你的要求改用默认模型), 模式 普通)。`
 - **平滑重启**：以 `VIKTOR_RESTORE=<落盘会话路径>` 启动时，启动后自动把该会话灌回（静默、不发聊天），
   用于升级/重启时对玩家无感。先 `kill -TERM <pid>` 优雅退出（会落盘），再用该环境变量重启即可。
 
@@ -442,9 +479,26 @@ BDS 控制台 **不回显玩家聊天**，所以用行为包 `viktor_bridge` 订
   - 回执两条：开始 `[系统] 正在备份存档, 服务器会卡几十秒, 请稍候…` → 完成 `[系统] 备份完成: <路径> (<大小>MB, 用时 <N> 秒)。世界写入已恢复。`；失败回一条 `[系统] 备份失败: …`。
   - **不可中止**：备份在后台线程跑（不阻塞聊天解析），「强制停止」不会打断它（只回“无法中止”）；备份期间新消息只排队（不开新任务）、一次性对话被拒，备份结束后自动继续处理。
 
+## 模型报错怎么呈现
+
+玩家看不到「正文」，API 一失败就只剩沉默，最容易被误解成“卡了”。所以**最终失败**（重试用尽或不可重试）时，
+程序一律补一条 `[系统]`，内容**只转发模型实际返回的东西**，不做状态码解释、不罗列建议：
+
+```
+[系统] kimi(Kimi K3.1 Pro) 请求失败: HTTP 402 Insufficient Balance。这条消息没处理。
+[系统] flash(DeepSeek Flash) 请求失败: HTTP 429 Rate limit reached for requests。这条消息没处理。
+[系统] flash(DeepSeek Flash) 请求失败: URLError: <urlopen error timed out>。这条消息没处理。
+```
+
+- 格式：`模型(显示名) 请求失败: HTTP <状态码> <模型返回的 message>`，message 取 JSON 里的 `error.message`
+  或原文，压成一行并 `[:40]` 截断（和 `[工具]` 转发同样的截断口径）；非 HTTP 异常带异常类型名。
+- 重试过程只进 `logs/bot.log`（`[API] HTTP 429 … — 2.0s 后第 2/3 次尝试`），聊天里只出现最终那一条。
+- 覆盖三处：主对话回合、一次性对话（`1 …`）、工具轮次用尽后的收尾汇报失败——都不再让玩家对着沉默。
+- 「强制停止」后的失败不播报（那是玩家主动中止的，不是错误）。
+
 ## 控制面词
 
-硬编码、完全匹配、**不走模型、不进上下文**：`停止` / `强制停止` / `不停止` / `清空` / `压缩` / `状态` / `备份` / `计划模式` / `退出计划` / `恢复会话` / `正文开` / `正文关` / `工具开` / `工具关`；以 `0 ` 开头的静默消息直接丢弃（见「静默消息」）；其余所有聊天仍交给模型判断。
+硬编码、完全匹配、**不走模型、不进上下文**：`停止` / `强制停止` / `不停止` / `清空` / `清空k` / `清空g` / `压缩` / `状态` / `备份` / `计划模式` / `退出计划` / `恢复会话` / `恢复会话d` / `正文开` / `正文关` / `工具开` / `工具关`（`清空*` 见「换模型」）；以 `0 ` 开头的静默消息直接丢弃（见「静默消息」）；其余所有聊天仍交给模型判断。
 
 程序生成的控制面回执一律带 **`[系统]`** 前缀（如 `[系统] 已清空…`、`[系统] 已切换到计划模式…`），且**不带 `<维克托>` 前缀**（与 `[正文]`/`[工具]` 一致）；模型经 `send_chat_message` 发出的回复才带 `<维克托>`——玩家据此区分「系统提示」与「AI 发言」。
 
@@ -460,10 +514,11 @@ BDS 控制台 **不回显玩家聊天**，所以用行为包 `viktor_bridge` 订
 
 | 键 | 说明 |
 |---|---|
-| `model` / `temperature` / `max_reply_tokens` / `api_timeout_sec` | DeepSeek 参数 |
+| `model` / `temperature` / `max_reply_tokens` / `api_timeout_sec` | 默认模型(flash)的参数；每个模型的具体差异见 `models` 段 |
+| `models` | 模型档案表，键是别名（`flash` / `kimi` / `gpt`）：`label` / `trigger`（控制词，如 `清空k`）/ `api_base` / `api_key` / `model` / `context_window_tokens` / `max_output_tokens` / `effort_param` / `effort_map` / `reasoning_content` / `temperature` / `enabled`。缺 Base URL/key/模型名即视为未接通。`flash` 的身份字段与窗口默认继承顶层配置（老配置不写 `models` 段也能跑） |
 | `api_min_interval_sec` | 全局 API 最小间隔（保护缓存前缀顺序与限流）；每次尝试（含重试）都遵守 |
-| `api_max_attempts` / `api_retry_backoff_sec` | 单次 API 请求的最大尝试次数（默认 3）与指数退避基数秒（默认 1，上限 30s，尊重 `Retry-After`）。只对超时/429/5xx 等瞬态错误重试；400/401 等直接失败。全部尝试失败时回一条 `[系统]` 告诉玩家稍后重发 |
-| `context_window_tokens` / `context_safety_tokens` | 模型窗口（`deepseek-flash` 为 1M）与安全余量。输入预算 = 窗口 − 本轮输出上限 − 余量；超出预算自动**压缩**（只留玩家消息与发言），压缩后仍超才整段清空并完整初始化；自动处理的通知受 `notify_context_clear` 控制 |
+| `api_max_attempts` / `api_retry_backoff_sec` | 单次 API 请求的最大尝试次数（默认 3）与指数退避基数秒（默认 1，上限 30s，尊重 `Retry-After`）。只对超时/429/5xx 等瞬态错误重试；400/401 等直接失败。全部尝试失败时回一条 `[系统]`，**原样转发模型返回的报错**（模型名 + HTTP 状态码 + 返回正文里的 message，截 40 字），例如 `[系统] kimi(Kimi K3.1 Pro) 请求失败: HTTP 402 Insufficient Balance。这条消息没处理。` |
+| `context_window_tokens` / `context_safety_tokens` | 模型窗口（`deepseek-flash` 为 1M；其它模型见 `models` 段，kimi 故意设 262144）与安全余量；70/80/90% 提醒也按这个分母。输入预算 = 窗口 − 本轮输出上限 − 余量；超出预算自动**压缩**（只留玩家消息与发言），压缩后仍超才整段清空并完整初始化；自动处理的通知受 `notify_context_clear` 控制 |
 | `reply_chunk_len` / `reply_max_chunks` | 回复分片发送，防止过长 |
 | `mc_server_dir` | 服务器目录（备份时定位世界存档） |
 | `command_blocklist` | 禁止执行的指令 |

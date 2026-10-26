@@ -2,6 +2,37 @@
   "api_key": "在此填入你的 DeepSeek API key",
   "api_base": "https://api.deepseek.com",
   "model": "deepseek-flash",
+  "models": {
+    "flash": {
+      "label": "DeepSeek Flash",
+      "trigger": "清空"
+    },
+    "kimi": {
+      "label": "Kimi K3.1 Pro",
+      "trigger": "清空k",
+      "api_base": "https://api.kimi.com/coding/v1",
+      "api_key": "在此填入你的 Kimi Code API key",
+      "model": "k3.1-pro",
+      "context_window_tokens": 262144,
+      "max_output_tokens": 32768,
+      "effort_param": "reasoning_effort",
+      "reasoning_content": false,
+      "temperature": 1
+    },
+    "gpt": {
+      "enabled": false,
+      "label": "GPT-6 Astra",
+      "trigger": "清空g",
+      "api_base": "",
+      "api_key": "",
+      "model": "gpt-6-astra",
+      "context_window_tokens": 262144,
+      "max_output_tokens": 32768,
+      "effort_param": "reasoning_effort",
+      "reasoning_content": false,
+      "temperature": null
+    }
+  },
   "normal_effort": "low",
   "creative_effort": "high",
   "creative_max_effort": "max",

@@ -7,9 +7,9 @@
         viktor.Bot = BotCoreMixin + BotControlMixin + BotToolsMixin + BotBuildMixin
                      + BotAgentMixin + BotAppMixin      ← 各职责 mixin(彼此不 import,
         │                                                只用 self.* 经 MRO 协作)
-        session / bus / bridge / config / profiles
+        session / bus / bridge / config / profiles / models
         │
-        paths / constants / prompts / schemas           ← 叶子层
+        paths / constants / prompts / schemas / models ← 叶子层
 
 同一层的模块之间也尽量不互相依赖; 需要跨职责协作时, 通过组合后的 Bot 实例(self.*)完成。
 """

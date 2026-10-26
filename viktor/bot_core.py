@@ -10,7 +10,7 @@ import time
 
 import capabilities
 
-from . import paths
+from . import models, paths
 from .bridge import ScreenBridge
 from .bus import ServerBus
 from .constants import CREATIVE_MODES, MODE_NORMAL
@@ -123,6 +123,9 @@ class BotCoreMixin:
         self.agent_busy = False          # 当前是否有任务在跑(供停止词判断)
         self._nudge = False              # 置位 = 唤醒 worker 但不带用户消息(计划模式主动引导用)
         self.mode = MODE_NORMAL          # 主对话当前模式(见 MODES); 一次性线程各自用 MODE_ONESHOT
+        # 主对话当前模型别名(见 models.py): 只在「清空」/「清空k」开新会话时选定,
+        # 会话内不可切换; 一次性对话固定用默认模型, 不受这里影响。
+        self.model_alias = models.DEFAULT_MODEL
         self._pinned: list[str] = []     # 本轮任务设置的常加载区域名(轮次结束自动移除)
         self._context_warn_level = 0     # 上下文占用提醒已报到哪一档(70 起; 压缩/新会话后复位)
         self.body_forward = False        # 正文转发开关(玩家用「正文开/关」切换; 仅显示, 不进上下文)
@@ -171,6 +174,19 @@ class BotCoreMixin:
     def _oneshot(self) -> bool:
         return getattr(self._tls, "oneshot", False)
 
+    # ---------- 模型(会话级) ----------
+
+    def _model_alias(self) -> str:
+        """当前请求用的模型别名。一次性对话固定用默认模型(flash), 与主会话当前模型无关。"""
+        return models.DEFAULT_MODEL if self._oneshot() else self.model_alias
+
+    def _model_spec(self) -> dict:
+        """当前请求的模型档案(模型名/Base URL/key/窗口/输出上限/思考强度映射等)。"""
+        return models.spec(self.cfg, self._model_alias())
+
+    def _model_label(self) -> str:
+        return models.describe(self.cfg, self._model_alias())
+
     @property
     def creative_mode(self) -> bool:
         """是否处于创造模式(creative 或 creative_max)。"""
@@ -181,7 +197,7 @@ class BotCoreMixin:
 
     def _start_session(self):
         self.session_counter += 1
-        self.session = Session(self.session_counter)
+        self.session = Session(self.session_counter, model=self.model_alias)
         # 长期记忆作为第一条系统注记追加进日志(而不是写进固定的 system 前缀),
         # 之后每次 update_memory 再追加新注记, 前缀始终稳定。
         self.session.add_system(memory_note())
@@ -195,7 +211,8 @@ class BotCoreMixin:
         self.tool_forward = True
         self._context_warn_level = 0  # 新会话上下文占用从零开始, 提醒档位复位
         self._dialog.clear()          # 新会话 = 新对话: 旧会话的「正在聊」状态一并作废
-        log(f"=== 会话 #{self.session.id} 开始 (玩家: {sorted(self.players)}) ===")
+        log(f"=== 会话 #{self.session.id} 开始 (玩家: {sorted(self.players)}, "
+            f"模型: {self._model_label()}) ===")
 
     def _end_session(self):
         self._unpin_all()  # 兜底: 会话结束时不留常加载区域
@@ -205,7 +222,8 @@ class BotCoreMixin:
         if self.session:
             self.session.dump()
             log(f"=== 会话 #{self.session.id} 结束 "
-                f"(消息 {len(self.session.messages)} 条, AI 回复 {self.session.replied_count} 次) ===")
+                f"(消息 {len(self.session.messages)} 条, AI 回复 {self.session.replied_count} 次, "
+                f"模型: {models.describe(self.cfg, self.session.model)}) ===")
             self.session = None
 
     def _on_join(self, name: str, xuid: str | None = None):
@@ -219,8 +237,10 @@ class BotCoreMixin:
         """玩家数 0→1: 完整初始化会话(与“清空”同一套 _reset_session)。
         若此时有任务在跑: 不初始化也不挂起初始化, 只发一条提示告知任务在进行,
         并介绍可用的控制词(停止/强制停止/压缩/清空)。玩家全部离开期间会话不结束,
-        任务可以跨离线期继续做。"""
+        任务可以跨离线期继续做。模型跟普通「清空」一样回到默认(flash);
+        只有在真的重开会话时才复位——有任务在跑(沿用旧会话)时不能改, 否则新旧对不上。"""
         if not self.session:
+            self.model_alias = models.DEFAULT_MODEL
             self._start_session()
             self._say_later("新会话已开始。发送「恢复会话」可找回上一段对话。", system=True)
             return
@@ -234,6 +254,7 @@ class BotCoreMixin:
                 "要我停就发「停止」(做完当前这一步再停)或「强制停止」(立即中止); "
                 "想压缩或清空上下文, 请先停下再发「压缩」或「清空」。", system=True)
             return
+        self.model_alias = models.DEFAULT_MODEL
         n = self._reset_session()
         log(f"[清空] {name} 进服(0→1), 已完整初始化新会话(丢弃 {n} 条消息)")
         self._say_later("新会话已开始。发送「恢复会话」可找回上一段对话。", system=True)

@@ -30,13 +30,15 @@ FORCE_STOP_WORD = "强制停止"  # 控制面: 立即中止当前任务(连工�
 SOFT_STOP_WORD = "停止"      # 控制面: 到安全点停止(当前步骤做完、工具往返闭合后停)
 NO_STOP_WORD = "不停止"       # 控制面: 撤销还未生效的停止/强制停止
 PIN_NAME = "viktor_pin"  # 常加载区域命名前缀(仅创造/执行模式; 离开即清理)
-CLEAR_WORD = "清空"  # 控制面: 清空会话上下文(任何玩家可触发, 不进上下文)
+CLEAR_WORD = "清空"  # 控制面: 默认模型的清空触发词(其余触发词见 models.py 的模型档案;
+                     # 实际分发用 models.resolve_trigger, 这里只作默认值/文档)
 COMPACT_WORD = "压缩"  # 控制面: 压缩会话上下文(只留玩家消息与发言, 不进上下文)
 STATUS_WORD = "状态"  # 控制面: 播报服务器进程/负载/在线玩家(任何玩家可触发, 不进上下文)
 BACKUP_WORD = "备份"  # 控制面: 触发存档热备份(需空闲; 不可中止, 结果回执走 [系统])
 PLAN_WORD = "计划模式"  # 控制面: 进入计划模式(任何玩家可触发, 程序处理)
 EXIT_PLAN_WORD = "退出计划"  # 控制面: 退出计划模式回 normal(任何玩家可触发)
 RESTORE_WORD = "恢复会话"  # 控制面: 把最近一次落盘的会话灌回(任何玩家可触发)
+RESTORE_DEFAULT_WORD = "恢复会话d"  # 控制面: 同上, 但强制用默认模型(flash)灌回
 BODY_ON_WORD, BODY_OFF_WORD = "正文开", "正文关"  # 控制面: 正文转发开关(不进上下文)
 TOOL_ON_WORD, TOOL_OFF_WORD = "工具开", "工具关"  # 控制面: 工具转发开关(不进上下文)
 

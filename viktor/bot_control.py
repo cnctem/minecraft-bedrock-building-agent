@@ -10,7 +10,7 @@ from pathlib import Path
 
 import capabilities
 
-from . import paths
+from . import models, paths
 from .constants import MODE_NORMAL, MODE_ONESHOT, MODE_PLAN, ONESHOT_TRIGGER
 from .paths import log
 from .profiles import MODES
@@ -144,20 +144,31 @@ class BotControlMixin:
             msg = "当前没有尚未生效的停止指令。"
         self._sys(msg)
 
-    def _on_clear(self, name: str):
-        """玩家发来完全匹配的“清空”: 丢弃整个会话上下文, 任何玩家都可触发。
+    def _on_clear(self, name: str, alias: str = models.DEFAULT_MODEL):
+        """玩家发来完全匹配的控制词「清空」/「清空k」/「清空g」: 丢弃整个会话上下文并开新会话,
+        任何玩家都可触发。模型是会话级的, 所以换模型也只能在这里换(会话内不可切换):
+        触发词决定新会话用哪个模型, 模型名/Base URL/key/窗口等全由 models.py 的档案给出。
         只能在停止状态下清空: 有任务在跑(或队列有待处理消息)时清空无效——
-        不中止任务、不清上下文, 只回一句提示。控制词不进上下文。"""
+        不中止任务、不清上下文、也不换模型, 只回一句提示。控制词不进上下文。"""
+        spec = models.spec(self.cfg, alias)
+        if not spec.get("enabled", True):
+            log(f"[清空] {name} 要求用 {alias} 开新会话, 但该模型还没接通, 清空无效")
+            self._sys(f"{spec.get('label') or alias} 还没有接通(缺 API key/Base URL), "
+                      f"没有清空。发「清空」可以用默认模型重开。")
+            return
         with self.cv:
             busy = self.agent_busy or bool(self.pending)
         if busy:
-            log(f"[清空] {name} 要求清空, 但有任务在进行, 清空无效")
+            log(f"[清空] {name} 要求清空(模型 {alias}), 但有任务在进行, 清空无效")
             self._sys("现在有任务正在进行, 清空无效。请先发「停止」(做完当前这一步再停)"
                       "或「强制停止」(立即中止), 停下来后再清空。")
             return
+        self.model_alias = spec["alias"]
         n = self._reset_session()
-        log(f"[清空] {name} 要求清空上下文, 已完整初始化新会话(丢弃 {n} 条消息)")
-        self._sys(f"上下文已清空(丢弃 {n} 条消息)。发送「恢复会话」可找回刚才的对话。")
+        log(f"[清空] {name} 要求清空上下文, 已完整初始化新会话"
+            f"(模型 {spec['alias']}/{spec['model']}, 丢弃 {n} 条消息)")
+        self._sys(f"上下文已清空(丢弃 {n} 条消息), 现在用 {spec.get('label') or spec['model']} 模型。"
+                  f"发送「恢复会话」可找回刚才的对话。")
 
     def _on_compact(self, name: str):
         """玩家发来完全匹配的“压缩”: 把上下文压缩成对话记录(只保留玩家消息与游戏内发言),
@@ -179,7 +190,8 @@ class BotControlMixin:
     def _build_compact_messages(self) -> tuple[list[dict], dict]:
         """组装压缩后的新会话消息: 记忆/技能书/当前模式三条开场注记 + 保留的对话 + 压缩注记。
         只组装不提交(自动溢出时先用它试算体积)。"""
-        kept, stats = Session.compact(self.session.messages)
+        keep_rc = bool(self._model_spec().get("reasoning_content", True))
+        kept, stats = Session.compact(self.session.messages, keep_reasoning=keep_rc)
         msgs: list[dict] = [{"role": "system", "content": memory_note()}]
         skills = capabilities.skills_note()
         if skills:
@@ -198,7 +210,7 @@ class BotControlMixin:
             log(f"=== 会话 #{old.id} 结束(压缩留档: 保留玩家消息 {stats['kept_user']} 条、"
                 f"发言 {stats['kept_speech']} 条, 移除 {stats['dropped']} 条过程记录) ===")
         self.session_counter += 1
-        self.session = Session(self.session_counter)
+        self.session = Session(self.session_counter, model=self.model_alias)
         self.session.messages = msgs
         self._context_warn_level = 0  # 压缩后上下文变短, 占用提醒档位复位
         log(f"=== 会话 #{self.session.id} 开始(由压缩重建, 消息 {len(msgs)} 条) ===")
@@ -292,19 +304,39 @@ class BotControlMixin:
         self._start_session()
         return n
 
-    def resume_session(self, path: str) -> None:
+    def resume_session(self, path: str, force_model: str | None = None) -> None:
         """重启后把一份已落盘的会话上下文灌回当前会话。
+        落盘首行的 _meta 记着这段会话原来用哪个模型: 恢复时连带把当前模型切过去,
+        避免把 kimi 的历史(无思考链)灌进 DeepSeek 会话(会 400)。
+        force_model 非空时忽略落盘模型, 强制用它(「恢复会话d」= 用默认模型接着聊)。
         旧数据里带 tool_calls 的 assistant 可能缺 reasoning_content(历史 bug), 而 DeepSeek
-        思考模式 + tools 要求每条 assistant 都带该字段, 否则 400; 这里统一补空串。
+        思考模式 + tools 要求每条 assistant 都带该字段, 否则 400; 这里按模型补空串/剥掉。
         当前模式从最后一条模式注记('# 当前模式: <label>')推断。"""
         p = Path(path)
-        msgs = [json.loads(line) for line in p.read_text(encoding="utf-8").splitlines()
-                if line.strip()]
+        meta: dict = {}
+        msgs: list[dict] = []
+        for line in p.read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            try:
+                rec = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(rec, dict) and "_meta" in rec:
+                meta = rec["_meta"] or {}
+                continue
+            msgs.append(rec)
+        self.model_alias = force_model or meta.get("model") or models.DEFAULT_MODEL
+        keep_rc = bool(self._model_spec().get("reasoning_content", True))
         for m in msgs:
-            if m.get("role") == "assistant" and "reasoning_content" not in m:
+            if m.get("role") != "assistant":
+                continue
+            if not keep_rc:
+                m.pop("reasoning_content", None)  # kimi 等不回传思考链, 剥掉省输入
+            elif "reasoning_content" not in m:
                 m["reasoning_content"] = ""
         self.session_counter += 1
-        self.session = Session(self.session_counter)
+        self.session = Session(self.session_counter, model=self.model_alias)
         self.session.messages = msgs
         # 重启后别把“正在对话”误判成冷启动: 从历史里找回最近一次对谁说过话(时间用 mtime 近似)
         self._seed_dialog_from(msgs, p.stat().st_mtime)
@@ -337,7 +369,8 @@ class BotControlMixin:
                    for m in reversed(msgs) if m.get("role") == "system"):
             self.session.add_system(note)
             log("[恢复] 已追加「历史已执行过, 不要重跑」注记")
-        log(f"[恢复] 从 {p.name} 灌回 {len(msgs)} 条消息, 模式={MODES[self.mode].label}")
+        log(f"[恢复] 从 {p.name} 灌回 {len(msgs)} 条消息, "
+            f"模型={models.describe(self.cfg, self.model_alias)}, 模式={MODES[self.mode].label}")
 
     @staticmethod
     def _dump_has_conversation(path: Path) -> bool:
@@ -356,8 +389,10 @@ class BotControlMixin:
             return False
         return False
 
-    def _on_restore_session(self, name: str):
-        """硬编码控制词"恢复会话": 把最近一次落盘的会话灌回(程序处理, 不走模型)。"""
+    def _on_restore_session(self, name: str, force_default: bool = False):
+        """硬编码控制词「恢复会话」/「恢复会话d」: 把最近一次落盘的会话灌回(程序处理, 不走模型)。
+        默认按落盘会话自己记录的模型恢复; 「恢复会话d」强制用默认模型(flash)恢复——
+        当某个模型临时不可用(欠费/限流/想省钱)时, 仍能把那段对话接着用。"""
         with self.cv:
             busy = self.agent_busy or bool(self.pending)
         if busy:
@@ -370,14 +405,30 @@ class BotControlMixin:
             self._sys("没有可恢复的历史会话。")
             return
         path = dumps[0]
+        src_model = self._dump_model(path)
         try:
-            self.resume_session(str(path))
+            self.resume_session(str(path),
+                                force_model=models.DEFAULT_MODEL if force_default else None)
         except Exception as e:
             log(f"[恢复] 失败: {e}")
             self._sys("恢复会话失败, 请稍后再试。")
             return
+        note = ""
+        if force_default and src_model and src_model != models.DEFAULT_MODEL:
+            note = f"(原会话是 {models.describe(self.cfg, src_model)}, 已按你的要求改用默认模型)"
         self._sys(f"已恢复上一段会话({path.name}, {len(self.session.messages)} 条消息, "
-                  f"模式 {MODES[self.mode].label})。")
+                  f"模型 {self._model_label()}{note}, 模式 {MODES[self.mode].label})。")
+
+    @staticmethod
+    def _dump_model(path: Path) -> str:
+        """读落盘会话首行 _meta 里记的模型别名(老文件没有则返回空串)。"""
+        try:
+            with open(path, encoding="utf-8") as f:
+                head = f.readline()
+            meta = json.loads(head).get("_meta") or {}
+            return str(meta.get("model") or "")
+        except (OSError, ValueError, AttributeError):
+            return ""
 
     # ---------- 计划模式(硬编码控制词, 程序处理, 不走模型) ----------
 
@@ -489,14 +540,21 @@ class BotControlMixin:
         ctx.session.add_system(self._mode_note())
         ctx.session.add_user(f"{name}: {body}")
         log(f"=== 一次性对话 #{oid} 开始 (玩家: {name}) ===")
-        reply, spoke = "", False
+        reply, spoke, failed = "", False, False
         try:
             reply, spoke = self.call_api()
         except Exception as e:
+            failed = True
             log(f"[一次性#{oid}] 出错: {e}")
+            if not ctx.abort.is_set():
+                # 与主对话一致: 把状态码/原因/下一步以 [系统] 说出来, 别让玩家以为没反应
+                try:
+                    self._sys(self._api_failure_note(e))
+                except Exception as err:
+                    log(f"[一次性#{oid}] 错误提示发送失败: {err}")
         finally:
             try:
-                if not spoke and not ctx.abort.is_set():
+                if not failed and not spoke and not ctx.abort.is_set():
                     # 兜底: 模型把回复写在正文(玩家看不到)时必须补发; 程序兜底文本带 [系统]
                     if reply.strip():
                         self.bridge.say_as_viktor(reply, self.cfg["reply_chunk_len"],

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """
-mc-ai-bot 入口: 把 MC 基岩版服务器(screen 会话)的聊天接入 DeepSeek。
+mc-ai-bot 入口: 把 MC 基岩版服务器(screen 会话)的聊天接入大模型
+(默认 DeepSeek; 「清空k」可开一个 Kimi 模型的新会话, 见 viktor/models.py)。
 
 工作方式:
   - tail screen 日志(logs/server.log) 解析玩家聊天/进出服事件
@@ -12,7 +13,8 @@ mc-ai-bot 入口: 把 MC 基岩版服务器(screen 会话)的聊天接入 DeepSe
   - viktor/bot_core.py     构造、请求上下文、会话生命周期、待处理队列
   - viktor/bot_control.py  控制词/计划模式/恢复会话/一次性对话
   - viktor/bot_tools.py    能力工具 handler(聊天/查询/指令/常加载/备份/模式)
-  - viktor/bot_agent.py    DeepSeek function calling 循环与模式参数
+  - viktor/bot_agent.py    function calling 循环与模式参数(请求按当前模型档案拼)
+  - viktor/models.py       模型档案(触发词/模型名/Base URL/key/窗口/思考强度映射)
   - viktor/bot_app.py      服务器日志 tail 解析与主循环
   - viktor/selftest.py     python3 bot.py --test 的自测
 

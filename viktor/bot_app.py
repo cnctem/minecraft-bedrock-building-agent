@@ -1,6 +1,6 @@
 """主循环: tail 服务器日志并解析事件, 启动握手/信号收尾。
 
-依赖方向: bot_app → constants/paths; 不 import 其它 bot_* 模块。
+依赖方向: bot_app → constants/models/paths; 不 import 其它 bot_* 模块。
 """
 import os
 import re
@@ -8,12 +8,11 @@ import signal
 import threading
 import time
 
-from . import paths
+from . import models, paths
 from .constants import (
     BACKUP_WORD,
     BODY_OFF_WORD,
     BODY_ON_WORD,
-    CLEAR_WORD,
     COMPACT_WORD,
     EXIT_PLAN_WORD,
     FORCE_STOP_WORD,
@@ -30,6 +29,7 @@ from .constants import (
     RE_LEAVE,
     RE_LINE,
     RE_LIST,
+    RESTORE_DEFAULT_WORD,
     RESTORE_WORD,
     SOFT_STOP_WORD,
     STATUS_WORD,
@@ -110,8 +110,11 @@ class BotAppMixin:
             if stripped == NO_STOP_WORD:
                 self._on_no_stop(name)
                 return
-            if stripped == CLEAR_WORD:
-                self._on_clear(name)
+            # 「清空」/「清空k」/「清空g」...: 触发词 -> 模型(见 models.py)。精确匹配,
+            # 认不出来的(「清空x」等)不当作控制词, 照常交给模型当普通聊天。
+            clear_alias = models.resolve_trigger(self.cfg, stripped)
+            if clear_alias:
+                self._on_clear(name, clear_alias)
                 return
             if stripped == COMPACT_WORD:
                 self._on_compact(name)
@@ -130,6 +133,10 @@ class BotAppMixin:
                 return
             if stripped == RESTORE_WORD:
                 self._on_restore_session(name)
+                return
+            if stripped == RESTORE_DEFAULT_WORD:
+                # 带 d 后缀: 同上, 但强制用默认模型恢复(不跟落盘会话的模型走)
+                self._on_restore_session(name, force_default=True)
                 return
             if stripped == BODY_ON_WORD:
                 self._on_body_toggle(name, True)

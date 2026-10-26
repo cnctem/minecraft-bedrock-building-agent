@@ -10,6 +10,7 @@ import urllib.request
 
 import capabilities
 
+from . import models
 from .constants import (CONTEXT_WARN_START_PCT, CONTEXT_WARN_STEP_PCT, CREATIVE_MODES,
                         MODE_EXECUTE, MODE_NORMAL, PIN_MODES, RETRYABLE_HTTP)
 from .paths import log
@@ -179,9 +180,11 @@ class BotAgentMixin:
         s = m.scale
         def val(key: str):
             return self.cfg.get(key, LIMIT_DEFAULTS.get(key))
+        # 输出上限同时受模型本身约束(如 kimi 32768); 抬高额度也不能越过它
+        cap = int(self._model_spec().get("max_output_tokens") or s * val(k["tokens"]))
         return {
             "effort": self.cfg.get(EFFORT_KEYS[m.effort], "low"),
-            "max_tokens": s * val(k["tokens"]),
+            "max_tokens": min(s * val(k["tokens"]), cap),
             "tool_rounds": s * val(k["rounds"]),
             "temperature": (self.cfg.get("creative_temperature")
                             if m.limits == "heavy" else self.cfg["temperature"]),
@@ -267,9 +270,10 @@ class BotAgentMixin:
 
     def _maybe_warn_context_size(self, used: int) -> None:
         """上下文占用每跨过一档(70% 起、步长 10%)就用 [系统] 提醒玩家一次, 同一档只提一次。
-        分母是模型窗口(context_window_tokens, 默认 1M); 压缩/清空/新会话后档位复位,
+        分母是本会话模型的窗口(models.py 的 context_window_tokens, 故意设得比模型真实窗口小
+        以控制成本; 默认模型 1M, kimi 262144); 压缩/清空/新会话后档位复位,
         之后会重新从 70% 起提醒。提醒里告知玩家可以手动发「压缩」, 只提醒、不改行为。"""
-        window = self.cfg.get("context_window_tokens", 1048576)
+        window = int(self._model_spec().get("context_window_tokens") or 0)
         if window <= 0:
             return
         pct = int(used * 100 / window)
@@ -285,12 +289,18 @@ class BotAgentMixin:
                   f"(有任务在跑时先「停止」或「强制停止」); 当前任务不受影响。")
 
     def _input_token_budget(self) -> int:
-        """输入能占多少 token: 模型窗口 − 本轮最大输出 − 安全余量。
-        deepseek-flash: 窗口 1M, 单次最大输出 384000。API 要求
-        prompt_tokens + max_tokens 不超过窗口, 所以输出额度必须从输入里扣掉。"""
-        window = self.cfg.get("context_window_tokens", 1048576)
+        """输入能占多少 token: 本会话模型的窗口 − 本轮最大输出 − 安全余量。
+        API 要求 prompt_tokens + max_tokens 不超过窗口, 所以输出额度必须从输入里扣掉。
+        窗口按模型走(见 models.py): 换模型就是换一整套预算。"""
+        window = int(self._model_spec().get("context_window_tokens") or 1048576)
         reserve = self.cfg.get("context_safety_tokens", 4096)
         return max(4096, window - self._mode_params()["max_tokens"] - reserve)
+
+    def _retry_output_cap(self) -> int:
+        """输出被 max_tokens 截断后能抬高到多少: 全局重试上限与本模型输出上限取小。"""
+        global_cap = int(self.cfg.get("retry_max_reply_tokens", 32768))
+        model_cap = int(self._model_spec().get("max_output_tokens") or global_cap)
+        return min(global_cap, model_cap)
 
     def _reply_max_chunks(self) -> int:
         if self.creative_mode:
@@ -299,17 +309,27 @@ class BotAgentMixin:
         return self.cfg["reply_max_chunks"]
 
     def _build_payload(self, messages: list[dict], params: dict) -> bytes:
+        """拼请求体: 模型名/思考强度字段/采样参数都按本会话的模型档案决定。
+        effort 只是模式产出的三档 low/high/max; 发哪个字段、映射成什么由
+        模型的 effort_param/effort_map 决定(deepseek 用 effort, kimi 用 reasoning_effort)。"""
+        spec = self._model_spec()
         payload = {
-            "model": self.cfg["model"],
+            "model": spec["model"],
             "messages": messages,
             "max_tokens": params["max_tokens"],
-            "effort": params["effort"],  # deepseek-flash 思考强度: low/high/max
         }
+        field, value = models.effort_of(spec, params["effort"])
+        if field:
+            payload[field] = value
         if not params.get("no_tools"):  # 收尾发言用 no_tools 逼模型用正文总结
             payload["tools"] = capabilities.tool_schemas(
                 allow=self._allowed_tools(), mode_choices=list(self._mode_next()))
-        if params.get("temperature") is not None:
-            payload["temperature"] = params["temperature"]
+        # 采样温度: 模型档案显式写了就用它(kimi 只接受 1), 否则用模式默认值
+        temp = params.get("temperature")
+        if spec.get("temperature") is not models.UNSET:
+            temp = spec.get("temperature")
+        if temp is not None:
+            payload["temperature"] = temp
         if self.cfg.get("parallel_tool_calls") and not params.get("no_tools"):
             payload["parallel_tool_calls"] = True  # 鼓励一次返回多个工具调用
         return json.dumps(payload).encode()
@@ -339,10 +359,11 @@ class BotAgentMixin:
         # 而且之后每次请求都会 400; 先按同口径修好配对再发。
         messages = Session._sanitize(messages)
         cfg = self.cfg
+        spec = self._model_spec()
         payload = self._build_payload(messages, params)
-        url = cfg["api_base"].rstrip("/") + "/chat/completions"
+        url = str(spec["api_base"]).rstrip("/") + "/chat/completions"
         headers = {"Content-Type": "application/json",
-                   "Authorization": f"Bearer {cfg['api_key']}"}
+                   "Authorization": f"Bearer {spec['api_key']}"}
         attempts = max(1, int(cfg.get("api_max_attempts", 3)))
         base = float(cfg.get("api_retry_backoff_sec", 1.0))
         data = None
@@ -354,13 +375,15 @@ class BotAgentMixin:
                     data = json.loads(resp.read())
                 break
             except urllib.error.HTTPError as e:
-                # HTTPError 的正文里才有 DeepSeek 的具体报错原因, 必须读出来
+                # HTTPError 的正文里才有具体报错原因(如 "Insufficient Balance"), 必须读出来;
+                # 只取人能读的那一句, 便于日志排查与给玩家看的 [系统] 提示。
                 body = e.read().decode("utf-8", "replace")[:400]
+                detail = self._error_detail(body)
                 if e.code not in RETRYABLE_HTTP or attempt >= attempts:
-                    raise RuntimeError(f"HTTP {e.code}: {body}") from None
+                    raise RuntimeError(f"HTTP {e.code}: {detail}") from None
                 delay = self._backoff_delay(
                     attempt, base, e.headers.get("Retry-After") if e.headers else None)
-                log(f"[API] HTTP {e.code} ({body[:100]}) — {delay:.1f}s 后第 {attempt+1}/{attempts} 次尝试")
+                log(f"[API] HTTP {e.code} ({detail[:100]}) — {delay:.1f}s 后第 {attempt+1}/{attempts} 次尝试")
                 time.sleep(delay)
             except (urllib.error.URLError, TimeoutError, OSError, ValueError) as e:
                 if attempt >= attempts:
@@ -371,7 +394,7 @@ class BotAgentMixin:
         usage = data.get("usage", {})
         choice = data["choices"][0]
         finish = choice.get("finish_reason") or ""
-        log(f"[API] {cfg['model']}/effort={params['effort']}/max={params['max_tokens']} "
+        log(f"[API] {spec['model']}/effort={params['effort']}/max={params['max_tokens']} "
             f"tokens: prompt={usage.get('prompt_tokens')} "
             f"(缓存命中 {usage.get('prompt_cache_hit_tokens', '?')}) "
             f"completion={usage.get('completion_tokens')}"
@@ -379,9 +402,44 @@ class BotAgentMixin:
             f" finish={finish}")
         return choice["message"], finish
 
-    def _wrap_up_reply(self, messages: list[dict]) -> str:
+    @staticmethod
+    def _error_detail(raw: str) -> str:
+        """从 API 错误正文里抠出人能读的一句: 优先 JSON 里的 error.message, 否则原文。
+        换行/多余空白压成单空格, 免得日志与聊天窗里出现一坨 JSON。"""
+        text = (raw or "").strip()
+        try:
+            data = json.loads(text)
+        except (TypeError, ValueError):
+            return re.sub(r"\s+", " ", text)
+        if isinstance(data, dict):
+            err = data.get("error")
+            if isinstance(err, dict):
+                for key in ("message", "msg", "detail", "code", "type"):
+                    if err.get(key):
+                        return re.sub(r"\s+", " ", str(err[key]))
+            elif isinstance(err, str) and err.strip():
+                return re.sub(r"\s+", " ", err)
+            for key in ("message", "msg", "detail"):
+                if data.get(key):
+                    return re.sub(r"\s+", " ", str(data[key]))
+        return re.sub(r"\s+", " ", text)
+
+    def _api_failure_note(self, err: Exception) -> str:
+        """把一次 API 失败原样转述成一句 [系统]: 模型 + HTTP 状态码 + 模型返回的那句话(截 40 字)。
+        不加工、不建议——玩家要的就是“到底报了什么错”; 重试过程只进日志。"""
+        label = models.describe(self.cfg, self._model_alias())
+        text = str(err or "")
+        m = re.match(r"HTTP (\d{3})\s*[:：]?\s*(.*)", text, re.S)
+        if m:
+            detail = self._error_detail(m.group(2) or "")[:40]
+            return f"{label} 请求失败: HTTP {m.group(1)} {detail}。这条消息没处理。"
+        detail = re.sub(r"\s+", " ", text).strip()[:40]
+        return f"{label} 请求失败: {type(err).__name__}: {detail}。这条消息没处理。"
+
+    def _wrap_up_reply(self, messages: list[dict]) -> tuple[str, Exception | None]:
         """工具轮次用尽时, 让模型做一次"无工具"的收尾发言: 汇报已完成 + 下一步计划,
-        引导玩家回复「继续」或调整。程序无法知道已完成什么, 所以交给模型。"""
+        引导玩家回复「继续」或调整。程序无法知道已完成什么, 所以交给模型。
+        返回 (正文, 异常): 失败时把异常交回调用方, 由它发一条带原因提示的 [系统]。"""
         note = ("# 工具轮次已用尽\n"
                 "本次任务允许的工具轮次已用完, 你不能再调用任何工具。请直接用正文向玩家汇报: "
                 "①已完成的内容 ②下一步计划, 并引导玩家回复「继续」继续, 或说明想调整的地方。"
@@ -392,8 +450,8 @@ class BotAgentMixin:
             msg, _ = self._post(messages + [{"role": "system", "content": note}], params)
         except Exception as e:
             log(f"[轮次] 收尾发言失败: {e}")
-            return ""
-        return (msg.get("content") or "").strip()
+            return "", e
+        return (msg.get("content") or "").strip(), None
 
     def call_api(self) -> tuple[str, bool]:
         """function calling 循环: AI 可调能力工具, 执行结果回传后再生成最终回复。
@@ -421,8 +479,7 @@ class BotAgentMixin:
             if budget_retries:
                 # 上一轮被 max_tokens 截断: 抬高额度再来一次(不消耗工具轮次)。
                 # 用 max() 保证只抬高不降低。
-                params["max_tokens"] = max(params["max_tokens"],
-                                           self.cfg.get("retry_max_reply_tokens", 32768))
+                params["max_tokens"] = max(params["max_tokens"], self._retry_output_cap())
             if rounds >= round_cap:
                 break
             if self._abort().is_set():
@@ -460,15 +517,18 @@ class BotAgentMixin:
             if thinking:
                 log(f"[思考] {str(thinking)[:300].replace(chr(10), ' ')}")
             calls = msg.get("tool_calls") or []
-            if not calls:
+            # 思考链: 只有声明需要回传的模型(DeepSeek 思考模式)在带 tool_calls 时保留,
+            # 否则 API 会 400 "reasoning_content must be passed back"; kimi 等不需要回传的
+            # 模型一律丢掉——既不加输入 token, 也不影响后续轮次(实测)。
+            if not calls or not self._model_spec().get("reasoning_content", True):
                 msg.pop("reasoning_content", None)
+            if not calls:
                 # finish=length: 思考 token 与正文/工具调用共用 max_tokens, 复杂规划
                 # 会把额度烧在思考上, 导致正文为空、工具调用为空——玩家看到沉默。
                 if finish == "length" and budget_retries < 1:
                     # 抬高额度要有实际空间才重试: 若当前额度已达到(或超过)重试上限,
                     # 再发一次请求与刚才完全等价, 只会把同一份额度再烧一遍, 纯浪费一整轮生成。
-                    raised = max(params["max_tokens"],
-                                 self.cfg.get("retry_max_reply_tokens", 32768))
+                    raised = max(params["max_tokens"], self._retry_output_cap())
                     if raised > params["max_tokens"]:
                         budget_retries += 1
                         log(f"[API] 输出被 max_tokens={params['max_tokens']} 截断, "
@@ -545,12 +605,15 @@ class BotAgentMixin:
         # 并引导玩家回复「继续」或调整(它才知道做过什么, 程序不知道)。
         # 一次性是闭式任务, 不走"继续"这一套, 仍用它的固定回执。
         if not oneshot:
-            wrap = self._wrap_up_reply(messages)
+            wrap, werr = self._wrap_up_reply(messages)
             if wrap:
                 log("[轮次] 工具轮次用尽, 模型收尾汇报")
                 return wrap, False  # 交给 worker 的 _finish_turn 兜底播报并写回上下文
-            # 收尾这步本身也失败(通常是 API 报错): 才用程序一句话兜底, 别让玩家对着沉默
-            self._sys("任务分批较多, 我先做到这里。请核对现场, 说“继续”我再往下做。")
+            # 收尾这步本身也失败(通常是 API 报错): 明确告诉玩家原因 + 下一步, 别让玩家对着沉默
+            if werr is not None:
+                self._sys(self._api_failure_note(werr))
+            else:
+                self._sys("任务分批较多, 我先做到这里。请核对现场, 说“继续”我再往下做。")
             return "(工具轮次用尽, 收尾失败, 已程序兜底)", True
         self._sys("这次一次性请求步骤较多, 我没能一次做完, 请拆小后重发。")
         return "(工具轮次用尽, 已告知玩家)", True
@@ -609,7 +672,8 @@ class BotAgentMixin:
             except Exception as e:
                 log(f"[API 错误] {e}")
                 if not self._abort().is_set():
-                    self._sys("抱歉, 我这边暂时连不上或出错了, 刚才这条没能处理。请稍后再发一次。")
+                    # 原样转发模型返回的报错(带状态码 + message), 玩家才不会对着沉默猜“是不是卡了”。
+                    self._sys(self._api_failure_note(e))
             finally:
                 self.agent_busy = False
             if reply is None:
