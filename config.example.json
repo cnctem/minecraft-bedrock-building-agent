@@ -15,6 +15,7 @@
       "model": "k3.1-pro",
       "context_window_tokens": 262144,
       "max_output_tokens": 32768,
+      "api_timeout_sec": 180,
       "effort_param": "reasoning_effort",
       "reasoning_content": false,
       "temperature": 1

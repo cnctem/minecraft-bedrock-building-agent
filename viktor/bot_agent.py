@@ -366,13 +366,17 @@ class BotAgentMixin:
                    "Authorization": f"Bearer {spec['api_key']}"}
         attempts = max(1, int(cfg.get("api_max_attempts", 3)))
         base = float(cfg.get("api_retry_backoff_sec", 1.0))
+        timeout = self._api_timeout()   # 读超时按模型可覆盖(kimi 慢但思考长, 60s 不够)
         data = None
+        took = 0.0
         for attempt in range(1, attempts + 1):
             self._rate_limit()  # 每次尝试(含重试)都遵守最小间隔
             req = urllib.request.Request(url, data=payload, headers=headers, method="POST")
+            started = time.time()
             try:
-                with urllib.request.urlopen(req, timeout=cfg["api_timeout_sec"]) as resp:
+                with urllib.request.urlopen(req, timeout=timeout) as resp:
                     data = json.loads(resp.read())
+                took = time.time() - started
                 break
             except urllib.error.HTTPError as e:
                 # HTTPError 的正文里才有具体报错原因(如 "Insufficient Balance"), 必须读出来;
@@ -383,19 +387,27 @@ class BotAgentMixin:
                     raise RuntimeError(f"HTTP {e.code}: {detail}") from None
                 delay = self._backoff_delay(
                     attempt, base, e.headers.get("Retry-After") if e.headers else None)
-                log(f"[API] HTTP {e.code} ({detail[:100]}) — {delay:.1f}s 后第 {attempt+1}/{attempts} 次尝试")
+                log(f"[API] HTTP {e.code} ({detail[:100]}) — {delay:.1f}s 后第 "
+                    f"{attempt+1}/{attempts} 次尝试 (timeout={timeout:.0f}s)")
                 time.sleep(delay)
             except (urllib.error.URLError, TimeoutError, OSError, ValueError) as e:
+                # 读超时/网络错误没有 HTTP 状态码可报: 日志里带上模型、超时上限与耗时,
+                # 否则事后只看到一句 "read operation timed out", 没法判断是网慢还是给的时间太短。
+                elapsed = time.time() - started
                 if attempt >= attempts:
+                    log(f"[API] 最终失败 {spec['model']} {type(e).__name__}: {e} "
+                        f"(timeout={timeout:.0f}s, 本次等待 {elapsed:.1f}s, "
+                        f"共 {attempts} 次尝试)")
                     raise RuntimeError(f"{type(e).__name__}: {e}") from None
                 delay = self._backoff_delay(attempt, base)
-                log(f"[API] {type(e).__name__}: {e} — {delay:.1f}s 后第 {attempt+1}/{attempts} 次尝试")
+                log(f"[API] {spec['model']} {type(e).__name__}: {e} — {elapsed:.1f}s 后超时, "
+                    f"{delay:.1f}s 后第 {attempt+1}/{attempts} 次尝试 (timeout={timeout:.0f}s)")
                 time.sleep(delay)
         usage = data.get("usage", {})
         choice = data["choices"][0]
         finish = choice.get("finish_reason") or ""
         log(f"[API] {spec['model']}/effort={params['effort']}/max={params['max_tokens']} "
-            f"tokens: prompt={usage.get('prompt_tokens')} "
+            f"took={took:.1f}s tokens: prompt={usage.get('prompt_tokens')} "
             f"(缓存命中 {usage.get('prompt_cache_hit_tokens', '?')}) "
             f"completion={usage.get('completion_tokens')}"
             f"(思考 {usage.get('completion_tokens_details', {}).get('reasoning_tokens', '?')})"
@@ -406,11 +418,19 @@ class BotAgentMixin:
     def _error_detail(raw: str) -> str:
         """从 API 错误正文里抠出人能读的一句: 优先 JSON 里的 error.message, 否则原文。
         换行/多余空白压成单空格, 免得日志与聊天窗里出现一坨 JSON。"""
-        text = (raw or "").strip()
+        text = re.sub(r"\s+", " ", (raw or "").strip())
+        # 自定义 RuntimeError(f"{type(e).__name__}: {e}") 会把类型名重复进正文:
+        # "RuntimeError: TimeoutError: The read operation timed out" -> 只留最后那句。
+        while True:
+            stripped = re.sub(
+                r"^[A-Za-z_][\w.]*(?:Error|Exception|Timeout|Failure|Interrupt)\s*:\s*", "", text)
+            if stripped == text:
+                break
+            text = stripped
         try:
             data = json.loads(text)
         except (TypeError, ValueError):
-            return re.sub(r"\s+", " ", text)
+            return text
         if isinstance(data, dict):
             err = data.get("error")
             if isinstance(err, dict):
@@ -424,6 +444,17 @@ class BotAgentMixin:
                     return re.sub(r"\s+", " ", str(data[key]))
         return re.sub(r"\s+", " ", text)
 
+    def _api_timeout(self) -> float:
+        """读超时(秒): 模型档案可覆盖(慢模型给更长), 否则用全局 api_timeout_sec。"""
+        spec = self._model_spec()
+        return float(spec.get("api_timeout_sec") or self.cfg.get("api_timeout_sec", 60))
+
+    @staticmethod
+    def _clip(text: str, limit: int = 40) -> str:
+        """按字符截断并加省略号(截断处不留半截词, 免得像 "timed o" 这种看不懂的碎片)。"""
+        text = re.sub(r"\s+", " ", text or "").strip()
+        return text[:limit] + ("…" if len(text) > limit else "")
+
     def _api_failure_note(self, err: Exception) -> str:
         """把一次 API 失败原样转述成一句 [系统]: 模型 + HTTP 状态码 + 模型返回的那句话(截 40 字)。
         不加工、不建议——玩家要的就是“到底报了什么错”; 重试过程只进日志。"""
@@ -431,10 +462,12 @@ class BotAgentMixin:
         text = str(err or "")
         m = re.match(r"HTTP (\d{3})\s*[:：]?\s*(.*)", text, re.S)
         if m:
-            detail = self._error_detail(m.group(2) or "")[:40]
-            return f"{label} 请求失败: HTTP {m.group(1)} {detail}。这条消息没处理。"
-        detail = re.sub(r"\s+", " ", text).strip()[:40]
-        return f"{label} 请求失败: {type(err).__name__}: {detail}。这条消息没处理。"
+            return (f"{label} 请求失败: HTTP {m.group(1)} "
+                    f"{self._clip(self._error_detail(m.group(2) or ''))}。这条消息没处理。")
+        # 没有 HTTP 状态码(超时/网络层) -> 只有异常正文: 去掉重复的 "RuntimeError: TimeoutError:"
+        # 这类嵌套前缀, 直接说清楚那句话; 正文为空时退回异常类型名。
+        detail = self._clip(self._error_detail(text)) or type(err).__name__
+        return f"{label} 请求失败: {detail}。这条消息没处理。"
 
     def _wrap_up_reply(self, messages: list[dict]) -> tuple[str, Exception | None]:
         """工具轮次用尽时, 让模型做一次"无工具"的收尾发言: 汇报已完成 + 下一步计划,

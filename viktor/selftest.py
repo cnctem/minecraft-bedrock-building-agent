@@ -2258,8 +2258,16 @@ api.set(6, 0, 0, "tall_grass")
     assert "400" in _n400 and "X" * 40 in _n400 and "X" * 41 not in _n400, _n400
     # 非 HTTP 异常(超时/DNS/解析)也必须说话, 不能只在日志里
     _nnet = bot2._api_failure_note(RuntimeError("URLError: <urlopen error timed out>"))
-    assert "URLError" in _nnet and "kimi" in _nnet, _nnet
+    assert "urlopen error timed out" in _nnet and "kimi" in _nnet, _nnet
+    assert "RuntimeError:" not in _nnet and "URLError:" not in _nnet, "嵌套异常前缀应去掉"
+    # 纯超时(没有 HTTP 状态码): 只报那句话, 不留半截词
+    _nto = bot2._api_failure_note(RuntimeError("TimeoutError: The read operation timed out"))
+    assert _nto.endswith("The read operation timed out。这条消息没处理。"), _nto
+    assert "TimeoutError" not in _nto, _nto
+    # 读超时按模型可覆盖: kimi 慢, 给得比全局(60s)长
+    assert bot2._api_timeout() == bot2.cfg["models"]["kimi"]["api_timeout_sec"], bot2._api_timeout()
     bot2.model_alias = "flash"
+    assert bot2._api_timeout() == bot2.cfg["api_timeout_sec"], bot2._api_timeout()
     # 错误正文解析: JSON 里抠 error.message; 非 JSON 压成一行
     assert bot2._error_detail('{"error":{"message":"Insufficient Balance"}}') \
         == "Insufficient Balance"
