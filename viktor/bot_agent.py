@@ -4,6 +4,7 @@
 """
 import json
 import re
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -16,6 +17,10 @@ from .constants import (CONTEXT_WARN_START_PCT, CONTEXT_WARN_STEP_PCT, CREATIVE_
 from .paths import log
 from .profiles import EFFORT_KEYS, LIMIT_DEFAULTS, LIMIT_KEYS, MODES, PROMPTS, TOOLS, Mode
 from .session import Session
+
+
+class Aborted(Exception):
+    """一次 API 请求被「强制停止」打断。不是 API 错误, 不该给玩家报错。"""
 
 
 class BotAgentMixin:
@@ -334,6 +339,44 @@ class BotAgentMixin:
             payload["parallel_tool_calls"] = True  # 鼓励一次返回多个工具调用
         return json.dumps(payload).encode()
 
+    def _check_abort(self) -> None:
+        """强制停止已置位 -> 立刻放弃(不再发请求/不再重试)。"""
+        if self._abort().is_set():
+            raise Aborted()
+
+    def _sleep_abortable(self, seconds: float) -> None:
+        """可被「强制停止」打断的 sleep(重试退避最长 30s, 不能傻等)。"""
+        deadline = time.time() + max(0.0, seconds)
+        while True:
+            self._check_abort()
+            left = deadline - time.time()
+            if left <= 0:
+                return
+            time.sleep(min(0.2, left))
+
+    def _urlopen_json(self, req, timeout: float) -> dict:
+        """发起请求并解析 JSON, 但等待过程可被「强制停止」打断。
+        非流式请求的 resp.read() 会一直阻塞到整个回包收完(尤其慢模型, 60~180s),
+        直接调用的话玩家发了「强制停止」也只能干等; 这里把请求丢到后台线程,
+        主线程每 0.2s 看一次中止标志, 置位就立即放手(代价: 被放弃的那次请求仍会计费)。"""
+        box: dict = {}
+
+        def run():
+            try:
+                with urllib.request.urlopen(req, timeout=timeout) as resp:
+                    box["data"] = json.loads(resp.read())
+            except BaseException as e:  # 线程里不抛, 交给主线程判断
+                box["err"] = e
+
+        t = threading.Thread(target=run, daemon=True)
+        t.start()
+        while t.is_alive():
+            self._check_abort()
+            t.join(0.2)
+        if "err" in box:
+            raise box["err"]
+        return box["data"]
+
     def _rate_limit(self) -> None:
         """全局最小间隔: 只串行化“发起时刻”, 不包住整个请求/工具执行, 以允许并发一次性。"""
         with self.rate_lock:
@@ -370,12 +413,12 @@ class BotAgentMixin:
         data = None
         took = 0.0
         for attempt in range(1, attempts + 1):
+            self._check_abort()  # 强制停止: 一次重试都不再多发
             self._rate_limit()  # 每次尝试(含重试)都遵守最小间隔
             req = urllib.request.Request(url, data=payload, headers=headers, method="POST")
             started = time.time()
             try:
-                with urllib.request.urlopen(req, timeout=timeout) as resp:
-                    data = json.loads(resp.read())
+                data = self._urlopen_json(req, timeout)
                 took = time.time() - started
                 break
             except urllib.error.HTTPError as e:
@@ -389,7 +432,7 @@ class BotAgentMixin:
                     attempt, base, e.headers.get("Retry-After") if e.headers else None)
                 log(f"[API] HTTP {e.code} ({detail[:100]}) — {delay:.1f}s 后第 "
                     f"{attempt+1}/{attempts} 次尝试 (timeout={timeout:.0f}s)")
-                time.sleep(delay)
+                self._sleep_abortable(delay)
             except (urllib.error.URLError, TimeoutError, OSError, ValueError) as e:
                 # 读超时/网络错误没有 HTTP 状态码可报: 日志里带上模型、超时上限与耗时,
                 # 否则事后只看到一句 "read operation timed out", 没法判断是网慢还是给的时间太短。
@@ -402,7 +445,7 @@ class BotAgentMixin:
                 delay = self._backoff_delay(attempt, base)
                 log(f"[API] {spec['model']} {type(e).__name__}: {e} — {elapsed:.1f}s 后超时, "
                     f"{delay:.1f}s 后第 {attempt+1}/{attempts} 次尝试 (timeout={timeout:.0f}s)")
-                time.sleep(delay)
+                self._sleep_abortable(delay)
         usage = data.get("usage", {})
         choice = data["choices"][0]
         finish = choice.get("finish_reason") or ""
@@ -481,6 +524,8 @@ class BotAgentMixin:
         params["no_tools"] = True
         try:
             msg, _ = self._post(messages + [{"role": "system", "content": note}], params)
+        except Aborted:
+            raise
         except Exception as e:
             log(f"[轮次] 收尾发言失败: {e}")
             return "", e
@@ -702,6 +747,8 @@ class BotAgentMixin:
             reply, spoke = None, False
             try:
                 reply, spoke = self.call_api()
+            except Aborted:
+                log("[强制停止] 已中止本次请求(没有等回包)")
             except Exception as e:
                 log(f"[API 错误] {e}")
                 if not self._abort().is_set():

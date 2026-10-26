@@ -2272,6 +2272,73 @@ api.set(6, 0, 0, "tall_grass")
     assert bot2._error_detail('{"error":{"message":"Insufficient Balance"}}') \
         == "Insufficient Balance"
     assert bot2._error_detail("line1\nline2  x") == "line1 line2 x"
+    # 强制停止必须能打断“正在等回包”的请求(不等 socket 读超时):
+    # 非流式 resp.read() 会一直阻塞, 慢模型(60~180s)下以前要等到超时才停得下来
+    import threading as _th3
+    from . import bot_agent as _agent_mod
+    _orig_urlopen = _agent_mod.urllib.request.urlopen
+
+    class _SlowResp:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def read(self):
+            time.sleep(5)
+            return (b'{"choices":[{"message":{"content":"ok"},"finish_reason":"stop"}],'
+                    b'"usage":{}}')
+
+    _calls = []
+    _agent_mod.urllib.request.urlopen = lambda req, timeout=None: (
+        _calls.append(timeout) or _SlowResp())
+    try:
+        bot2.abort.clear()
+        _t0 = time.time()
+        _killer = _th3.Thread(target=lambda: (time.sleep(0.3), bot2.abort.set()), daemon=True)
+        _killer.start()
+        try:
+            bot2._post([{"role": "user", "content": "x"}], bot2._mode_params())
+            raise AssertionError("强制停止后请求应立刻中止")
+        except _agent_mod.Aborted:
+            pass
+        assert time.time() - _t0 < 2.0, "强制停止应在秒级生效(不等 60s 读超时)"
+        assert len(_calls) == 1, _calls
+        # 已置位时直接不发请求
+        _calls.clear()
+        bot2.abort.set()
+        try:
+            bot2._post([{"role": "user", "content": "x"}], bot2._mode_params())
+            raise AssertionError("已置位中止时不应发请求")
+        except _agent_mod.Aborted:
+            pass
+        assert _calls == [], "中止已置位就不该再发请求(也不该重试)"
+    finally:
+        _agent_mod.urllib.request.urlopen = _orig_urlopen
+        bot2.abort.clear()
+    # worker 遇到中止: 不当作 API 错误, 不发 [系统] 提示
+    bot2.session = Session(3002)
+    bot2.session.add_system(memory_note())
+    bot2.pending.clear()
+    bot2.pending.append(("A", "做点什么"))
+    bot2.running = True
+    _orig_call_api2, _orig_sys2 = bot2.call_api, bot2._sys
+    _errs2 = []
+    bot2.call_api = lambda: (_ for _ in ()).throw(_agent_mod.Aborted())
+    bot2._sys = lambda text: _errs2.append(text)
+    _wt2 = _th3.Thread(target=bot2._worker, daemon=True)
+    _wt2.start()
+    time.sleep(0.4)
+    bot2.running = False
+    with bot2.cv:
+        bot2.cv.notify_all()
+    _wt2.join(timeout=2)
+    bot2.call_api, bot2._sys = _orig_call_api2, _orig_sys2
+    assert _errs2 == [], f"强制停止不该给玩家报错: {_errs2}"
+    assert not bot2.agent_busy, "中止后必须复位 busy(否则清空会被挡住)"
+    print("强制停止打断请求自测 OK(不等读超时/不重试/不报错)")
+
     # worker 出错: 必须发一条带状态码的 [系统], 且不影响后续(不进上下文/busy 复位)
     bot2.session = Session(3001)
     bot2.session.add_system(memory_note())
