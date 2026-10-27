@@ -131,23 +131,36 @@ class BotCoreMixin:
         self.body_forward = False        # 正文转发开关(玩家用「正文开/关」切换; 仅显示, 不进上下文)
         self.tool_forward = True         # 工具转发开关(默认开; 玩家用「工具开/关」切换; 仅显示, 不进上下文)
         self._backup_running = False     # 「备份」控制词的后台热备份是否在跑(期间不开新任务)
+        # 「智能压缩」(摘要式压缩)的后台线程是否在跑: 期间 worker 不开新任务(消息只排队),
+        # 其它需要空闲的控制词也一并拒绝(见 _busy)。
+        self._smart_compact_running = False
+        # 本会话自动智能压缩失败过: 不再自动重试(否则每轮都会白调一次模型)
+        self._smart_compact_auto_failed = False
         # 「对话状态」: 玩家 -> (上次对他发言的时间, 那一轮里是否提过问)。只由主 worker 读写,
         # 用来判断玩家不带称呼的话是不是接你的话(见 prompts 的「该不该接话」)。
         self._dialog: dict[str, tuple[float, bool]] = {}
         self.dialog_window_sec = float(cfg.get("chat_dialog_window_sec", 180))
 
+    def _busy(self) -> bool:
+        """「停止状态」判定, 与「清空」/「压缩」/「备份」/「恢复会话」的可执行条件一致:
+        有任务在跑 / 队列有待处理消息 / 智能压缩的摘要还在生成。"""
+        with self.cv:
+            return (self.agent_busy or bool(self.pending)
+                    or self._smart_compact_running)
+
     def _write_state(self) -> None:
         """原子写一份忙碌/空闲快照到 paths.STATE_PATH, 供外部脚本判断「停止状态」。
-        busy 沿用「清空」的判定: agent_busy or 队列有待处理消息。"""
-        with self.cv:
-            state = {
-                "pid": os.getpid(),
-                "busy": self.agent_busy or bool(self.pending),
-                "pending": len(self.pending),
-                "backup": self._backup_running,
-                "mode": self.mode,
-                "updated": time.time(),
-            }
+        busy 沿用「清空」的判定: agent_busy or 队列有待处理消息(含智能压缩进行中)。"""
+        busy = self._busy()
+        state = {
+            "pid": os.getpid(),
+            "busy": busy,
+            "pending": len(self.pending),
+            "backup": self._backup_running,
+            "compact": self._smart_compact_running,
+            "mode": self.mode,
+            "updated": time.time(),
+        }
         tmp = paths.STATE_PATH.with_suffix(".tmp")
         try:
             tmp.write_text(json.dumps(state), encoding="utf-8")
@@ -210,6 +223,7 @@ class BotCoreMixin:
         self.body_forward = False
         self.tool_forward = True
         self._context_warn_level = 0  # 新会话上下文占用从零开始, 提醒档位复位
+        self._smart_compact_auto_failed = False  # 新会话重新允许自动智能压缩
         self._dialog.clear()          # 新会话 = 新对话: 旧会话的「正在聊」状态一并作废
         log(f"=== 会话 #{self.session.id} 开始 (玩家: {sorted(self.players)}, "
             f"模型: {self._model_label()}) ===")

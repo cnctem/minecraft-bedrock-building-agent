@@ -11,10 +11,10 @@ from pathlib import Path
 import capabilities
 
 from . import models, paths
-from .constants import MODE_NORMAL, MODE_ONESHOT, MODE_PLAN, ONESHOT_TRIGGER
+from .constants import Aborted, MODE_NORMAL, MODE_ONESHOT, MODE_PLAN, ONESHOT_TRIGGER
 from .paths import log
 from .profiles import MODES
-from .prompts import COMPACT_NOTE
+from .prompts import COMPACT_NOTE, SMART_COMPACT_NOTE, SMART_SUMMARY_HEADER
 from .session import OneShotContext, Session, memory_note
 
 # 工具转发里永远不外显的“对话类”调用:
@@ -30,7 +30,7 @@ class BotControlMixin:
         """玩家发来完全匹配的“停止”: 到安全点停止, 不经过模型。
         不打断正在执行的工具(当前步骤做完、工具往返闭合), 在下一次工具调用前停。"""
         with self.cv:
-            busy = self.agent_busy or bool(self.pending)
+            busy = self._busy()
             self.pending.clear()  # 尚未开始处理的消息一并作废, 不开启新任务
         if busy:
             self.soft_abort.set()
@@ -46,7 +46,7 @@ class BotControlMixin:
         """玩家发来完全匹配的“强制停止”: 立即中止运行中的任务, 不经过模型。
         连工具内部的轮询等待也一并打断; 备份不可中止(只回提示, 不置位任何标志)。"""
         with self.cv:
-            busy = self.agent_busy or bool(self.pending)
+            busy = self._busy()
             self.pending.clear()  # 尚未开始处理的消息也一并作废
         if busy:
             self.abort.set()
@@ -157,7 +157,7 @@ class BotControlMixin:
                       f"没有清空。发「清空」可以用默认模型重开。")
             return
         with self.cv:
-            busy = self.agent_busy or bool(self.pending)
+            busy = self._busy()
         if busy:
             log(f"[清空] {name} 要求清空(模型 {alias}), 但有任务在进行, 清空无效")
             self._sys("现在有任务正在进行, 清空无效。请先发「停止」(做完当前这一步再停)"
@@ -174,8 +174,7 @@ class BotControlMixin:
         """玩家发来完全匹配的“压缩”: 把上下文压缩成对话记录(只保留玩家消息与游戏内发言),
         旧会话落盘留档、开新会话。与「清空」同一并发规则: 有任务在跑(或队列有待处理消息)
         时压缩无效——不中止任务、不改上下文, 只回一句提示。控制词不进上下文。"""
-        with self.cv:
-            busy = self.agent_busy or bool(self.pending)
+        busy = self._busy()
         if busy:
             log(f"[压缩] {name} 要求压缩, 但有任务在进行, 压缩无效")
             self._sys("现在有任务正在进行, 压缩无效。请先发「停止」(做完当前这一步再停)"
@@ -188,7 +187,8 @@ class BotControlMixin:
                   f"{stats['kept_speech']} 条发言; 移除 {stats['dropped']} 条过程记录)。")
 
     def _build_compact_messages(self) -> tuple[list[dict], dict]:
-        """组装压缩后的新会话消息: 记忆/技能书/当前模式三条开场注记 + 保留的对话 + 压缩注记。
+        """组装压缩后的新会话消息: 记忆/技能书/当前模式三条开场注记 + 保留的对话 +
+        最后一次建造程序(原样, 否则源码就彻底没了) + 压缩注记。
         只组装不提交(自动溢出时先用它试算体积)。"""
         keep_rc = bool(self._model_spec().get("reasoning_content", True))
         kept, stats = Session.compact(self.session.messages, keep_reasoning=keep_rc)
@@ -198,8 +198,118 @@ class BotControlMixin:
             msgs.append({"role": "system", "content": skills})
         msgs.append({"role": "system", "content": self._mode_note()})
         msgs.extend(kept)
+        program = Session.last_build_program(self.session.messages)
+        if program:
+            msgs.append({"role": "system", "content": program})
+            stats["kept_program"] = len(program)
         msgs.append({"role": "system", "content": COMPACT_NOTE})
         return msgs, stats
+
+    def _build_smart_compact_messages(self) -> tuple[list[dict], dict]:
+        """组装「智能压缩」后的新会话: 记忆/技能书/模式注记 + 工作摘要(模型写的) +
+        最近若干条对话原文 + 最后一次建造程序 + 压缩注记。
+        摘要要调一次模型, 失败直接抛给调用方(调用方保证上下文不变)。"""
+        summary, err = self._request_summary()
+        if err is not None:
+            raise err if isinstance(err, Exception) else RuntimeError(str(err))
+        keep_rc = bool(self._model_spec().get("reasoning_content", True))
+        keep = max(0, int(self.cfg.get("smart_compact_keep_recent", 8)))
+        tail = self.session.messages[-keep:] if keep else []
+        if tail:
+            kept, stats = Session.compact(tail, keep_reasoning=keep_rc)
+        else:
+            kept, stats = [], {"kept_user": 0, "kept_speech": 0, "dropped": 0}
+        msgs: list[dict] = [{"role": "system", "content": memory_note()}]
+        skills = capabilities.skills_note()
+        if skills:
+            msgs.append({"role": "system", "content": skills})
+        msgs.append({"role": "system", "content": self._mode_note()})
+        msgs.append({"role": "system",
+                     "content": SMART_SUMMARY_HEADER + "\n\n" + summary})
+        msgs.extend(kept)
+        program = Session.last_build_program(self.session.messages)
+        if program:
+            msgs.append({"role": "system", "content": program})
+            stats["kept_program"] = len(program)
+        msgs.append({"role": "system", "content": SMART_COMPACT_NOTE})
+        stats["summary_chars"] = len(summary)
+        stats["dropped"] = len(self.session.messages) - len(kept)
+        return msgs, stats
+
+    def _smart_compact_session(self) -> dict | None:
+        """执行一次智能压缩(摘要 + 组装 + 换新会话)。成功返回统计, 失败返回 None。
+        任何失败(摘要请求报错/超时/被中止/摘要为空)都不改动上下文——宁可不压也不能丢。"""
+        if self._oneshot() or not self._session():
+            return None
+        try:
+            msgs, stats = self._build_smart_compact_messages()
+        except Aborted:
+            log("[智能压缩] 被「强制停止」打断, 上下文未改动")
+            self._sys("已中止智能压缩, 上下文没有改动。")
+            return None
+        except Exception as e:
+            log(f"[智能压缩] 摘要失败, 上下文未改动: {e}")
+            self._sys(f"智能压缩失败({self._clip(self._error_detail(str(e)), 40)}), "
+                      "上下文没有改动。可以发「压缩」(不调模型, 只留对话)或「清空」。")
+            return None
+        self._apply_compact(msgs, stats)
+        log(f"[智能压缩] 摘要 {stats['summary_chars']} 字, 保留玩家消息 {stats['kept_user']} 条、"
+            f"发言 {stats['kept_speech']} 条, 移除 {stats['dropped']} 条过程记录"
+            + (f"; 附带最后一次建造程序 {stats['kept_program']} 字节"
+               if stats.get("kept_program") else "; 没有可附带建造程序"))
+        return stats
+
+    def _on_smart_compact(self, name: str):
+        """玩家发来完全匹配的「智能压缩」: 先用模型把上下文压成一份工作摘要(任务进度、关键
+        坐标/尺寸、建造状态、失败与待办), 再重建会话——比「压缩」(只留玩家消息与发言)保留的
+        信息多得多。摘要要花一次模型请求, 所以放后台线程跑; 期间 _smart_compact_running 置位:
+        新消息只排队(worker 等摘要写完再开任务), 其它需要空闲的控制词也一并拒绝。
+        与「清空」同一并发规则: 有任务在跑(或队列有待处理消息)时无效。控制词不进上下文。"""
+        with self.cv:
+            busy = self._busy()
+            ready = (not busy and self.session is not None
+                     and bool(self.session.messages))
+            if ready:
+                self._smart_compact_running = True  # 在锁里置位: worker 不会插进来开任务
+        if busy:
+            log(f"[智能压缩] {name} 要求智能压缩, 但有任务在进行, 无效")
+            self._sys("现在有任务正在进行, 智能压缩无效。请先发「停止」(做完当前这一步再停)"
+                      "或「强制停止」(立即中止), 停下来后再压缩。")
+            return
+        if not ready:
+            self._sys("当前没有可压缩的上下文。")
+            return
+        log(f"[智能压缩] {name} 要求智能压缩上下文, 正在生成工作摘要")
+        self._sys("正在把上下文整理成工作摘要, 请稍候…(发「强制停止」可中止)")
+        threading.Thread(target=self._run_smart_compact, daemon=True).start()
+
+    def _run_smart_compact(self):
+        """智能压缩工作线程: 摘要 → 换新会话 → 回执。
+        开跑前清掉上一次残留的中止信号(与 worker 开新任务同口径), 之后「强制停止」可中止摘要。
+        无论成败都复位 _smart_compact_running 并唤醒 worker, 否则会把 bot 永久焐在「忙」上。"""
+        self.abort.clear()
+        stats = None
+        try:
+            if self.agent_busy:
+                # 极窄窗口: _on_smart_compact 置位后 worker 已经开了一轮任务
+                log("[智能压缩] 摘要开始前发现有任务在跑, 放弃本次压缩(上下文未改动)")
+                self._sys("有任务开始了, 这次智能压缩已放弃。")
+            else:
+                stats = self._smart_compact_session()
+        except Exception as e:  # 兜底: 不能让异常把 flag 留在置位状态
+            log(f"[智能压缩] 线程异常: {e}")
+            try:
+                self._sys("智能压缩出错, 上下文没有改动。")
+            except Exception:
+                pass
+        finally:
+            self._smart_compact_running = False
+            with self.cv:
+                self.cv.notify_all()
+        if stats:
+            self._sys(f"已智能压缩: 摘要 {stats['summary_chars']} 字, 保留 {stats['kept_user']} 条"
+                      f"玩家消息 / {stats['kept_speech']} 条发言, 移除 {stats['dropped']} 条过程记录"
+                      + ("。建造程序已顺带保留。" if stats.get("kept_program") else "。"))
 
     def _apply_compact(self, msgs: list[dict], stats: dict) -> None:
         """压缩落盘 + 换新会话: 旧会话 dump 成 compact-*.jsonl 留档(不参与“恢复会话”),
@@ -213,6 +323,7 @@ class BotControlMixin:
         self.session = Session(self.session_counter, model=self.model_alias)
         self.session.messages = msgs
         self._context_warn_level = 0  # 压缩后上下文变短, 占用提醒档位复位
+        self._smart_compact_auto_failed = False  # 刚压过, 重新允许自动智能压缩
         log(f"=== 会话 #{self.session.id} 开始(由压缩重建, 消息 {len(msgs)} 条) ===")
 
     def _compact_session(self) -> dict:
@@ -257,7 +368,7 @@ class BotControlMixin:
         与「清空」同一并发规则: 有任务在跑(或队列有待处理消息)时无效——
         只回一句提示; 已在备份中则提示稍候。控制词不进上下文。"""
         with self.cv:
-            busy = self.agent_busy or bool(self.pending)
+            busy = self._busy()
         if self._backup_running:
             self._sys("备份正在进行中, 请稍候。")
             return

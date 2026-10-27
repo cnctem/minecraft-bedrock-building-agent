@@ -439,6 +439,152 @@ def self_test():
     bot2.bridge.say_as_viktor = orig_say_w
     print("上下文占用提醒自测 OK")
 
+    # ===== 智能压缩(摘要式压缩, 类比 coding agent 的 /compact)自测 =====
+    # Session.transcript: 玩家消息/游戏内发言/工具调用进记录; 系统注记与思考链不进
+    ts = [{"role": "system", "content": "# 你的长期记忆"},
+          {"role": "user", "content": "A: 帮我把院墙换成石砖"},
+          {"role": "assistant", "content": "玩家看不到的正文", "reasoning_content": "想想",
+           "tool_calls": [_mk_tc("t1", "build_preview",
+                                {"program": "api.box(...)", "origin": [10, 64, 20]})]},
+          {"role": "tool", "tool_call_id": "t1", "content": "预览完成: 256 格"},
+          {"role": "assistant", "content": None,
+           "tool_calls": [_mk_tc("t2", "send_chat_message", {"text": "我看过现场了"})]},
+          {"role": "tool", "tool_call_id": "t2", "content": "已发送到游戏内聊天。"}]
+    flat = Session.transcript(ts)
+    assert "A: 帮我把院墙换成石砖" in flat and "调用 build_preview" in flat, flat
+    assert "你在游戏内说: 我看过现场了" in flat and "预览完成: 256 格" in flat, flat
+    assert "你的长期记忆" not in flat and "想想" not in flat, flat
+    long_flat = Session.transcript([{"role": "user", "content": "x" * 5000}], max_chars=1000)
+    assert "中间省略" in long_flat and len(long_flat) < 1200, len(long_flat)
+    # 建造程序: 压缩前最后一次原样保留(源码 + 参数 + 结果摘要); 没有建造调用时为空
+    prog = Session.last_build_program(ts)
+    assert "api.box(...)" in prog and "build_preview" in prog, prog
+    assert "origin" in prog and "预览完成: 256 格" in prog, prog
+    assert Session.last_build_program([{"role": "user", "content": "hi"}]) == ""
+
+    def _mk_build_session(sid):
+        bot2.session = Session(sid)
+        bot2.session.add_system(memory_note())
+        bot2.session.add_system(bot2._mode_note())
+        bot2.session.add_user("A: 把院墙换成石砖")
+        bot2.session.messages.append({"role": "assistant", "content": None,
+                                      "reasoning_content": "想",
+                                      "tool_calls": [_mk_tc("p1", "build_preview",
+                                                            {"program": "api.box(0,0,0,4,3,1)",
+                                                             "origin": [10, 64, 20],
+                                                             "facing": 0})]})
+        bot2.session.messages.append({"role": "tool", "tool_call_id": "p1",
+                                      "content": "预览完成: 12 格, mismatch 0"})
+        bot2.session.add_assistant("预览好了, 等你确认")
+
+    smsay = []
+    orig_say_sm = bot2.bridge.say_as_viktor
+    bot2.bridge.say_as_viktor = lambda text, *a, **k: smsay.append(text)
+    bot2.mode = MODE_NORMAL
+    bot2.agent_busy = False
+    bot2.pending.clear()
+    bot2._smart_compact_running = False
+    bot2._smart_compact_auto_failed = False
+    _mk_build_session(900)
+    old_sid = bot2.session.id
+    sm_calls = []
+
+    def fake_post_summary(messages, params):
+        sm_calls.append((messages, params))
+        return ({"role": "assistant",
+                 "content": "# 正在做的事\n- 院墙换石砖, origin [10,64,20]\n"
+                            "# 建造进度\n- 已预览 12 格, 未提交\n"
+                            "# 承诺与待办\n- 等玩家确认后提交"}, "stop")
+
+    orig_post_sm = bot2._post
+    bot2._post = fake_post_summary
+    try:
+        bot2.process_line("[2026-10-10 18:43:00:000 INFO] [Scripting] [VIKTOR-CHAT] 路人甲: 智能压缩")
+        deadline = time.time() + 5
+        while bot2._smart_compact_running and time.time() < deadline:
+            time.sleep(0.02)
+    finally:
+        bot2._post = orig_post_sm
+    assert len(sm_calls) == 1, sm_calls
+    assert sm_calls[0][1].get("no_tools") and sm_calls[0][1]["effort"] == "low", sm_calls[0][1]
+    assert "把院墙换成石砖" in sm_calls[0][0][1]["content"], "摘要输入应含玩家消息"
+    assert not bot2._smart_compact_running, "智能压缩结束后应复位进行中标记"
+    assert bot2.session.id != old_sid, "智能压缩应换新会话"
+    smsgs = bot2.session.messages
+    assert smsgs[0]["content"].startswith("# 你的长期记忆"), smsgs[0]["content"][:40]
+    assert smsgs[2]["content"].startswith("# 当前模式: "), smsgs[2]["content"][:40]
+    assert any(m["content"].startswith("# 压缩前的工作摘要") for m in smsgs), smsgs
+    smflat = json.dumps(smsgs, ensure_ascii=False)
+    assert "已预览 12 格" in smflat, "摘要正文应进新会话"
+    # 建造程序源码不会随摘要保留 → 单独原样带过来(用户的关注点)
+    assert any(m["content"].startswith("# 压缩前最后一次建造程序") for m in smsgs), smflat
+    assert "api.box(0,0,0,4,3,1)" in smflat, "最后一次建造程序应原样保留"
+    assert smsgs[-1]["content"].startswith("# 上下文已智能压缩"), smsgs[-1]["content"][:40]
+    assert "建造程序" in smsgs[-1]["content"], "压缩注记必须提醒建造程序不可恢复"
+    assert any("已智能压缩" in t for t in smsay), smsay
+    # 旧会话留档, 仍可“恢复会话”找回(session-* 才参与恢复, compact-* 不参与)
+    assert list(paths.SESSION_DIR.glob("compact-*.jsonl")), "旧会话应落盘 compact-*"
+    # 忙时无效(与「压缩」同规则), 且不消耗模型请求
+    bot2.agent_busy = True
+    sid_busy = bot2.session.id
+    smsay.clear()
+    sm_calls.clear()
+    bot2.process_line("[2026-10-10 18:43:01:000 INFO] [Scripting] [VIKTOR-CHAT] 路人甲: 智能压缩")
+    assert bot2.session.id == sid_busy and not sm_calls, "忙时不应请求摘要"
+    assert smsay and "智能压缩无效" in smsay[0], smsay
+    bot2.agent_busy = False
+    # 摘要失败 → 上下文完全不变(宁可不压也不丢), 并告知可用「压缩」
+    _mk_build_session(901)
+    sid_fail = bot2.session.id
+    smsay.clear()
+
+    def fail_post_summary(messages, params):
+        raise RuntimeError("HTTP 500: 服务器开小差")
+
+    orig_post_sm = bot2._post
+    bot2._post = fail_post_summary
+    try:
+        bot2.process_line("[2026-10-10 18:43:02:000 INFO] [Scripting] [VIKTOR-CHAT] 路人甲: 智能压缩")
+        deadline = time.time() + 5
+        while bot2._smart_compact_running and time.time() < deadline:
+            time.sleep(0.02)
+    finally:
+        bot2._post = orig_post_sm
+    assert bot2.session.id == sid_fail, "摘要失败不应改动会话"
+    assert len(bot2.session.messages) == 6, len(bot2.session.messages)
+    assert any("智能压缩失败" in t and "「压缩」" in t for t in smsay), smsay
+    # 95% 自动触发: 未超输入预算也先做智能压缩; 失败一次后本会话不再自动重试
+    bot2.cfg["smart_compact_auto_pct"] = 95
+    bot2.cfg["context_window_tokens"] = 100_000
+    orig_budget = bot2._input_token_budget
+    bot2._input_token_budget = lambda: 100_000   # 固定预算, 只用 95% 这一条件触发
+    _mk_build_session(902)
+    assert not bot2._maybe_compact_for_size(), "未到 95% 不应自动压缩"
+    bot2.session.messages.append({"role": "user", "content": "B: " + "z" * 95_000})
+    bot2.agent_busy = True   # 模拟在 worker 里(避免真实发 tellraw)
+    sm_calls.clear()
+    bot2._post = fake_post_summary
+    try:
+        assert bot2._maybe_compact_for_size(), "到 95% 应自动智能压缩"
+        assert bot2.session.id != 902 and len(sm_calls) == 1, (bot2.session.id, len(sm_calls))
+        # 失败一次 → 本会话不再自动重试(不会每轮白调一次模型)
+        _mk_build_session(903)
+        bot2.session.messages.append({"role": "user", "content": "B: " + "z" * 95_000})
+        sm_calls.clear()
+        bot2._post = fail_post_summary
+        assert not bot2._maybe_compact_for_size(), "摘要失败不应压缩"
+        assert bot2._smart_compact_auto_failed, "自动摘要失败应记标记"
+        bot2._post = fake_post_summary
+        assert not bot2._maybe_compact_for_size(), "失败后本会话不应再自动重试"
+        assert not sm_calls, sm_calls
+    finally:
+        bot2._post = orig_post_sm
+        bot2._input_token_budget = orig_budget
+        bot2.cfg["context_window_tokens"] = 1048576
+        bot2.agent_busy = False
+    bot2.bridge.say_as_viktor = orig_say_sm
+    print("智能压缩自测 OK")
+
     # ===== 状态 / 备份控制词自测 =====
     # 两个工具已下线: 模型侧不可见, 改由程序控制词提供
     tnames = set(capabilities.registered_names())

@@ -31,6 +31,7 @@ from .constants import (
     RE_LIST,
     RESTORE_DEFAULT_WORD,
     RESTORE_WORD,
+    SMART_COMPACT_WORD,
     SOFT_STOP_WORD,
     STATUS_WORD,
     TOOL_OFF_WORD,
@@ -118,6 +119,10 @@ class BotAppMixin:
                 return
             if stripped == COMPACT_WORD:
                 self._on_compact(name)
+                return
+            if stripped == SMART_COMPACT_WORD:
+                # 摘要式压缩: 先让模型把上下文压成工作摘要, 再重建会话(后台线程)
+                self._on_smart_compact(name)
                 return
             if stripped == STATUS_WORD:
                 self._on_status(name)

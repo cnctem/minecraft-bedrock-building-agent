@@ -33,6 +33,8 @@ PIN_NAME = "viktor_pin"  # 常加载区域命名前缀(仅创造/执行模式; �
 CLEAR_WORD = "清空"  # 控制面: 默认模型的清空触发词(其余触发词见 models.py 的模型档案;
                      # 实际分发用 models.resolve_trigger, 这里只作默认值/文档)
 COMPACT_WORD = "压缩"  # 控制面: 压缩会话上下文(只留玩家消息与发言, 不进上下文)
+SMART_COMPACT_WORD = "智能压缩"  # 控制面: 用模型把上下文压成工作摘要(保留进度/坐标/建造状态)
+SMART_COMPACT_AUTO_PCT = 95  # 上下文占用到输入预算的这个百分比就自动智能压缩(配置可覆盖)
 STATUS_WORD = "状态"  # 控制面: 播报服务器进程/负载/在线玩家(任何玩家可触发, 不进上下文)
 BACKUP_WORD = "备份"  # 控制面: 触发存档热备份(需空闲; 不可中止, 结果回执走 [系统])
 PLAN_WORD = "计划模式"  # 控制面: 进入计划模式(任何玩家可触发, 程序处理)
@@ -98,3 +100,9 @@ ONESHOT_FORCE_STOP = re.compile(r"^1[ \u3000]+强制停止$")  # 停止全部一
 
 # 可重试的 HTTP 状态码: 限流/瞬态错误重试有意义; 4xx(400 参数错/401 鉴权)重试无意义。
 RETRYABLE_HTTP = {408, 409, 425, 429, 500, 502, 503, 504}
+
+
+class Aborted(Exception):
+    """一次 API 请求被「强制停止」打断。不是 API 错误, 不该给玩家报错。
+    放在这里(而不是 bot_agent)是因为控制面 bot_control 也要捕获它,
+    而 bot_control 不该 import bot_agent。"""

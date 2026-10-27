@@ -12,15 +12,13 @@ import urllib.request
 import capabilities
 
 from . import models
-from .constants import (CONTEXT_WARN_START_PCT, CONTEXT_WARN_STEP_PCT, CREATIVE_MODES,
-                        MODE_EXECUTE, MODE_NORMAL, PIN_MODES, RETRYABLE_HTTP)
+from .constants import (Aborted, CONTEXT_WARN_START_PCT, CONTEXT_WARN_STEP_PCT, CREATIVE_MODES,
+                        MODE_EXECUTE, MODE_NORMAL, PIN_MODES, RETRYABLE_HTTP,
+                        SMART_COMPACT_AUTO_PCT)
 from .paths import log
 from .profiles import EFFORT_KEYS, LIMIT_DEFAULTS, LIMIT_KEYS, MODES, PROMPTS, TOOLS, Mode
+from .prompts import SMART_COMPACT_PROMPT
 from .session import Session
-
-
-class Aborted(Exception):
-    """一次 API 请求被「强制停止」打断。不是 API 错误, 不该给玩家报错。"""
 
 
 class BotAgentMixin:
@@ -244,16 +242,37 @@ class BotAgentMixin:
         capabilities.set_blocked_tools(capabilities.registered_names() - self._allowed_tools())
 
     def _maybe_compact_for_size(self) -> bool:
-        """纯程序判断: 估算上下文超过输入预算就压缩(只留玩家消息与游戏内发言),
-        返回是否重建过上下文。压缩后仍超预算(例如玩家消息本身太长)才整段清空兜底,
-        沿用与“清空”同一套完整初始化。不走模型、不询问玩家。
-        一次性对话的 ephemeral 上下文很短, 且绝不能清主会话, 直接跳过。"""
+        """纯程序判断: 估算上下文占用, 该压就压。返回是否重建过上下文。
+
+        两条路:
+        - 占用到输入预算的 smart_compact_auto_pct(默认 95%)时 → **智能压缩**
+          (先让模型写工作摘要, 保留进度/坐标/建造状态; 失败则本会话不再自动重试);
+        - 超过输入预算(窗口 − 输出上限 − 余量) → 原本的对话压缩(只留玩家消息与发言),
+          压完仍超预算(例如玩家消息本身太长)才整段清空兜底, 沿用与“清空”同一套完整初始化。
+        不走模型的询问环节、不打断任务; 一次性对话的 ephemeral 上下文很短, 直接跳过。"""
         if self._oneshot() or not self.session:
             return False
         used = Session._est_tokens(self.session.messages)
         budget = self._input_token_budget()
         self._maybe_warn_context_size(used)
         if used <= budget:
+            if not self._smart_compact_auto_failed and self._smart_compact_due(used):
+                window = int(self._model_spec().get("context_window_tokens") or 0)
+                pct = int(used * 100 / budget) if budget else 0
+                wpct = used * 100 / window if window else 0
+                stats = self._smart_compact_session()
+                if stats:
+                    log(f"[智能压缩] 上下文 {used} 估算 token = 输入预算 {budget} 的 {pct}%"
+                        f"(窗口 ~{wpct:.0f}%), 已自动智能压缩"
+                        f"(摘要 {stats['summary_chars']} 字, 移除 {stats['dropped']} 条过程记录)")
+                    if self.cfg.get("notify_context_clear", True):
+                        self._sys(f"上下文已用到输入预算的 {pct}%, 我已把对话智能压缩成工作摘要"
+                                  "(任务进度/坐标/尺寸都留着)。建造程序源码不会随摘要保留,"
+                                  "继续施工我会按摘要里的尺寸重写。")
+                    return True
+                # 摘要失败(已回一条 [系统]): 本会话不再自动重试, 免得每轮都白调一次模型
+                self._smart_compact_auto_failed = True
+                log("[智能压缩] 自动摘要失败, 本会话不再自动重试(仍可发「压缩」或「智能压缩」)")
             return False
         msgs, stats = self._build_compact_messages()
         if Session._est_tokens(msgs) > budget:
@@ -262,7 +281,7 @@ class BotAgentMixin:
                 f"已完整初始化新会话(丢弃 {n} 条消息)")
             if self.cfg.get("notify_context_clear", True):
                 self._sys("上下文太长, 我已清空重开。发送「恢复会话」可找回上一段对话; "
-                          "以后可提前发「压缩」, 只压缩对话、不清空。")
+                          "以后可提前发「智能压缩」(先写工作摘要)或「压缩」, 不必等清空。")
             return True
         self._apply_compact(msgs, stats)
         log(f"[压缩] 上下文约 {used} 估算 token 超过预算 {budget}, 已自动压缩"
@@ -270,8 +289,18 @@ class BotAgentMixin:
             f"移除 {stats['dropped']} 条过程记录)")
         if self.cfg.get("notify_context_clear", True):
             self._sys("上下文太长, 我已自动压缩对话(保留玩家消息与我说过的话)。"
-                      "以后想随时整理上下文, 发「压缩」即可。")
+                      "以后想随时整理上下文, 发「智能压缩」(先写摘要, 保留更多细节)"
+                      "或「压缩」即可。")
         return True
+
+    def _smart_compact_due(self, used: int) -> bool:
+        """上下文占用是否到了「自动智能压缩」的档位(默认 95%)。
+
+        分母是**输入预算**(窗口 − 本轮输出上限 − 余量), 而不是裸窗口: 输出额度占比大的模型
+        (kimi 262144 窗口配 32768 输出 ≈ 12.5%)按裸窗口算 95% 时, 早就被强制普通压缩接管了。
+        按预算算, 无论什么模型都是“距离强制压缩只剩 5% 预算”时动手: 既不会白压也不会来不及。"""
+        pct = int(self.cfg.get("smart_compact_auto_pct", SMART_COMPACT_AUTO_PCT))
+        return used * 100 >= self._input_token_budget() * pct
 
     def _maybe_warn_context_size(self, used: int) -> None:
         """上下文占用每跨过一档(70% 起、步长 10%)就用 [系统] 提醒玩家一次, 同一档只提一次。
@@ -289,9 +318,11 @@ class BotAgentMixin:
             return
         self._context_warn_level = level
         log(f"[上下文] 估算 {used} token / 窗口 {window} (~{level}%), 已用 [系统] 提醒玩家")
-        self._sys(f"对话上下文已占用约 {level}%, 接近上限时我会自动压缩对话"
-                  f"(只保留玩家消息与我说过的话)。想现在就压缩, 发「压缩」即可"
-                  f"(有任务在跑时先「停止」或「强制停止」); 当前任务不受影响。")
+        auto = int(self.cfg.get("smart_compact_auto_pct", SMART_COMPACT_AUTO_PCT))
+        self._sys(f"对话上下文已占用约 {level}%。到输入预算的 {auto}% 我会自动做一次"
+                  f"「智能压缩」(用模型把进度/坐标/建造状态压成摘要, 比「压缩」保留更多细节)。"
+                  f"想现在就整理, 发「智能压缩」(要模型写摘要)或「压缩」(只留对话); "
+                  f"有任务在跑时先「停止」或「强制停止」。当前任务不受影响。")
 
     def _input_token_budget(self) -> int:
         """输入能占多少 token: 本会话模型的窗口 − 本轮最大输出 − 安全余量。
@@ -531,6 +562,43 @@ class BotAgentMixin:
             return "", e
         return (msg.get("content") or "").strip(), None
 
+    def _summary_params(self) -> dict:
+        """摘要请求的参数: 思考强度取最低档、只出正文(不带工具)、输出额度单独限死。
+        不能直接用模式参数——创造模式下 max_tokens 会被抬到很大, 摘要不需要那么多。"""
+        return {
+            "effort": "low",
+            "max_tokens": max(512, int(self.cfg.get("smart_compact_max_tokens", 2048))),
+            "temperature": None,
+            "no_tools": True,   # 摘要器不给工具, 也避免模型想“先去查一下”
+        }
+
+    def _request_summary(self) -> tuple[str, Exception | None]:
+        """让当前模型把整个上下文压成一份工作摘要(智能压缩的第一步)。
+        返回 (摘要正文, 异常): 失败不抛, 由调用方决定回执与是否兜底——宁可不压也不丢上下文。"""
+        session = self._session()
+        if not session:
+            return "", RuntimeError("没有会话")
+        transcript = Session.transcript(
+            session.messages,
+            max_chars=int(self.cfg.get("smart_compact_input_chars", 40000)))
+        if not transcript.strip():
+            return "", RuntimeError("上下文为空")
+        messages = [{"role": "system", "content": SMART_COMPACT_PROMPT},
+                    {"role": "user", "content": transcript}]
+        try:
+            msg, _ = self._post(messages, self._summary_params())
+        except Aborted:
+            raise  # 被「强制停止」打断: 交给控制面区别处理(不报 API 错)
+        except Exception as e:
+            log(f"[智能压缩] 摘要请求失败: {e}")
+            return "", e
+        text = (msg.get("content") or "").strip()
+        if not text:
+            log("[智能压缩] 摘要请求返回空正文")
+            return "", RuntimeError("模型没有返回摘要正文")
+        log(f"[智能压缩] 摘要生成完成: {len(text)} 字(输入记录 {len(transcript)} 字)")
+        return text, None
+
     def call_api(self) -> tuple[str, bool]:
         """function calling 循环: AI 可调能力工具, 执行结果回传后再生成最终回复。
         工具轮次也 append-only 写入会话上下文, 保持缓存前缀稳定。
@@ -723,8 +791,9 @@ class BotAgentMixin:
     def _worker(self):
         while self.running:
             with self.cv:
-                # 「备份」期间不开新任务: 消息继续入队, 备份结束(_run_backup 会 notify)再处理
-                while self.running and (self._backup_running
+                # 「备份」与「智能压缩」期间不开新任务: 消息继续入队, 备份结束
+                # (_run_backup 会 notify) / 摘要写完(_run_smart_compact 会 notify)再处理
+                while self.running and (self._backup_running or self._smart_compact_running
                                         or (not self.pending and not self._nudge)):
                     self.cv.wait(timeout=1)
                 # 积压多条时合并成一次请求(所有消息已在上下文中, 一次回复即可)

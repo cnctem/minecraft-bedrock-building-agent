@@ -21,6 +21,12 @@ def memory_note() -> str:
     return "# 你的长期记忆\n\n" + (capabilities.read_memory() or "(空)")
 
 
+def _clip_chars(text: str, limit: int) -> str:
+    """按字符截断并标注省略(与 bot_agent._clip 同口径, 但这里是叶子模块的独立实现)。"""
+    text = text or ""
+    return text if len(text) <= limit else text[:limit] + "…"
+
+
 class Session:
     """一次会话: 从有人进服到服务器清零。上下文平时 append-only 以保证缓存命中;
     唯一的重写路径是 compact()(压缩): 只留玩家消息与游戏内发言, 有损、会打破前缀缓存。"""
@@ -102,6 +108,16 @@ class Session:
     # 只保留"对话记录": 玩家消息 + 维克托的游戏内发言(send_chat_message, 含 ptc 内嵌)。
     # 工具调用/结果、普通正文、思考内容、旧系统注记全部丢弃; 由调用方负责重新注入
     # 记忆/技能书/模式注记与压缩完成注记, 并开新会话。
+
+    @staticmethod
+    def _args_of(tc: dict) -> dict:
+        """取一次工具调用的参数字典; 解析失败按空字典处理(宁可少信息也不抛)。"""
+        raw = (tc.get("function") or {}).get("arguments")
+        try:
+            args = json.loads(raw) if isinstance(raw, str) else (raw or {})
+        except (TypeError, ValueError):
+            return {}
+        return args if isinstance(args, dict) else {}
 
     @staticmethod
     def _rewrite_ptc_call(tc: dict) -> dict | None:
@@ -207,6 +223,92 @@ class Session:
         stats = {"kept_user": kept_user, "kept_speech": kept_speech,
                  "dropped": len(messages) - len(out)}
         return out, stats
+
+    # ---------- 智能压缩(摘要式压缩)的输入与附带材料 ----------
+
+    # 建造程序只存在于工具调用参数里(不在世界、也不在行为包留档), 压缩会把它整个丢掉。
+    # 智能压缩 / 普通压缩都会把「最后一次」原样带进新会话, 其余模块的源码只能由模型重写。
+    BUILD_PROGRAM_TOOLS = ("build_preview", "build_commit", "build_blueprint")
+
+    @classmethod
+    def transcript(cls, messages: list[dict], max_chars: int = 40000,
+                   arg_chars: int = 240, result_chars: int = 600) -> str:
+        """把上下文压成「智能压缩」用的纯文本记录(压缩器模型的输入)。
+
+        保留: 玩家消息、你在游戏内说过的话、工具调用名与参数前段、工具结果前段。
+        丢弃: system 注记(记忆/技能书/模式注记压缩后会重新注入)、思考链、你不可见的正文长度。
+        超长时保留开头与结尾(开头是原始需求, 结尾是当前进度), 并在中间**明确标注**省略了多少字符——
+        不标注的话压缩器会把断口两侧当成连续的事实。"""
+        lines: list[str] = []
+        for m in messages:
+            role = m.get("role")
+            if role == "system":
+                continue
+            if role == "user":
+                lines.append("玩家: " + (m.get("content") or ""))
+                continue
+            if role == "tool":
+                lines.append("结果: " + _clip_chars(m.get("content") or "", result_chars))
+                continue
+            content = (m.get("content") or "").strip()
+            if content:
+                lines.append("你的正文: " + _clip_chars(content, 300))
+            for tc in (m.get("tool_calls") or []):
+                fn = tc.get("function") or {}
+                name = fn.get("name") or "?"
+                args = cls._args_of(tc)
+                if name == "send_chat_message":
+                    lines.append("你在游戏内说: " + str(args.get("text") or ""))
+                    continue
+                lines.append(f"调用 {name}: "
+                             + _clip_chars(json.dumps(args, ensure_ascii=False), arg_chars))
+        text = "\n".join(lines)
+        if len(text) <= max_chars:
+            return text
+        head = max_chars // 4
+        tail = max_chars - head
+        return (text[:head]
+                + f"\n…(中间省略 {len(text) - max_chars} 字符)…\n"
+                + text[-tail:])
+
+    @classmethod
+    def last_build_program(cls, messages: list[dict], result_chars: int = 500) -> str:
+        """取出「压缩前最后一次建造程序」: 程序源码 + 参数(origin/facing/name…) + 结果摘要。
+
+        程序源码只存在于 build_* 的工具调用参数里 —— 压缩把它们全丢掉, 之后既不能复原也查不到,
+        继续施工只能重写。这块单独原样保一份, 模型压缩后还能接着改参数、接着预览/提交。
+        没有建造调用时返回空串。"""
+        for i in range(len(messages) - 1, -1, -1):
+            m = messages[i]
+            if m.get("role") != "assistant":
+                continue
+            for tc in reversed(m.get("tool_calls") or []):
+                fn = tc.get("function") or {}
+                name = fn.get("name")
+                if name not in cls.BUILD_PROGRAM_TOOLS:
+                    continue
+                args = cls._args_of(tc)
+                program = args.get("program")
+                if not isinstance(program, str) or not program.strip():
+                    continue
+                meta = {k: args[k] for k in ("name", "origin", "facing", "scan", "symmetry")
+                        if k in args}
+                result = ""
+                for f in messages[i + 1:]:
+                    if f.get("role") == "assistant":
+                        break
+                    if f.get("role") == "tool" and f.get("tool_call_id") == tc.get("id"):
+                        result = f.get("content") or ""
+                        break
+                parts = ["# 压缩前最后一次建造程序(原样保留: 可以直接改参数重新预览/提交)",
+                         f"- 调用: {name}"
+                         + (f", 参数: {json.dumps(meta, ensure_ascii=False)}" if meta else "")]
+                if result:
+                    parts.append(f"- 那次调用的结果(前 {result_chars} 字): "
+                                 + _clip_chars(result, result_chars))
+                parts.extend(["- 程序源码:", "[程序开始]", program.strip(), "[程序结束]"])
+                return "\n".join(parts)
+        return ""
 
     def build_request_messages(self) -> list[dict]:
         """全局常量 system 前缀 + append-only 日志, 不做任何裁剪。
