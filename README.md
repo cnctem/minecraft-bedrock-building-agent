@@ -209,7 +209,7 @@ python3 bot.py --test         # 解析逻辑自测
 | `get_player_position(player?)` | 在线玩家实时坐标（行为包脚本，无指令可查）。返回整数**方块坐标**（向下取整），与玩家屏幕左上角显示的坐标完全一致 |
 | `get_player_hand(player?)` | 在线玩家手持物品 |
 | `get_block(x, y, z, dimension?)` | 读坐标上的方块类型与状态（行为包脚本；基岩版无 `/data`） |
-| `get_heightmap(x1, z1, x2, z2, y_max?, y_min?)` | **看地形**：一次给出整片每列地表 y + 顶面方块类型（≤4096 列）。选址、落差、地基/挡土墙高度、岸线水线都看它 |
+| `get_heightmap(x1, z1, x2, z2, detail?, y_max?, y_min?)` | **看地形**（≤4096 列）：默认 `summary` 只回高度统计、极值/关键点与顶面类型计数，适合大范围初勘；`heights` 回完整逐列高度网格，`full` 再回顶面分布图。完整网格很占上下文，只在必要时对 ≤32×32 的小范围使用 |
 | `get_slice(axis, level, x1..z2)` | **看平面**：俯视/立面/剖面渲染成字符图 + 图例（≤4096 格）。看墙、屋顶、门窗、对称、楼层截面；施工后复检形状 |
 | `inspect_region(x1..z2, filter?, detail?, limit?)` | **看体量**：区域类型计数（默认 summary）；给 `filter` 时额外回 `match`/`mismatch` + 不符合项坐标（空洞、放错），是**施工复检主力**——mismatch 归零才算对。`detail="cells"` 回具体坐标。≤32768 格 |
 | `find_blocks(block, x1..z2, limit?)` | 在区域内找某方块的全部坐标（类型子串匹配，`ore` 匹配所有矿）。≤32768 格 |

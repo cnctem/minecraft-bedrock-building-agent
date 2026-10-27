@@ -87,12 +87,16 @@ GET_HEIGHTMAP_SCHEMA = {
     "function": {
         "name": "get_heightmap",
         "description": (
-            "一次读出一整片区域的地形高度(每列地表 y + 顶面方块), 是选址与地形分析的主工具。"
-            "返回按行(z 从北到南)、列(x 从西到东)排的高度网格与顶面方块图, 并给出最低/最高高度。\n"
+            "一次读出一整片区域的地表情况, 是选址与地形分析的主工具; 默认 detail=summary, "
+            "只回最低/最高/平均/落差、极值与关键点坐标、顶面类型计数, 适合先看大范围。\n"
+            "确需每一列的精确高度时才用 detail=heights(完整高度网格 + 顶面计数); "
+            "确需草/水/树/沙的空间分布、岸线等时才用 detail=full(高度网格 + 顶面分布图)。"
+            "完整网格很占上下文: 先用 summary 定位问题, 再把必要区域缩到 32×32 或更小; "
+            "不要对大区域默认使用 heights/full。\n"
             "用途: 选址、判断落差与坡度、算地基/挡土墙/支柱高度、找平地、看水域与岸线、核对填方是否齐平。\n"
             "“地表”= 该列最高的非空气方块(水面、树叶也算, 看顶面类型即可分辨)。"
             "要越过水面看水底地面, 把 y_max 设在水平面下一格(例如水面 y=62 时 y_max=61)。\n"
-            "未加载的列记为 unloaded, 该列高度显示 ---, 不要编造。列数上限 4096(如 64×64)。\n"
+            "未加载的列记为 unloaded, 完整网格中显示 ---, 不要编造。列数上限 4096(如 64×64)。\n"
             "它只给地表, 没有门窗/材质层次: 那些用 get_slice 或 inspect_region。"
         ),
         "parameters": {
@@ -102,6 +106,12 @@ GET_HEIGHTMAP_SCHEMA = {
                 "z1": {"type": "integer", "description": "区域一角 z"},
                 "x2": {"type": "integer", "description": "对角 x"},
                 "z2": {"type": "integer", "description": "对角 z"},
+                "detail": {"type": "string", "enum": ["summary", "heights", "full"],
+                           "description": (
+                               "summary(默认)=高度统计/关键点/顶面计数, 大范围首选; "
+                               "heights=完整逐列高度网格; full=再含顶面方块分布图。"
+                               "heights/full 只在确有必要时使用, 并尽量缩到 32×32 内。"
+                           )},
                 "dimension": {"type": "string",
                               "description": "维度: overworld(默认)/nether/the_end"},
                 "y_max": {"type": "integer",

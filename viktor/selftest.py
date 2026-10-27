@@ -658,18 +658,55 @@ def self_test():
         rows.append(f"[2026-10-10 18:32:00:000 INFO] [Scripting] [{tag}] {rid} DONE")
         return rows
 
-    # 高度图: 2×2 列, 一行未加载
+    # 高度图: 默认摘要省 token; 完整高度/顶面分布按需显式请求
     _responders["heightmap"] = lambda cmd, rid: _frames("VIKTOR-MAP", rid, {
         "ok": True, "dim": "minecraft:overworld", "from": [10, 20], "to": [11, 21],
         "w": 2, "h": 2, "yMin": -64, "yMax": 320,
         "palette": ["grass_block", "water"], "heights": [64, 65, 62, 66],
         "types": [0, 1, 0, 0], "low": 62, "high": 66, "unloaded": 0, "missing": 0,
     }, reverse=True)
-    r = bot2._tool_get_heightmap({"x1": 10, "z1": 20, "x2": 11, "z2": 21})
+    hm_args = {"x1": 10, "z1": 20, "x2": 11, "z2": 21}
+    r = bot2._tool_get_heightmap(hm_args)
     assert "地形高度" in r and "地表 y 62~66" in r, r
-    assert " 64  65" in r and " 62  66" in r, r          # 高度网格
-    assert "grass_block" in r and "water" in r, r          # 图例
+    assert "平均 64.2" in r and "落差 4" in r, r
+    assert "最低 62 @ (10,21)" in r and "最高 66 @ (11,21)" in r, r
+    assert "grass_block 3列" in r and "water 1列" in r, r
+    assert "完整逐列高度" not in r and "顶面方块分布" not in r, r
     print(r)
+
+    heights = bot2._tool_get_heightmap({**hm_args, "detail": "heights"})
+    assert " 64  65" in heights and " 62  66" in heights, heights
+    assert "顶面类型计数" in heights and "顶面方块分布" not in heights, heights
+    full = bot2._tool_get_heightmap({**hm_args, "detail": "full"})
+    assert " 64  65" in full and "顶面方块分布" in full, full
+    assert "grass_block" in full and "water" in full, full
+    assert len(heights) < len(full), (len(heights), len(full))
+
+    # 大区域默认摘要的长度不随格数膨胀, 完整网格才按列数增长
+    _responders["heightmap"] = lambda cmd, rid: _frames("VIKTOR-MAP", rid, {
+        "ok": True, "dim": "minecraft:overworld", "from": [0, 0], "to": [31, 31],
+        "w": 32, "h": 32, "palette": ["grass_block", "water"],
+        "heights": [64 + i % 7 for i in range(1024)],
+        "types": [0 if i % 9 else 1 for i in range(1024)],
+        "unloaded": 0, "missing": 0,
+    })
+    big_args = {"x1": 0, "z1": 0, "x2": 31, "z2": 31}
+    summary = bot2._tool_get_heightmap(big_args)
+    big_grid = bot2._tool_get_heightmap({**big_args, "detail": "heights"})
+    assert "完整逐列高度" not in summary and len(summary) < 500, len(summary)
+    assert len(summary) * 4 < len(big_grid), (len(summary), len(big_grid))
+
+    # 全部未加载/空列时即使请求 full 也不输出无意义的大片 ---
+    _responders["heightmap"] = lambda cmd, rid: _frames("VIKTOR-MAP", rid, {
+        "ok": True, "dim": "minecraft:overworld", "from": [0, 0], "to": [1, 1],
+        "w": 2, "h": 2, "palette": [], "heights": [-1, -1, -1, -1],
+        "types": [255, 255, 255, 255], "low": -1, "high": -1,
+        "unloaded": 4, "missing": 0,
+    })
+    r = bot2._tool_get_heightmap({"x1": 0, "z1": 0, "x2": 1, "z2": 1,
+                                  "detail": "full"})
+    assert "没有可读地表" in r and "省略空网格" in r, r
+    assert "完整逐列高度" not in r and "--- ---" not in r, r
 
     # 缺帧: 明确报“回包不完整”, 不能拿半截 JSON 当结果
     _responders["heightmap"] = lambda cmd, rid: [
@@ -740,6 +777,8 @@ def self_test():
 
     # 参数校验: 不发指令直接拒绝(省一次往返)
     from .bus import BusArgError
+    assert "detail 只能是" in bot2._tool_get_heightmap(
+        {"x1": 0, "z1": 0, "x2": 1, "z2": 1, "detail": "everything"})
     assert "高度图列数最多" in bot2._tool_get_heightmap(
         {"x1": 0, "z1": 0, "x2": 64, "z2": 64})
     assert "32×32×32" in bot2._tool_inspect_region(

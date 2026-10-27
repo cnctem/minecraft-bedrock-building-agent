@@ -102,6 +102,9 @@ class BotToolsMixin:
             raise BusArgError("需要整数坐标 " + " ".join(names) + "。")
 
     def _heightmap_cmd(self, rid: str, args: dict) -> str:
+        detail = str(args.get("detail") or "summary").strip().lower()
+        if detail not in ("summary", "heights", "full"):
+            raise BusArgError('detail 只能是 "summary" / "heights" / "full"。')
         x1, z1, x2, z2 = self._box(args, ("x1", "z1", "x2", "z2"))
         cols = (abs(x2 - x1) + 1) * (abs(z2 - z1) + 1)
         if cols > HM_MAX_COLUMNS:
@@ -374,31 +377,88 @@ class BotToolsMixin:
         data = self._payload("get_heightmap", req)
         if isinstance(data, str):
             return data
+        detail = str(args.get("detail") or "summary").strip().lower()
         w, h = data["w"], data["h"]
         heights, types, palette = data["heights"], data["types"], data["palette"]
         fx, fz = data["from"]
         tx, tz = data["to"]
         unloaded, missing = data.get("unloaded", 0), data.get("missing", 0)
-        low, high = data.get("low", -1), data.get("high", -1)
-        head = (f"地形高度 x {fx}..{tx}, z {fz}..{tz} [{self._dim(data)}]: "
-                f"{w}×{h} 列, 地表 y {low}~{high}")
+
+        # types=255 才表示未加载/无方块; 高度本身可以是负数。
+        def unavailable(i: int) -> bool:
+            return i >= len(heights) or i >= len(types) or types[i] == 255
+
+        valid_indices = [i for i in range(w * h) if not unavailable(i)]
+        valid = [heights[i] for i in valid_indices]
+        low, high = (min(valid), max(valid)) if valid else (None, None)
+        head = (f"地形高度 x {fx}..{tx}, z {fz}..{tz} [{self._dim(data)}]: {w}×{h} 列, "
+                + (f"地表 y {low}~{high}" if valid else "没有可读地表"))
         if unloaded:
             head += f", 未加载 {unloaded} 列"
         if missing:
             head += f", 无方块 {missing} 列"
-        out = [head, "行=z(北→南), 列=x(西→东); 数字=该列地表 y, --- = 未加载/无方块"]
+        out = [head]
+        if not valid:
+            # 没数据时打印几千个 --- 只会浪费上下文。
+            out.append("所有列均未加载或没有方块，已省略空网格。")
+            return "\n".join(out)
+
+        counts = [0] * len(palette)
+        for i in valid_indices:
+            p = types[i]
+            if 0 <= p < len(counts):
+                counts[p] += 1
+        materials = sorted(((name, counts[i]) for i, name in enumerate(palette)
+                            if name not in (None, "", "?") and counts[i]),
+                           key=lambda item: (-item[1], item[0]))
+
+        def material_text() -> str:
+            parts = [f"{name} {count}列" for name, count in materials[:10]]
+            if len(materials) > 10:
+                parts.append(f"其他 {sum(n for _, n in materials[10:])}列")
+            return ", ".join(parts)
+
+        if detail == "summary":
+            # 默认只给决策所需的信息，不把两张 O(w*h) 的网格灌进上下文。
+            low_i = next(i for i in valid_indices if heights[i] == low)
+            high_i = next(i for i in valid_indices if heights[i] == high)
+            out.append(
+                f"高度摘要: 平均 {sum(valid) / len(valid):.1f}, 落差 {high - low}; "
+                f"最低 {low} @ ({fx + low_i % w},{fz + low_i // w}), "
+                f"最高 {high} @ ({fx + high_i % w},{fz + high_i // w})")
+            points, seen = [], set()
+            for label, c, r in (("中心", w // 2, h // 2), ("西北", 0, 0),
+                                ("东北", w - 1, 0), ("西南", 0, h - 1),
+                                ("东南", w - 1, h - 1)):
+                if (c, r) in seen:
+                    continue
+                seen.add((c, r))
+                i = r * w + c
+                value = "---" if unavailable(i) else str(heights[i])
+                points.append(f"{label}({fx + c},{fz + r})={value}")
+            out.append("关键点地表 y: " + "; ".join(points))
+            if materials:
+                out.append("顶面类型: " + material_text())
+            return "\n".join(out)
+
+        # heights = 完整高度网格 + 顶面计数; full = 再加顶面分布图。
+        out.append("完整逐列高度: 行=z(北→南), 列=x(西→东); --- = 未加载/无方块")
         for r in range(h):
-            row = heights[r * w:(r + 1) * w]
-            out.append(" ".join("---" if v < 0 else f"{v:3d}" for v in row))
-        # 顶面方块图: 一眼看出草/水/树/沙的分布
-        if palette:
-            out.append("顶面方块:")
+            row = []
+            for c in range(w):
+                i = r * w + c
+                row.append("---" if unavailable(i) else f"{heights[i]:3d}")
+            out.append(" ".join(row))
+        if materials:
+            out.append("顶面类型计数: " + material_text())
+        if detail == "full" and palette:
+            out.append("顶面方块分布:")
+            syms = self._symbols(palette)
             for r in range(h):
                 row = types[r * w:(r + 1) * w]
-                syms = self._symbols(palette)
                 out.append("".join("?" if v == 255 else (syms[v] if v < len(syms) else "?")
                                    for v in row))
-            out.append("图例: " + self._legend(palette))
+            out.append("图例: " + self._legend(palette, counts))
         return "\n".join(out)
 
     def _render_slice(self, req: Req, args: dict) -> str:

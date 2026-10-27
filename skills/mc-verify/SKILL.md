@@ -12,7 +12,7 @@ description: 检查与修复手册——用 heightmap/get_slice/inspect_region/f
 
 | 想知道 | 用 |
 |---|---|
-| 地面多高、落差多少、有没有坑 | `get_heightmap`（整片每列地表 y + 顶面方块） |
+| 地面多高、落差多少、有没有坑 | `get_heightmap`（默认摘要；逐列核对才对小范围用 `detail="heights"`，看顶面分布才用 `full`） |
 | 某一层/立面/剖面长什么样 | `get_slice`（字符图 + 图例，最省 token） |
 | 这片区域里有什么、各多少格 | `inspect_region`（默认只回类型计数） |
 | 目标方块有没有铺满、哪里不对 | `inspect_region(filter=目标)` → `match` / `mismatch` + 不符坐标 |
