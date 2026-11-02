@@ -12,7 +12,7 @@ from pathlib import Path
 
 import capabilities
 
-from . import build, paths, webfetch, wiki
+from . import build, history, paths, webfetch, wiki
 from .bus import BusArgError, Req
 from .constants import (
     BUS_TIMEOUT_TEXT,
@@ -665,6 +665,18 @@ class BotToolsMixin:
             else:
                 report += "\n[图片] 本次附带的图片太多, 这张没有附上; 需要就分批读取。"
         return report
+
+    # ---------- 会话历史: 列落盘会话 / 按文件名读(压缩口径) ----------
+
+    def _tool_list_sessions(self, args: dict) -> str:
+        return history.list_sessions(args.get("limit", history.DEFAULT_LIST_LIMIT))
+
+    def _tool_read_session(self, args: dict) -> str:
+        return history.read_session(
+            str(args.get("file") or ""),
+            max_chars=int(args.get("max_chars")
+                          or self.cfg.get("session_read_max_chars", history.DEFAULT_MAX_CHARS)),
+        )
 
     def _extract_command_output(self, text: str, cmd: str) -> list[str]:
         """从日志文本里抽出指令输出。ERROR/WARN 行必须保留并加标记——

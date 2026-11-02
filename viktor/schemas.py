@@ -545,3 +545,44 @@ READ_URL_SCHEMA = {
         },
     },
 }
+
+LIST_SESSIONS_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "list_sessions",
+        "description": (
+            "列出已经落盘的会话记录(新的在前, 默认 10 个), 每项给文件名、类型、模型、"
+            "开始时间、消息条数、大小与首句, 用来挑要回看哪一段历史。"
+            "只是文件清单; 读内容用 read_session。"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "limit": {"type": "integer", "description": "最多列几个, 默认 10, 上限 50"},
+            },
+        },
+    },
+}
+
+READ_SESSION_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "read_session",
+        "description": (
+            "按文件名读一段落盘的会话历史, 返回「压缩」口径的对话记录: "
+            "只有玩家消息与你在游戏内说过的话, 工具调用/结果与正文细节不在里面。"
+            "文件里本来就只有压缩后的信息, 所以不要指望看到原始工具参数或建造程序。"
+            "玩家问“上次聊了什么/之前那个工程做到哪”时先 list_sessions 找文件再读它。"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "file": {"type": "string",
+                         "description": "会话文件名(来自 list_sessions, 如 session-20261102-134225-s1.jsonl)"},
+                "max_chars": {"type": "integer",
+                              "description": "最多返回多少字符, 默认 12000; 超长时保留开头与结尾"},
+            },
+            "required": ["file"],
+        },
+    },
+}

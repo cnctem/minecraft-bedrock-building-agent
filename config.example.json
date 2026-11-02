@@ -104,6 +104,7 @@
   "read_url_max_chars": 1500,
   "read_url_allow_private": false,
   "read_url_user_agent": "",
+  "session_read_max_chars": 12000,
   "build_progress": true,
   "build_progress_min_sec": 2.0,
   "replay_log_on_truncate": false

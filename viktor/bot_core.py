@@ -34,6 +34,8 @@ from .schemas import (
     PIN_REGION_SCHEMA,
     READ_WIKI_PAGE_SCHEMA,
     READ_URL_SCHEMA,
+    LIST_SESSIONS_SCHEMA,
+    READ_SESSION_SCHEMA,
     RUN_COMMAND_SCHEMA,
     SEARCH_WIKI_SCHEMA,
     SEND_CHAT_SCHEMA,
@@ -99,6 +101,10 @@ class BotCoreMixin:
                              concurrency="parallel")
         capabilities.register("read_url", READ_URL_SCHEMA, self._tool_read_url,
                              concurrency="parallel")
+        capabilities.register("list_sessions", LIST_SESSIONS_SCHEMA,
+                             self._tool_list_sessions, concurrency="parallel")
+        capabilities.register("read_session", READ_SESSION_SCHEMA,
+                             self._tool_read_session, concurrency="parallel")
         capabilities.set_ptc_limits(cfg.get("ptc_max_calls", 24),
                                     cfg.get("ptc_result_limit", 30000),
                                     cfg.get("ptc_stated_calls", 12))

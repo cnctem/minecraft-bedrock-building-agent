@@ -12,7 +12,7 @@ from pathlib import Path
 
 import capabilities
 
-from . import Bot, paths, render, webfetch, wiki
+from . import Bot, history, paths, render, webfetch, wiki
 from .bridge import ScreenBridge
 from .config import load_config
 from .constants import (
@@ -2070,6 +2070,44 @@ def self_test():
         _srv.shutdown()
         _srv.server_close()
     print("read_url 读图/404/安全自测 OK")
+
+    # 会话历史: 列表 + 按文件名读(复用「压缩」口径: 只留玩家消息与游戏内发言)
+    _sess_name = "session-20990101-000000-s9999.jsonl"
+    _sess_path = paths.SESSION_DIR / _sess_name
+    paths.SESSION_DIR.mkdir(parents=True, exist_ok=True)
+    _rows = [
+        {"_meta": {"session": 9999, "model": "flash", "started": "2099-01-01T00:00:00"}},
+        {"role": "system", "content": "# 你的长期记忆\n\n- 测试"},
+        {"role": "user", "content": "Tester: 帮我看看上次的桥"},
+        {"role": "assistant", "content": None, "reasoning_content": "",
+         "tool_calls": [{"id": "s1", "type": "function",
+                         "function": {"name": "send_chat_message",
+                                      "arguments": json.dumps({"text": "好的, 我调记录看看"},
+                                                              ensure_ascii=False)}}]},
+        {"role": "tool", "tool_call_id": "s1", "content": "已发送到游戏内聊天。"},
+        {"role": "assistant", "content": None, "reasoning_content": "",
+         "tool_calls": [{"id": "s2", "type": "function",
+                         "function": {"name": "get_block",
+                                      "arguments": json.dumps({"x": 1, "y": 2, "z": 3})}}]},
+        {"role": "tool", "tool_call_id": "s2", "content": "minecraft:stone"},
+        {"role": "assistant", "content": "内部正文不该出现"},
+        {"role": "user", "content": "Tester: 谢谢"},
+    ] + [{"role": "user", "content": "Tester: " + "填充" * 200} for _ in range(3)]
+    _sess_path.write_text("".join(json.dumps(r, ensure_ascii=False) + "\n" for r in _rows),
+                          encoding="utf-8")
+    _list = history.list_sessions(5)
+    assert _sess_name in _list and "Tester: 帮我看看上次的桥" in _list, _list
+    _hist = history.read_session(_sess_name)
+    assert "Tester: 帮我看看上次的桥" in _hist and "维克托: 好的, 我调记录看看" in _hist, _hist
+    assert "get_block" not in _hist and "minecraft:stone" not in _hist, "只保留压缩后的对话"
+    assert "内部正文不该出现" not in _hist and "长期记忆" not in _hist, _hist
+    assert "Tester: 谢谢" in _hist
+    assert "只接受文件名" in history.read_session("../config.json")
+    assert "找不到会话文件" in history.read_session("session-nope.jsonl")
+    assert "省略" in history.read_session(_sess_name, max_chars=500), "超长应保留开头与结尾"
+    assert {"list_sessions", "read_session"} <= capabilities.registered_names()
+    assert {"list_sessions", "read_session"} <= bot2._allowed_tools()
+    print("会话历史 列表/读取/压缩口径自测 OK")
 
     # 转发开关: 正文开/关、工具开/关(控制词不进上下文; 转发只显示、不进上下文)
     fwd = []

@@ -61,6 +61,7 @@ bot.py(入口) → viktor.selftest(--test)
 | `viktor/models.py` | 模型档案：触发词 / 模型 ID / Base URL / key / 窗口 / 输出上限 / 思考强度映射 / 是否回传思考链 / 温度 |
 | `viktor/prompts.py` / `viktor/schemas.py` / `viktor/constants.py` / `viktor/paths.py` | 提示词 / 工具 schema / 常量 / 路径与日志(叶子层) |
 | `viktor/webfetch.py` | 外链读取：HTTP 抓取（SSRF 防护/体积/超时）、图片头解析、网页正文提取。`read_url` 的实现 |
+| `viktor/history.py` | 会话历史：列落盘会话、按文件名读并按「压缩」口径渲染成对话文本（`list_sessions` / `read_session`） |
 | `capabilities.py` | 能力注册表(工具注册、ptc、记忆、技能书、物品速查) |
 
 改一个方向的东西只需要动对应层：加工具 = `schemas.py` + `bot_tools.py`；调模式 = `profiles.py`；改提示词 = `prompts.py`。
@@ -221,6 +222,8 @@ python3 bot.py --test         # 解析逻辑自测
 | `search_wiki(query, lang?, limit?)` | 在 Minecraft Wiki 搜条目（默认中文 wiki，`lang="en"` 切英文），返回候选标题（含重定向提示）与摘要；再用 `read_wiki_page` 读正文。查配方/掉落/生成/机制等游戏事实 |
 | `read_wiki_page(title, section?, lang?)` | 读 wiki 页面正文。默认只回「开头摘要 + 章节目录」省上下文，用 `section` 精读某节（如「合成」「数据值」）；表格保留为 `\|` 分隔行、合成/烧炼配方渲染成网格。本服基岩版，以基岩版列为准 |
 | `read_url(url, max_chars?)` | 读玩家发来的链接/图片地址（只允许 http/https 公网地址）。图片（png/jpg/gif/webp）作为 **image 内容块**附在工具结果里，模型直接看图；文字报告给 HTTP 状态（404/403/超时/DNS 失败）、类型、大小、尺寸。网页返回标题+正文摘要，JSON/文本返回开头。内网/回环地址一律拒绝（防 SSRF） |
+| `list_sessions(limit?)` | 列出已落盘的会话记录（默认 10，新的在前）：文件名、类型（对话/一次性）、模型、开始时间、消息条数、大小、首句 |
+| `read_session(file, max_chars?)` | 按文件名读一段会话历史，**只回「压缩」口径的对话记录**（玩家消息 + 维克托在游戏内说过的话），工具调用/参数/正文细节不保留；默认 12000 字符，超长保留开头与结尾并标注省略。用于「上次聊了什么/之前那个工程做到哪」 |
 | `build_preview(program, origin, facing?, name?, scan?, symmetry?)` | **仅创造模式**：把受限 Python 建造程序编译成期望方块并与世界做差异对比，**不写世界**。返回 operation_id、包围盒、差异（新放置/覆盖/已正确/未加载）、批量填充数、警告。给 `scan=[x1..z2]`（局部坐标框）会先预取世界快照，程序里就能用 `api.height/api.block/api.solid/api.air` 贴地形建。`symmetry="u"|"w"|"u:0"` 做镜像对称检查（写世界前抓设计错误） |
 | `build_commit(operation_id)` | **仅创造模式**：先逐格 diff（已正确的不重复写）再批量写入（`fillBlocks` + 贪心合并），最后**自动复读校验**，返回 `verify.mismatch/holes/wrong` 与样本坐标；`mismatch==0` 才算完成。大工程按阶段播报进度 |
 | `build_undo(operation_id?)` | **仅创造模式**：用提交前保存的方块体积还原（撤销栈 2 个，reload 清空） |
@@ -284,6 +287,20 @@ python3 bot.py --test         # 解析逻辑自测
   一次工具结果最多附 4 张图（`capabilities.MAX_PENDING_IMAGES`）。
 - 配置项：`read_url_timeout_sec` / `read_url_max_bytes` / `read_url_max_chars` /
   `read_url_allow_private` / `read_url_user_agent`（留空则沿用 `wiki_user_agent`）。
+
+### 会话历史（`list_sessions` / `read_session`）
+
+会话每次结束/重启都会落盘到 `logs/sessions/`（一次性对话在 `logs/oneshot/`），
+落盘内容本身已经是压缩后的产物。所以读历史不再回放工具调用：
+
+- `list_sessions(limit?)` 按修改时间列最近落盘的会话（默认 10 个，上限 50），
+  给文件名、类型、模型、开始时间、消息条数、大小与首句，方便挑。
+- `read_session(file, max_chars?)` **复用「压缩」逻辑**（`Session.compact`）：只保留玩家消息与
+  维克托在游戏内说过的话（含 `ptc` 里夹带的发言），再用 `玩家: …` / `维克托: …` 渲染成纯文本；
+  工具调用、参数与正文细节一律丢弃 —— 会话文件里本来也没有这些。
+- 安全：只接受纯文件名（不带路径，防穿越），限制 16 MiB；单次结果上限 `session_read_max_chars`（默认 12000），
+  超长时保留开头与结尾并明确标注省略了多少字符。
+- 历史是**按需读取**：不预置进上下文，玩家问起时先 `list_sessions` 再 `read_session`。
   零第三方依赖（`urllib` + 标准库），不改世界、不执行网页里的任何指令。
 
 ### 技能书（skill）
