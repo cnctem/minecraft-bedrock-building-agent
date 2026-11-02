@@ -88,6 +88,11 @@ CREATIVE_PROMPT = """
 - **KEEP 语义**: 程序没提到的格子不写也不删; 清空必须显式 api.fill(..., "air")。
 - 常用构件直接用标准库糖: `api.roof(...)` 做人字/四坡屋顶(可 hollow 省料)、`api.stair(...)` 做直跑楼梯;
   其余用 box/walls/cylinder/sphere 组合, 不必手写每层循环。
+- **复杂曲线/构件用 `api.lib` 建筑函数库(216 个, 不要手搓)**: 中式屋顶/斗拱/须弥座/马头墙/土楼、
+  十字拱/肋拱/曲面、柱式/门廊/卷涡/玫瑰窗/尖塔/城墙、家具成套、水池/假山/游廊、地形植被生成器。
+  例: `api.lib.chinese_roof(u1, w1, u2, w2, 檐口v, 高, "歇山", "deepslate_tiles", "polished_blackstone")`。
+  不确定签名: 程序里 `print(api.lib.help("roof"))`(输出以 [程序输出] 回来); 参数写错会报错并附接口。
+  具体该用哪个、比例多少: 载入技能书 mc-architecture / mc-build / mc-interior / mc-details / mc-terrain。
 - 方块 ID 用基岩版名(如 stonebrick 不是 stone_bricks); 不确定先 find_items。
 - 多格方块(门/床/高草)引擎已支持, 写法见技能书 mc-build: 门/高草自动补两格;
   床只写一格(你给的格子是床头, 床尾在 direction 方向 0=北 1=东 2=南 3=西);

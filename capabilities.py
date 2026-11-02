@@ -631,6 +631,10 @@ def skills_note() -> str:
              '冲突时以 system prompt 为准。']
     for name, s in skills.items():
         lines.append(f"- {name}: {s['description']}")
+    if "mc-build" in skills or "mc-architecture" in skills:
+        lines.append("- 建造程序里的 api.lib 是建筑函数库(中式屋顶/拱顶/柱式/家具/园林/生成器, "
+                     "200+ 个函数); 签名用 print(api.lib.help(\"名字\")) 反查, "
+                     "参数写错会报错并附接口。复杂构件不要手搓循环。")
     return "\n".join(lines)
 
 

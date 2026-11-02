@@ -164,6 +164,8 @@ class BotBuildMixin:
                    f"已正确 {diff.get('noop', 0)} 格 / 未加载 {diff.get('unloaded', 0)} 格")
         out.append(f"执行计划: {(data.get('plan') or {}).get('boxes', '?')} 个批量填充"
                    f"(程序 {stats['ops']} 个形状)")
+        for note in (stats.get("notes") or [])[:12]:
+            out.append(f"[程序输出] {note}")
         chk = stats.get("checks") or {}
         sym = chk.get("symmetry")
         if sym:

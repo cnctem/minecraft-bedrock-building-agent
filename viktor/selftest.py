@@ -2224,6 +2224,61 @@ for u in range(0, W, 3):
     assert ":" in payload["rle"] and " " not in payload["rle"], payload["rle"][:60]
     print("建造编译自测 OK", stats["size"], stats["cells"], "格", stats["payload_bytes"], "字节")
 
+    # ---------- 建筑函数库(buildlib) ----------
+    from . import buildlib as L
+
+    # 索引一致性: CATEGORIES 与 SPEC 必须一一对应(新增函数忘登记会在这里挂)
+    assert L.missing_from_spec() == [], L.missing_from_spec()
+    assert len(L.all_functions()) >= 200, len(L.all_functions())
+    assert all(name in L.SPEC for name in L.all_functions()), "CATEGORIES 里有未登记 SPEC 的函数"
+
+    # 分区示例: 每个类别至少成功编译一次(覆盖中式/西洋/拱顶/园林/装饰/生成器)
+    lib_samples = {
+        "chinese": 'api.lib.sumeru_base(-1,-1,12,10,0,2,"stonebrick")\n'
+                   'api.lib.chinese_roof(-3,-3,14,12,4,5,"歇山","deepslate_tiles","polished_blackstone")',
+        "regional": 'api.lib.guanyin_dou(0,0,10,1,0,4,4,"quartz_block")\n'
+                    'api.lib.swallowtail_ridge(0,0,10,1,8,4,"red_terracotta")',
+        "vault": 'api.lib.groin_vault(0,0,12,10,6,4,"stonebrick")\n'
+                 'api.lib.rib_vault(0,0,12,10,10,5,1,"quartz_block","stonebrick")',
+        "western": 'api.lib.baroque_portico(0,0,16,8,2,5,7,"south","quartz_block")\n'
+                   'api.lib.pilaster_strip(0,0,16,0,0,12,4,"south","quartz_block")',
+        "garden": 'api.lib.rockery(0,0,8,4,6,3,3,"stonebrick","andesite")\n'
+                  'api.lib.round_basin(20,0,2,5,2,"stonebrick")',
+        "decor": 'api.lib.living_room_set(0,0,0,"front")\n'
+                 'api.lib.kitchen_counter(0,0,8,5,"north")',
+        "create": 'api.lib.terrain(0,0,0,16,"hills")\n'
+                  'api.lib.vegetation(0,0,8,12,"forest")',
+    }
+    for cat, prog in lib_samples.items():
+        _, st = B.compile_build(prog, (0, 64, 0), "south", B.block_ids())
+        assert st["cells"] > 20, (cat, st)
+    print("建筑函数库分类自测 OK", len(L.all_functions()), "个函数")
+
+    # 参数写错 → 错误里带接口签名(模型能照着改)
+    try:
+        B.compile_build('api.lib.chinese_roof(0,0,10,10,5,"歇山")', (0, 0, 0), "south", B.block_ids())
+        raise AssertionError("缺参数应报错")
+    except B.BuildError as e:
+        assert "接口: chinese_roof(" in str(e), e
+
+    # api.lib.help() 经由 print → notes 回传; 方块别名(Java 名)自动映射
+    payload, st = B.compile_build(
+        'print(api.lib.help("rose"))\n'
+        'api.fill((0,0,0),(1,0,1),"stone_bricks")\n'
+        'api.set(2,0,0,"dandelion")\n',
+        (0, 64, 0), "south", B.block_ids())
+    assert any("rose_window" in n for n in st["notes"]), st["notes"]
+    kinds = [e["b"] for e in payload["p"]]
+    assert "minecraft:stonebrick" in kinds and "minecraft:yellow_flower" in kinds, kinds
+    # 生成的函数文档不能落后于 registry(签名漂移会在这里暴露)
+    doc = (L.source_paths()[0].parent.parent.parent
+           / "skills/mc-architecture/references/functions-chinese.md")
+    assert doc.is_file(), doc
+    text = doc.read_text(encoding="utf-8")
+    assert "chinese_roof(u1, w1, u2, w2, base_v, height, style, tile, ridge=None)" in text, \
+        "functions-chinese.md 与 registry 不一致, 重跑 tools/gen_buildlib_docs.py"
+    print("函数库 help/别名/文档同步自测 OK")
+
     # 朝向: south 与 east 的局部→世界映射
     assert B.to_world((0, 0, 0), "south", 1, 2, 3) == (1, 2, 3)
     assert B.to_world((0, 0, 0), "north", 1, 2, 3) == (-1, 2, -3)

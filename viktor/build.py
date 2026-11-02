@@ -1,9 +1,11 @@
 """建造程序: AST 白名单 + 子进程沙箱 + 体素化 + KEEP/RLE 编码。
 
-模型写的是**函数体**, 作用域里有 `api`(纯几何, 不碰世界)。本模块把它变成
-「期望体素体积」: palette(索引 0 固定 = KEEP 不写) + 分层 RLE, 交给行为包执行。
+模型写的是**函数体**, 作用域里有 `api`(纯几何, 不碰世界) 和 `api.lib`
+(建筑函数库, 见 viktor/buildlib/)。本模块把它变成「期望体素体积」:
+palette(索引 0 固定 = KEEP 不写) + 分层 RLE, 交给行为包执行。
 
-依赖方向: 叶子模块, 只 import 标准库; 不 import 项目内模块。
+依赖方向: 叶子模块, 只 import 标准库 + `viktor.buildlib`(同样零项目内依赖,
+仅把自身源码拼成沙箱预置代码); 不 import 其它 bot_* 模块。
 """
 from __future__ import annotations
 
@@ -12,6 +14,8 @@ import json
 import subprocess
 import sys
 from pathlib import Path
+
+from .buildlib import BLOCK_ALIAS, LIB_SOURCE, all_functions as lib_functions
 
 # ---------- 限额(与行为包 BUILD_MAX_VOLUME / 调色板 64 对齐) ----------
 MAX_VOLUME = 65536        # 单次操作体积(格)
@@ -113,10 +117,28 @@ def validate_ast(source: str) -> None:
             raise BuildError(f"函数名不能以下划线开头: {node.name}")
 
 
-_PRELUDE = r'''
+_PRELUDE_HEAD = r'''
 import json, math, sys
 OPS = []
+NOTES = []
 MAX_OPS = int(sys.argv[1]) if len(sys.argv) > 1 else 20000
+# Java 版名字 / 常见误写 → 基岩版 (ID, states); 表由 buildlib 单一维护。
+_BLOCK_ALIAS = __BLOCK_ALIAS__
+
+def _norm_block(name, states=None):
+    b = str(name).strip().lower()
+    if b.startswith("minecraft:"):
+        b = b[10:]
+    got = _BLOCK_ALIAS.get(b)
+    if got is None:
+        return b, states
+    alias_name, alias_states = got
+    return alias_name, states if states is not None else alias_states
+
+def print(*args):
+    """沙箱里的 print: 不写 stdout, 收进 NOTES 回给模型(用于 api.lib.help() 等自检)。"""
+    if len(NOTES) < 40:
+        NOTES.append(" ".join(str(a) for a in args)[:2000])
 
 def _pt(p, what="坐标"):
     if isinstance(p, (list, tuple)) and len(p) == 3:
@@ -138,6 +160,11 @@ class _Api:
     def _add(self, d):
         if len(self.ops) >= MAX_OPS:
             raise ValueError("形状数超过上限 %d, 请用循环生成而不是逐个 set" % MAX_OPS)
+        k = d.get("k")
+        if isinstance(k, str):
+            d["k"], d["s"] = _norm_block(k, d.get("s"))
+        elif isinstance(k, (list, tuple)):
+            d["k"] = [_norm_block(x)[0] for x in k]
         self.ops.append(d)
     def set(self, u, v, w, block, states=None):
         p = _pt((u, v, w))
@@ -344,7 +371,9 @@ if snap is not None:
     api.air = snap.air
     api.solid = snap.solid
     api.height = snap.height
-g = {"api": api, "math": math, "range": range, "len": len, "min": min, "max": max,
+'''
+
+_PRELUDE_TAIL = r'''g = {"api": api, "lib": api.lib, "math": math, "range": range, "len": len, "min": min, "max": max,
      "abs": abs, "int": int, "float": float, "round": round, "sum": sum,
      "enumerate": enumerate, "zip": zip, "list": list, "dict": dict, "tuple": tuple,
      "sorted": sorted, "reversed": reversed, "str": str, "bool": bool, "set": set,
@@ -354,10 +383,18 @@ g["__builtins__"] = {
     "float": float, "round": round, "sum": sum, "enumerate": enumerate, "zip": zip,
     "list": list, "dict": dict, "tuple": tuple, "sorted": sorted, "reversed": reversed,
     "str": str, "bool": bool, "set": set, "True": True, "False": False, "None": None,
+    "print": print,
 }
 exec(compile(data["program"], "<build>", "exec"), g)
-sys.stdout.write(json.dumps({"ops": OPS}))
+sys.stdout.write(json.dumps({"ops": OPS, "notes": NOTES}))
 '''
+
+# 建筑函数库(buildlib)注入: 放在 api 建好之后、用户程序 exec 之前。
+# 库代码是 bot 自带的可信代码(随 payload 经 stdin 传入, 不占命令行长度);
+# 用户程序仍然不能 import/读文件/访问下划线属性。
+_PRELUDE = ((_PRELUDE_HEAD.replace("__BLOCK_ALIAS__", repr(BLOCK_ALIAS)))
+            + "\nexec(compile(data['lib'], '<buildlib>', 'exec'), globals())\n"
+            + "api.lib = _BuildLib(api)\n" + _PRELUDE_TAIL)
 
 
 def _limit_resources():
@@ -370,13 +407,18 @@ def _limit_resources():
         pass
 
 
-def run_program(program: str, origin: tuple, facing: str, snapshot: dict | None = None) -> list:
-    """在隔离子进程里执行程序, 返回形状描述(ops)。snapshot 非空时程序可读世界。"""
+def run_program(program: str, origin: tuple, facing: str,
+                snapshot: dict | None = None) -> tuple:
+    """在隔离子进程里执行程序, 返回 (形状描述 ops, print 收集的 notes)。
+
+    snapshot 非空时程序可读世界; notes 用于把 api.lib.help() 之类自检输出回传给模型。
+    """
     if len(program.encode("utf-8")) > MAX_PROGRAM:
         raise BuildError(f"程序太长(>{MAX_PROGRAM} 字节), 请用循环/函数压缩")
     validate_ast(program)
     payload = json.dumps({"program": program, "origin": list(origin),
-                          "facing": facing, "snap": snapshot}, ensure_ascii=False)
+                          "facing": facing, "snap": snapshot,
+                          "lib": LIB_SOURCE}, ensure_ascii=False)
     try:
         proc = subprocess.run(
             [sys.executable, "-I", "-S", "-c", _PRELUDE, str(MAX_OPS)],
@@ -387,10 +429,12 @@ def run_program(program: str, origin: tuple, facing: str, snapshot: dict | None 
         raise BuildError(f"程序执行超过 {SANDBOX_TIMEOUT:.0f} 秒, 可能有死循环")
     if proc.returncode != 0:
         err = (proc.stderr or "").strip().splitlines()
-        tail = err[-1] if err else f"退出码 {proc.returncode}"
+        # 保留最后几行: 函数库的报错是「原因 + 接口: …」两行, 只取末行会丢原因。
+        tail = "\n".join(err[-4:]) if err else f"退出码 {proc.returncode}"
         raise BuildError(f"程序执行失败: {tail}")
     try:
-        return json.loads(proc.stdout)["ops"]
+        data = json.loads(proc.stdout)
+        return data["ops"], list(data.get("notes") or ())
     except Exception as e:
         raise BuildError(f"程序输出无法解析: {e}")
 
@@ -873,7 +917,7 @@ def compile_build(program: str, origin: tuple, facing: str, valid_blocks=None,
         raise BuildError("origin 必须是三个整数 [x, y, z]")
     if len(origin) != 3:
         raise BuildError("origin 必须是三个整数 [x, y, z]")
-    ops = run_program(program, origin, facing, snapshot)
+    ops, notes = run_program(program, origin, facing, snapshot)
     palette, cells, bounds = voxelize(ops, origin, facing, valid_blocks)
     payload = encode(palette, cells, bounds, origin, facing)
     checks = {}
@@ -886,6 +930,7 @@ def compile_build(program: str, origin: tuple, facing: str, valid_blocks=None,
                                    bounds[4] - bounds[1] + 1,
                                    bounds[5] - bounds[2] + 1),
         "payload_bytes": len(json.dumps(payload, ensure_ascii=False)),
+        "notes": notes,
         "snapshot": bool(snapshot),
         "snapshot_unloaded": (snapshot or {}).get("unloaded", 0),
         "checks": checks,
