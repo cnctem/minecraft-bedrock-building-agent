@@ -27,6 +27,11 @@ def _clip_chars(text: str, limit: int) -> str:
     return text if len(text) <= limit else text[:limit] + "…"
 
 
+# tool 消息的 content 可能是字符串, 也可能是 [{type:text}, {type:image_url}] 块数组
+# (read_url 读到的图片)。图片按 provider 的计费口径粗估成固定 token, 绝不数 base64。
+IMAGE_TOKEN_EST = 1200
+
+
 class Session:
     """一次会话: 从有人进服到服务器清零。上下文平时 append-only 以保证缓存命中;
     唯一的重写路径是 compact()(压缩): 只留玩家消息与游戏内发言, 有损、会打破前缀缓存。"""
@@ -50,10 +55,41 @@ class Session:
         self.messages.append({"role": "system", "content": content})
 
     @staticmethod
-    def _est_tokens(msgs: list[dict]) -> int:
+    def _content_text(content) -> str:
+        """取消息的可读文本: 字符串原样返回, 内容块数组拼出文本(图片记 [图片])。"""
+        if isinstance(content, str):
+            return content
+        if not isinstance(content, list):
+            return ""
+        parts = []
+        for part in content:
+            if not isinstance(part, dict):
+                continue
+            if part.get("type") == "text":
+                parts.append(str(part.get("text") or ""))
+            elif part.get("type") in ("image", "image_url"):
+                parts.append("[图片]")
+        return "\n".join(parts)
+
+    @classmethod
+    def _est_tokens(cls, msgs: list[dict]) -> int:
         """上下文体积的粗略估算: 累加每条消息的 JSON 字符数。
-        中文大致 1 字符兑 1 token, 英文/JSON 密度更低, 因此该值偏大。"""
-        return sum(len(json.dumps(m, ensure_ascii=False)) for m in msgs)
+        中文大致 1 字符兑 1 token, 英文/JSON 密度更低, 因此该值偏大。
+        图片块只按 IMAGE_TOKEN_EST 计, 不把 base64 当文本数(否则一张图就"占满"窗口)。"""
+        total = 0
+        for m in msgs:
+            content = m.get("content")
+            if isinstance(content, list):
+                rest = {k: v for k, v in m.items() if k != "content"}
+                total += len(json.dumps(rest, ensure_ascii=False))
+                for part in content:
+                    if isinstance(part, dict) and part.get("type") in ("image", "image_url"):
+                        total += IMAGE_TOKEN_EST
+                    else:
+                        total += len(json.dumps(part, ensure_ascii=False))
+            else:
+                total += len(json.dumps(m, ensure_ascii=False))
+        return total
 
     @staticmethod
     def _sanitize(msgs: list[dict]) -> list[dict]:
@@ -95,7 +131,7 @@ class Session:
                 dropped += len(followers)
                 rest = {k: v for k, v in m.items() if k != "tool_calls"}
                 i = j
-                if (rest.get("content") or "").strip():
+                if Session._content_text(rest.get("content")).strip():
                     out.append(rest)
                 continue
             out.append(m)
@@ -202,7 +238,8 @@ class Session:
                                          if f.get("tool_call_id") == cid), None)
                         if rw is None or follower is None:
                             continue
-                        result = Session._rewrite_ptc_result(follower.get("content") or "")
+                        result = Session._rewrite_ptc_result(
+                            Session._content_text(follower.get("content")))
                         if not result:
                             continue
                         kept_calls.append(rw)
@@ -248,9 +285,10 @@ class Session:
                 lines.append("玩家: " + (m.get("content") or ""))
                 continue
             if role == "tool":
-                lines.append("结果: " + _clip_chars(m.get("content") or "", result_chars))
+                lines.append("结果: " + _clip_chars(cls._content_text(m.get("content")),
+                                                  result_chars))
                 continue
-            content = (m.get("content") or "").strip()
+            content = cls._content_text(m.get("content")).strip()
             if content:
                 lines.append("你的正文: " + _clip_chars(content, 300))
             for tc in (m.get("tool_calls") or []):
@@ -298,7 +336,7 @@ class Session:
                     if f.get("role") == "assistant":
                         break
                     if f.get("role") == "tool" and f.get("tool_call_id") == tc.get("id"):
-                        result = f.get("content") or ""
+                        result = cls._content_text(f.get("content"))
                         break
                 parts = ["# 压缩前最后一次建造程序(原样保留: 可以直接改参数重新预览/提交)",
                          f"- 调用: {name}"

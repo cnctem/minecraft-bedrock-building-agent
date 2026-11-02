@@ -723,14 +723,20 @@ class BotAgentMixin:
                     result = "(已到安全点停止)"
                 else:
                     result = capabilities.execute(fname, tc["function"].get("arguments", "{}"))
-                log(f"[能力] {fname} -> {result}")
+                # 工具顺带产出的图片(read_url): 作为 image_url 块和文字一起放进 tool 消息,
+                # 模型这一轮就能直接看到图(同 pi 的 ToolResultMessage 图片内容块)。
+                images = capabilities.take_images()
+                log(f"[能力] {fname} -> {result}"
+                    + (f" (+{len(images)} 张图片)" if images else ""))
                 if fname == "send_chat_message" or (fname == "ptc" and self._ptc_speaks(tc)):
                     spoke = True
                     if not result.startswith("错误"):
                         text = self._spoken_text(tc)
                         if text:
                             self._tls.spoken.append(text)
-                tool_msg = {"role": "tool", "tool_call_id": tc["id"], "content": result}
+                tool_msg = {"role": "tool", "tool_call_id": tc["id"],
+                            "content": result if not images else
+                            [{"type": "text", "text": result}] + images}
                 session.messages.append(tool_msg)
                 messages.append(tool_msg)
                 # 状态变更(切模式/更新记忆)先攒着, 等**全部** tool 响应追加完再统一写注记:

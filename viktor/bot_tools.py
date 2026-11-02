@@ -12,7 +12,7 @@ from pathlib import Path
 
 import capabilities
 
-from . import build, paths, wiki
+from . import build, paths, webfetch, wiki
 from .bus import BusArgError, Req
 from .constants import (
     BUS_TIMEOUT_TEXT,
@@ -642,6 +642,29 @@ class BotToolsMixin:
             timeout=self.cfg.get("wiki_timeout_sec", 15),
             user_agent=self.cfg.get("wiki_user_agent", ""),
         )
+
+    # ---------- 外链/读图: 玩家发来的 URL ----------
+    # 图片不走文字描述, 而是由 capabilities.add_image() 旁路登记, bot_agent 把 image_url
+    # 内容块和报告一起放进 tool 消息 —— 模型直接看图。
+
+    def _tool_read_url(self, args: dict) -> str:
+        report, image = webfetch.read(
+            str(args.get("url") or ""),
+            timeout=float(self.cfg.get("read_url_timeout_sec", webfetch.DEFAULT_TIMEOUT)),
+            max_bytes=int(self.cfg.get("read_url_max_bytes", webfetch.DEFAULT_MAX_BYTES)),
+            max_chars=int(args.get("max_chars") or self.cfg.get("read_url_max_chars",
+                                                          webfetch.DEFAULT_MAX_CHARS)),
+            allow_private=bool(self.cfg.get("read_url_allow_private", False)),
+            user_agent=str(self.cfg.get("read_url_user_agent")
+                           or self.cfg.get("wiki_user_agent") or ""),
+        )
+        if image is not None:
+            mime, b64 = image
+            if capabilities.add_image(b64, mime):
+                report += "\n[图片] 已附在这条工具结果里。"
+            else:
+                report += "\n[图片] 本次附带的图片太多, 这张没有附上; 需要就分批读取。"
+        return report
 
     def _extract_command_output(self, text: str, cmd: str) -> list[str]:
         """从日志文本里抽出指令输出。ERROR/WARN 行必须保留并加标记——

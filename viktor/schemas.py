@@ -519,3 +519,29 @@ READ_WIKI_PAGE_SCHEMA = {
         },
     },
 }
+
+READ_URL_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "read_url",
+        "description": (
+            "读取玩家发来的链接或图片地址(只支持 http/https 公网地址)。"
+            "图片(png/jpg/gif/webp)会作为图片直接附在这条工具结果里, 你能真正看到画面, "
+            "文字部分另外给出 HTTP 状态、类型、大小与尺寸。"
+            "网页返回标题+正文摘要, JSON/文本返回内容开头。"
+            "失败时如实返回状态码(404 Not Found / 403 / 超时 / DNS 失败等)与响应体开头, "
+            "据实转述, 不要凭网址猜内容。"
+            "玩家在聊天里贴链接、说“看看这张图/这个网址”时用它。"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "url": {"type": "string",
+                        "description": "要读取的完整地址, 例如 https://example.com/logo.png"},
+                "max_chars": {"type": "integer",
+                              "description": "文本/网页摘要最多返回多少字符, 默认 1500"},
+            },
+            "required": ["url"],
+        },
+    },
+}

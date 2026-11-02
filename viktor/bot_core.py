@@ -33,6 +33,7 @@ from .schemas import (
     INSPECT_REGION_SCHEMA,
     PIN_REGION_SCHEMA,
     READ_WIKI_PAGE_SCHEMA,
+    READ_URL_SCHEMA,
     RUN_COMMAND_SCHEMA,
     SEARCH_WIKI_SCHEMA,
     SEND_CHAT_SCHEMA,
@@ -95,6 +96,8 @@ class BotCoreMixin:
         capabilities.register("search_wiki", SEARCH_WIKI_SCHEMA, self._tool_search_wiki,
                              concurrency="parallel")
         capabilities.register("read_wiki_page", READ_WIKI_PAGE_SCHEMA, self._tool_read_wiki_page,
+                             concurrency="parallel")
+        capabilities.register("read_url", READ_URL_SCHEMA, self._tool_read_url,
                              concurrency="parallel")
         capabilities.set_ptc_limits(cfg.get("ptc_max_calls", 24),
                                     cfg.get("ptc_result_limit", 30000),

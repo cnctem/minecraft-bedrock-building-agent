@@ -4,13 +4,15 @@
 依赖方向: selftest → Bot(viktor 包) + capabilities; 仅 --test 时由入口导入。
 """
 import json
+import http.server
+import threading
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
 
 import capabilities
 
-from . import Bot, paths, wiki
+from . import Bot, paths, render, webfetch, wiki
 from .bridge import ScreenBridge
 from .config import load_config
 from .constants import (
@@ -1977,6 +1979,97 @@ def self_test():
     assert {"search_wiki", "read_wiki_page"} <= capabilities.registered_names()
     assert {"search_wiki", "read_wiki_page"} <= bot2._allowed_tools(), "应全模式可用"
     print("wiki 清洗/章节/注册自测 OK")
+
+    # read_url: 图片/网页/404 + SSRF 拦截 + 图片进 tool 消息(本地临时 HTTP 服务, 不联网)
+    _png = Path("/tmp/viktor-url-test.png")
+    render.write_png(_png, [[(200, 60, 60, 255)] * 12 for _ in range(6)])
+    _png_bytes = _png.read_bytes()
+    _html = ("<html><head><title>测试页</title></head>"
+             "<body><p>hello 世界</p><script>bad()</script></body></html>").encode()
+
+    class _UrlHandler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            if self.path == "/logo.png":
+                body, code, ctype = _png_bytes, 200, "image/png"
+            elif self.path == "/page.html":
+                body, code, ctype = _html, 200, "text/html; charset=utf-8"
+            else:
+                body, code, ctype = b"<title>Not Found</title>no such file", 404, "text/html"
+            self.send_response(code)
+            self.send_header("Content-Type", ctype)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *a):
+            pass
+
+    _srv = http.server.HTTPServer(("127.0.0.1", 0), _UrlHandler)
+    threading.Thread(target=_srv.serve_forever, daemon=True).start()
+    _base = f"http://127.0.0.1:{_srv.server_address[1]}"
+    try:
+        _txt, _img = webfetch.read(_base + "/logo.png", allow_private=True)
+        assert "200" in _txt and "PNG" in _txt and "12×6" in _txt, _txt
+        assert _img and _img[0] == "image/png" and _img[1], _img
+        _t404, _i404 = webfetch.read(_base + "/nope.png", allow_private=True)
+        assert "404" in _t404 and "Not Found" in _t404 and _i404 is None, _t404
+        _tpage, _ipage = webfetch.read(_base + "/page.html", allow_private=True)
+        assert "测试页" in _tpage and "hello 世界" in _tpage and "bad()" not in _tpage, _tpage
+        # 默认拒绝内网(SSRF): 只回错误, 不给图
+        _tpriv, _ipriv = webfetch.read(_base + "/logo.png")
+        assert _ipriv is None and "内网" in _tpriv, _tpriv
+        assert "只支持 http/https" in webfetch.read("file:///etc/passwd")[0]
+        # 浏览器/聊天里的常见写法: 裸域名补 https://
+        assert webfetch.normalize_url("example.com/a.png。") == "https://example.com/a.png"
+        # 工具已注册, 且普通/一次性模式都能用
+        assert "read_url" in capabilities.registered_names()
+        assert {"read_url"} <= bot2._allowed_tools() and "read_url" in bot2._allowed_tools(MODE_ONESHOT)
+        # handler: 图片通过 capabilities 旁路登记(不串进文字结果)
+        orig_allow = bot2.cfg.get("read_url_allow_private", False)
+        bot2.cfg["read_url_allow_private"] = True
+        try:
+            capabilities.take_images()
+            _rep = bot2._tool_read_url({"url": _base + "/logo.png"})
+            _imgs = capabilities.take_images()
+            assert "已附在这条工具结果里" in _rep and len(_imgs) == 1, (_rep, _imgs)
+            assert _imgs[0]["type"] == "image_url" and _imgs[0]["image_url"]["url"].startswith("data:image/png;base64,")
+            assert capabilities.take_images() == [], "取走后应清空"
+            # 端到端: 模型调 read_url 后, tool 消息里带 image_url 块
+            if not bot2.session:
+                bot2.players.add("T")
+                bot2._start_session()
+            bot2.abort.clear()
+            bot2.soft_abort.clear()
+            _canned = iter([
+                {"role": "assistant", "content": None, "reasoning_content": "",
+                 "tool_calls": [{"id": "u1", "type": "function",
+                                 "function": {"name": "read_url",
+                                              "arguments": json.dumps({"url": _base + "/logo.png"})}}]},
+                {"role": "assistant", "content": "", "tool_calls": None},
+            ])
+            _orig_post_u = bot2._post
+            bot2._post = lambda messages, params: (next(_canned), "stop")
+            try:
+                bot2.call_api()
+            finally:
+                bot2._post = _orig_post_u
+            _tm = [m for m in bot2.session.messages
+                   if m.get("role") == "tool" and m.get("tool_call_id") == "u1"]
+            assert _tm and isinstance(_tm[0]["content"], list), _tm
+            assert any(p.get("type") == "image_url" for p in _tm[0]["content"]), _tm
+            assert _tm[0]["content"][0]["type"] == "text"
+        finally:
+            bot2.cfg["read_url_allow_private"] = orig_allow
+            capabilities.take_images()
+        # 图片不把上下文估算顶爆(base64 不算文本 token)
+        _est = Session._est_tokens([{"role": "tool", "tool_call_id": "x", "content": [
+            {"type": "text", "text": "hi"},
+            {"type": "image_url", "image_url": {"url": "data:image/png;base64," + "A" * 200000}}]}])
+        assert _est < 5000, _est
+    finally:
+        _srv.shutdown()
+        _srv.server_close()
+    print("read_url 读图/404/安全自测 OK")
 
     # 转发开关: 正文开/关、工具开/关(控制词不进上下文; 转发只显示、不进上下文)
     fwd = []

@@ -79,6 +79,7 @@ TOOLS = {
     "oneshot": {"only": {
         "send_chat_message", "update_memory", "get_player_activity",
         "get_player_position", "get_player_hand", "search_wiki", "read_wiki_page",
+        "read_url",
         "run_server_command", "get_block", "get_heightmap", "get_slice",
         "inspect_region", "find_blocks", "ptc",
         "find_items", "use_skill",

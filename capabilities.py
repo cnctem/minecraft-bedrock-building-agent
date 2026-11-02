@@ -176,6 +176,33 @@ def _blocked_tools() -> set:
     return getattr(_LOCAL, "blocked", set())
 
 
+# ---------- 工具产出的图片 ----------
+# handler 只能返回字符串(execute 会 str()), 图片走这条旁路: handler 调 add_image(),
+# bot_agent 执行完一次工具调用后 take_images(), 把图片块和文字一起放进 tool 消息
+# (OpenAI 的 image_url 内容块; 与 pi 的 ImageContent 是同一套思路)。
+MAX_PENDING_IMAGES = 4          # 一次工具结果最多附几张, 防止模型一口气刷爆上下文
+_IMAGES_LOCK = threading.Lock()
+_PENDING_IMAGES: list[dict] = []
+
+
+def add_image(data_b64: str, mime: str) -> bool:
+    """登记一张要附给模型的图片(base64)。超过上限返回 False(只保留文字)。"""
+    with _IMAGES_LOCK:
+        if len(_PENDING_IMAGES) >= MAX_PENDING_IMAGES:
+            return False
+        _PENDING_IMAGES.append({"type": "image_url",
+                                "image_url": {"url": f"data:{mime};base64,{data_b64}"}})
+        return True
+
+
+def take_images() -> list[dict]:
+    """取走本批次登记的图片块。"""
+    with _IMAGES_LOCK:
+        images = list(_PENDING_IMAGES)
+        _PENDING_IMAGES.clear()
+        return images
+
+
 # 模型有时会把数组项写成别的形状(少了 tool 键、或直接用 OpenAI 的 function 嵌套),
 # 这里做宽容解析, 避免因为一个键名就把整批卡住。
 def _ptc_name(item: dict) -> str:
