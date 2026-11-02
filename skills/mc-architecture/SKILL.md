@@ -1,23 +1,85 @@
 ---
 name: mc-architecture
-description: 建筑设计与结构手册——体块/比例/模数、承重体系(梁柱/拱券/穹顶/飞扶壁/桁架/木构架/承重墙/悬挑/柱式/斗拱)、墙面深度与材质渐变、立面门窗屋顶、做旧，以及中世纪/哥特/古典/中式/日式/现代等风格库。玩家要求建房子/城堡/教堂/塔楼/别墅/神庙，或说"外墙太素""屋顶不会做""看着不稳""像火柴盒""要气派/宏伟"时加载。
+description: 建筑设计手册 + 建筑函数库——**主依据是原建筑模组的 ShapeGuide/BuildCategoryGuide**(中式八大地域流派路由、官式殿宇与故宫三段比例、圆明园双語汇、曲面/拱顶、西洋立面、类别级设计标准与自检)，配套体块/比例/模数、承重体系、立面材质等速查，以及 api.lib 的 216 个函数(中式屋顶/斗拱/马头墙/土楼、十字拱/肋拱、柱式/门廊/卷涡、玫瑰窗/尖塔、城墙/剧场、假山/九曲桥)。玩家要求建房子/城堡/教堂/塔楼/别墅/神庙/宫殿/园林建筑，或说"外墙太素""屋顶不会做""看着不稳""像火柴盒""要气派/宏伟"时加载。
 ---
 
 # 建筑设计手册(结构 / 立面 / 风格)
 
-把"摆方块"升级成"造建筑"。执行顺序固定为 **Simple shapes → Depth → Palette → Detail**：
-先大形体，再做凹凸，再定配色，最后雕细节。曲线见 `mc-build`；室内见 `mc-interior`；指令见 `mc-commands`。
+把"摆方块"升级成"造建筑"。执行顺序固定为 **判类别 → 定体块 → 结构 → 深度 → 配色 → 细节**。
 
-## 0. 设计与施工顺序
+## 0. 先判类别与流派（这一步决定后面全部）
 
-1. **选址定向**：`get_player_position` 定朝向，`get_heightmap` 量地形落差，`get_slice` 看已有建筑与材质；建筑与地形落差 >2 格先做台基/挡土墙。
-2. **体块草稿**：用醒目混凝土/羊毛搭主块 + 次块 + 连接体。至少 2~3 个体块穿插，每处差 ≥2 格才有远景存在感。
-3. **定网格**：按 5/7/9 格模数排柱、窗、开间；大型工程按 16×16 或 32×32 网格分区施工。奇数宽度优先，门/塔/山墙中轴才能严格对称。
+原建筑模组在生成前先做**类别识别**与**中式流派路由**，因为不同类别/流派的标准互相冲突。
+本项目照同一顺序：
+
+1. **类别**：读玩家原话，落到 `references/category-guide.md` 的九类之一
+   （民居/塔楼/城堡/地标/聚落/基础设施/遗迹/园林/通用），按该类别的
+   【设计要求】+【输出前自检】执行；
+2. **中式流派**：若涉及中式，先读 `references/shape-guide-chinese.md` 的「★★中式流派路由」，
+   按关键词（江南/徽派/闽南/岭南/川蜀/西北/藏式/客家/官式）选全套语汇，
+   **不要默认故宫**；
+3. **风格语汇**：中式 → `shape-guide-chinese.md`；圆明园/西洋楼/园林 → `shape-guide-garden-western.md`；
+   曲面/拱顶/现代结构 → `shape-guide-advanced.md`；
+4. **构件函数**：以上文档里点名的函数都在 `api.lib` 里（camelCase 与 snake_case 都可用），
+   签名索引见 `references/functions-index.md` / `functions-chinese|vault|western.md`。
+
+**中式五条铁律**（摘自 ShapeGuide 与 BuildCategoryGuide，冲突时以此为准）：
+
+1. 屋顶只用 `chineseRoof`，形制按等级：正殿「重檐庑殿」、城门楼「重檐歇山」、
+   配殿「歇山」、亭/角楼「攒尖」；**禁止** dome / polygonDome / cone / gable 做中式屋顶。
+2. 屋顶进深比墙身**每边外挑 2~4 格**；檐下加 `dougong`，台基用 `sumeruBase` + `railing`。
+3. 比例：屋顶高 ≈ 进深 × 0.35~0.45 且 ≥ 柱高 × 0.8；台基高 ≈ 柱高 / 3 且 ≥ 3 格。
+   屋顶比墙身矮 = 棚子。
+4. 配色：黄琉璃**只属于皇宫**；民居用青瓦（deepslate_tiles）、红瓦（terracotta）或茅草。
+5. `chineseRoof` 已自带四角起翘、瓦垄、檐口勾边与正脊，**不要再叠**
+   `flyingEave` / `tileRidges` / `ridgeBeasts`。
+
+```text
+玩家原话 → 类别(category-guide) → 流派/风格(shape-guide-*) → 体块与比例 → api.lib 构件 → 程序
+```
+
+**参数写错会直接报错并附接口签名**；不确定就 `print(api.lib.help("roof"))`（输出以 `[程序输出]` 回来）。
+
+## 0.5 函数库速查
+
+| 要做的 | 直接调 | 看哪份文档 |
+|---|---|---|
+| 中式屋顶/斗拱/须弥座/月洞门/塔/牌坊/藻井 | `chineseRoof` `dougong` `sumeruBase` `moonGate` `pagoda` `paifang` `caissonCeiling` | `references/shape-guide-chinese.md` + `functions-chinese.md` |
+| 地域民居(江南/徽派/闽南/岭南/川蜀/西北/藏式/客家) | `guanyinDou` `horseHeadWall` `swallowtailRidge` `huoerWall` `chuandouFrame` `yaodong` `tibetanFort` `tulou` | 同上 |
+| 圆明园/西洋楼/水景/园林构筑 | `baroquePortico` `volute` `waterBasin` `cascade` `zigzagBridge` `stoneBoat` `rockery` | `references/shape-guide-garden-western.md` |
+| 曲面/拱顶/网架/幕墙/斜交网格 | `hyperboloid` `hyperbolicParaboloid` `groinVault` `ribVault` `spaceFrame` `curtainWall` `diagrid` | `references/shape-guide-advanced.md` + `functions-vault.md` |
+| 柱式/门廊/玫瑰窗/尖塔/城墙/剧场 | `classicalColumn` `baroquePortico` `roseWindow` `steeple` `keep` `rampart` `amphitheater` | `functions-western.md` |
+| 圆/球/锥/拱/斜面等基础几何 | `cylinder` `sphere` `dome` `cone` `arch` `hipRoof` `gable` … | 技能 `mc-build` 的 `functions-geometry.md` |
+| 家具/整间房 | `livingRoomSet` `bedroomSet` `kitchenCounter` `cottageInterior` … | 技能 `mc-interior` 的 `functions-interior.md` |
+| 水池/假山/桥/游廊 | `waterBasin` `cascade` `rockery` `zigzagBridge` `coveredWalkway` | 技能 `mc-details` 的 `functions-garden.md` |
+| 地形/植被/遗迹/道路/整栋模板 | `terrain` `vegetation` `ruins` `road` `medievalHouse` `chinesePavilion` … | 技能 `mc-terrain` 的 `functions-generators.md` |
+
+最短的中式殿宇程序(体量、台基、屋顶一次到位):
+
+```python
+W, D = 15, 11                      # 面宽:进深 ≈ 4:3
+api.lib.sumeruBase(-2, -2, W + 1, D + 1, 0, 3, "quartz_block")
+api.fill((0, 0, 3), (W - 1, 7, D - 1), "red_terracotta")      # 墙身到檐口
+api.fill((1, 3, 1), (W - 2, 6, D - 2), "air")
+api.lib.dougong(0, 8, 0, 2, 2, "gold_block")                  # 每根柱顶各来一个
+api.lib.chineseRoof(-4, -4, W + 3, D + 3, 8, 5, "歇山",
+                    "yellow_glazed_terracotta", "deepslate_tiles")
+```
+
+## 0.7 施工顺序
+
+1. **选址定向**：`get_player_position` 定朝向，`get_heightmap` 量落差，`get_slice` 看已有建筑；
+   高差 >4 格或场地太窄先看技能 `mc-plan`（台基/台地/换地方）。
+2. **体块草稿**：主块 + 次块 + 连接体，至少 2~3 个体块穿插、每处差 ≥2 格；
+   关键 3~5 层平面先定轮廓（收分与外墙闭合），见 `mc-plan` 的分层体块法。
+3. **定网格**：按 5/7/9 格模数排柱、窗、开间；大型工程按 16×16/32×32 分区。奇数宽优先。
 4. **结构先行**：柱、梁、拱、桁架、承重墙先落地，再填墙。让力线可见。
 5. **立面深度**：三段式 + 每 4~6 格一处 1 格凹凸；纯平墙最长不超过 7 格。
-6. **材质与渐变**：主材 ≥70%，辅助 2~3 种；每 3~5 格分段，交界用 2~3 格 dithering。详细流程见 `references/detail.md`。
-7. **屋顶与第五立面**：坡屋顶高度约占建筑总高 1/3~1/2；出檐 1~2 格，日式可 2~3 格。屋顶要有屋脊、老虎窗、烟囱或端头装饰。
-8. **落地**：`pin_region` 覆盖工地，体块用 `fill`，关键结构用 `setblock`，立面细节用 `ptc` 批量提交；完成后按 `mc-verify` 的流程验收(mismatch=0 才算完成)。
+6. **材质与渐变**：主材 ≥70%，辅助 2~3 种；每 3~5 格分段，交界 2~3 格 dithering（`references/detail.md`）。
+7. **屋顶与第五立面**：坡屋顶高度约占建筑总高 1/3~1/2；出檐 1~2 格（日式 2~3）；
+   屋顶要有屋脊、老虎窗、烟囱或端头装饰。中式屋顶一律用 `chineseRoof`（见 shape-guide-chinese）。
+8. **落地**：`pin_region` 覆盖工地 → 写程序（`api.lib` 构件 + `fill` 体块）→
+   `build_preview` → `render_build` 看比例 → `build_commit` → 按 `mc-verify` 验收（mismatch=0）。
 
 > **自主默认**：玩家只说"建个房子"→ 沿用附近群系/建筑材质；尺寸默认 9×7、层高 4、木石组合、人字坡屋顶。先给轮廓，再深化。
 
@@ -72,16 +134,20 @@ description: 建筑设计与结构手册——体块/比例/模数、承重体�
 - **做旧上限**：cracked/mossy ≤10%~20%；藤蔓每 3~5 格 1 处、延伸 2~4 格，成簇不成撒胡椒面。
 - 深度、渐变、生活化细节与大佬工作流速查见 **`references/detail.md`**。
 
-## 5. 风格速查
+## 5. 风格速查（细节一律以类源文档为准）
 
-- 中世纪：石基 + 木角柱/半木 + 陡坡顶 + 小窗内凹 + 外挑二层。
-- 都铎：白墙 + 深木框架 + 斜撑；柱距 4~5 格，窗上做人字/菱形桁架。
-- 哥特：深色石基 + 尖拱窗 + 垂直线 + 飞扶壁 + 玫瑰窗。
-- 日式/中式：白壁或红柱 + 大出檐 + 深色瓦顶；日式低矮、中式斗拱与正脊吻兽。
-- 现代：白/灰/黑混凝土 + 玻璃 + 悬挑 + 平顶，少量暖木平衡冷色。
-- 蒸汽朋克/奇幻：铜的四种氧化阶段、管道、齿轮；有机曲线、藤蔓与隐藏光源自然融合。
+| 玩家说的 | 去哪份文档 | 关键语汇 |
+|---|---|---|
+| 中式（任何细分） | `shape-guide-chinese.md` | **先走流派路由**：江南观音兜/徽派马头墙/闽南燕尾脊/岭南镬耳/川蜀穿斗/窑洞/碉房/土楼/官式斗拱须弥座；黄琉璃只属于皇宫 |
+| 故宫/紫禁城/宫殿/大殿 | `shape-guide-chinese.md` 的「故宫式宫殿套路」 | 三段比例 台基 H/3 · 墙身 H · 屋顶 0.8~1.2H；重檐庑殿 + 朱红 + 汉白玉；院落有配殿廊庑 |
+| 圆明园/西洋楼/大水法/石舫/九曲桥 | `shape-guide-garden-western.md` | 两种语汇拼在一座园：中式木构曲面屋 + 西洋汉白玉柱式山花；水法必须用 cascade 逐层跌 |
+| 哥特/教堂 | `shape-guide-advanced.md` + `functions-western.md` | 尖券 + 束柱 + 肋拱（`ribVault`）+ 飞扶壁（`flyingButtress`）+ 玫瑰窗 |
+| 现代/高层 | `shape-guide-advanced.md` | 核心筒 → `curtainWall` 幕墙 → `diagrid` 造型 → `spaceFrame`/双曲屋面 → `stairTower` |
+| 中世纪/都铎/北欧/沙漠/奇幻 | 技能 `mc-build` 的 `references/mega-build-guide.md`【四】预制风格库 | 半木框架、陡坡顶、白墙深木、石基；整栋模板自带装饰 |
+| 蒸汽朋克/奇幻 | `references/styles.md` + `references/detail.md` | 铜的四阶段氧化、管道齿轮、有机曲线与藤蔓 |
 
-每种风格的完整结构/材质/起手见 `references/styles.md`，专家配方补充见 `references/detail.md`。
+补充：`references/styles.md`（各风格完整结构/材质/起手）、`references/detail.md`（深度与渐变配方）、
+`references/structure.md`（承重体系的 MC 搭法）、`references/facade.md`（门窗栏杆线脚）。
 
 ## 6. 建材与工具落地
 
@@ -92,8 +158,17 @@ description: 建筑设计与结构手册——体块/比例/模数、承重体�
 | 木构/墙板 | `*_planks`、`*_log`、`stripped_*_log`、`*_stairs`、`*_slab`、`*_trapdoor` |
 | 现代/工业 | `*_concrete`、`glass_pane`、`copper_block`、`copper_grate`、`iron_bars`、`chain` |
 
-1. `get_heightmap` 读地形、`get_slice` 读材质；2. `pin_region` 覆盖工地；3. `fill` 做体块；4. `setblock` 拉结构线；
-5. `ptc` 批量提交 `run_server_command` 中的楼梯/半砖/活板门指令；6. `inspect_region` + `get_slice` 检查对称、空洞、悬浮与朝向。
+落地顺序(与 `mc-build` 的 preview/commit 一致):
+
+1. `get_heightmap` / `get_slice` / `inspect_region` 读现场, `pin_region` 覆盖工地;
+2. 写**一个模块一段程序**: 台基 → 墙身/柱网 → 屋顶 → 门窗/线脚 → 细节;
+3. 每段 `build_preview` → `render_build(views=["front", "iso"])` 看比例 → `build_commit`;
+4. 结构/屋顶/柱式这类曲线件直接调 `api.lib`(见 §0.5), 不要用 `fill` 循环拼斜屋面;
+5. 完工按 `mc-verify` 复检: `verify.mismatch == 0` 才算完成。
+
+> 函数库只负责“构件形状正确”, **比例与组合仍然是这一章的事**:
+> 屋顶该多高、出檐该多深、院落该几进——先按 §1~§5 定, 再交给函数执行。
+
 
 ## 7. 坑清单
 

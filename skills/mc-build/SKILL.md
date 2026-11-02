@@ -1,6 +1,6 @@
 ---
 name: mc-build
-description: 建造引擎 + 体素造型手册——用受限 Python 写建造程序(api.fill/box/walls/cylinder/sphere/pyramid/roof/stair 等)，经 build_preview 预览差异、build_commit 提交并自动校验、build_undo 撤销；含圆/椭圆/拱/圆柱/球/穹顶/坡度/螺旋等造型公式与半径表。玩家要求成规模的建造/改造(房子、塔、城墙、桥、地形整平、批量替换、按图纸施工)，或说"用建造引擎""写个程序建""一次建完""别一条条 fill"时加载。仅创造模式可用。
+description: 建造引擎 + 体素造型手册——用受限 Python 写建造程序(api.fill/box/walls/cylinder/sphere/pyramid/roof/stair 等基础原语 + api.lib 的 216 个建筑函数)，经 build_preview 预览差异、render_build 看比例、build_commit 提交并自动校验、build_undo 撤销；含圆/椭圆/拱/球/穹顶/坡度/螺旋等造型口径。玩家要求成规模的建造/改造(房子、塔、城墙、桥、地形整平、批量替换、按图纸施工)，或说"用建造引擎""写个程序建""一次建完""别一条条 fill"时加载。仅创造模式可用。
 ---
 
 # 建造引擎(mc-build)
@@ -17,7 +17,7 @@ build_undo                                   还原(最近 2 个)
 
 ## 1. 程序怎么写
 
-程序是**函数体**，作用域里有 `api`。坐标是局部坐标 `[u 右, v 上, w 前]`，
+程序是**函数体**，作用域里有 `api` 与 `api.lib`。坐标是局部坐标 `[u 右, v 上, w 前]`，
 由 `origin` + `facing` 变换到世界坐标——**换朝向不用改程序**。
 
 ```python
@@ -52,9 +52,58 @@ api.pattern((1, 0, 1), (W - 2, H - 2, 1), ["oak_planks", "spruce_planks"])  # �
 | `api.stair(a, b, block, axis="w", rise=1, run=1)` | **直跑楼梯**：沿 axis 每 `run` 格升 `rise` 格，一阶一格厚 |
 | `api.dir("front"/"back"/"left"/"right")` | 局部方向 → 世界方向名(给楼梯/门的状态用) |
 | `api.origin` / `api.facing` | 只读上下文 |
+| `api.lib.*` | **建筑函数库**(216 个): 中式屋顶/斗拱、拱顶/曲面、柱式/门廊、园林水景、家具成套、地形植被生成器。详见 §1.2 与 `references/functions-geometry.md` |
 
 语言子集：`for / if / 函数 / 算术`，`math.sin/cos/sqrt/floor/pi`，`range`。
 **没有** `import`、文件、网络、`exec/eval/open`。死循环会被 8 秒超时杀掉。
+`print(...)` 可用: 输出不进 stdout, 而是作为 `[程序输出]` 附在 preview 结果里。
+用来反查签名: `print(api.lib.help("roof"))` / `print(api.lib.help())`。
+
+### 1.2 api.lib 建筑函数库
+
+`api.lib` 是 bot 自带的几何库(移植自一个 Java 建筑模组, 已按基岩版方块与局部坐标重写)。
+**凡是“曲线/收分/重复构件”都先找函数**, 手写循环既慢又容易错位:
+
+```python
+# 中式殿宇: 台基 + 墙身 + 斗拱 + 屋顶 + 脊兽
+api.lib.sumeru_base(-2, -2, W + 1, D + 1, 0, 3, "quartz_block")
+api.lib.chinese_roof(-4, -4, W + 3, D + 3, 8, 5, "歇山",
+                     "deepslate_tiles", "polished_blackstone")
+
+# 哥特大厅: 十字拱 + 肋拱
+api.lib.groin_vault(0, 0, 16, 12, 8, 5, "stonebrick")
+api.lib.rib_vault(0, 0, 16, 12, 8, 5, 1, "quartz_block", "stonebrick")
+
+# 现代幕墙 + 斜交网格
+api.lib.curtain_wall(0, 0, 20, 12, 16, 20, 4, 4, "quartz_block", "glass")
+api.lib.diagrid(0, 0, 24, 12, 16, 26, 8, 6, 1, "quartz_block")
+```
+
+- 坐标一律局部 `(u, v, w)`, 和 `api.fill` 完全一致; `cu/cw` 是中心, `base_v` 是起始高度。
+- `facing` 传 `"front"/"back"/"left"/"right"` 会跟着建造朝向自动转。
+- 方块名用基岩版 ID; Java 版写法(`stone_bricks`/`bricks`/`dandelion`…)会自动映射。
+- **参数写错会报错并附接口签名**, 不会静默少放方块; 抛错也能当“自检”用。
+- 库函数只产生普通 ops, 仍然走同一套 KEEP / 体素化 / 限额 / 校验流程, 没有额外权限。
+
+完整分类与签名: `references/functions-geometry.md`(基础几何), 其它类别见技能
+`mc-architecture`(`functions-chinese/vault/western.md`)、`mc-interior`、`mc-details`、`mc-terrain`。
+
+### 1.3 大规模建造必读(原模组的硬规则)
+
+写大型/成片建造前，先载入 **`references/mega-build-guide.md`**（抽取自原模组的
+MegaBuildGuide）：纪念性结构函数、装饰函数清单、预制风格库、超大规模分区策略，
+以及**建造正确性红线**。其中与本项目语义直接相关的四条，务必记住：
+
+1. **后写覆盖先写**：同一格多次写以最后一次为准；“先写的生效”是错的。
+2. **挖空必须显式写 `air`**：只“跳过不写”挖不动 —— 前面写过的构件已经把格子占住了。
+3. **注意参数的 y 位置**：`gardenPath/carpetArea/arbor/clothesline/flowerGarden/mosaicFloor/
+   lanternCeiling` 这 7 个函数的 **y 在最后一个参数位**；写错顺序 → 整片装饰飘到半空或埋进地里。
+4. **方块参数只能是方块名字符串**：写数字/布尔会被当成方块名（本项目会直接报“未知方块”，
+   比原模组“用主体材料补位”更安全，但仍要按签名写）。
+
+原模组的 `mirror / rotate90 / arrayLinear / arrayRadial / clone / replace` 在本项目里的对应做法：
+镜像与阵列用**函数 + 循环**（`def wing(du): ...` 再调两次）；复制就是**重跑同一段程序**
+（KEEP 语义不会破坏已建部分）；替换用先铺满、再覆盖的方式。
 
 ## 1.5 读世界(贴地形建)
 
@@ -131,9 +180,9 @@ render_build(operation_id="b123-1", views=["front", "iso"])
   不确定就 `find_items("石砖")` 查。
 - 带状态时用 `states`，键名是基岩版状态名：
   ```python
-  d = api.dir("front")                      # 比如 "south"
-  api.set(0, 0, 0, "oak_stairs", {"weirdo_direction": 2})
-  ```
+d = api.dir("front")                      # 比如 "south"
+api.set(0, 0, 0, "oak_stairs", {"weirdo_direction": 2})
+```
 - **多格方块现在支持**，编译器会自动按实测规则处理（不用你自己写两格）：
   | 方块 | 程序里怎么写 | 引擎行为 |
   |---|---|---|

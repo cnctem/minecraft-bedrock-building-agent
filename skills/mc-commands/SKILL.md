@@ -5,6 +5,12 @@ description: 基岩版(Bedrock)命令与文本手册——fill/setblock/clone �
 
 # 基岩版命令施工手册
 
+> 成规模的建造**不要逐条 `fill`**: 用建造引擎写程序(技能 `mc-build`), 构件形状交给 `api.lib`。
+> 本章仍然负责: 单点/小范围指令、方块状态与朝向、文本组件、可点击菜单, 以及给建造程序补细节时的状态名。
+> 成片建造的硬规则(后写覆盖先写、挖空必须写 air、参数 y 位置)见 `mc-build` 的
+> `references/mega-build-guide.md`【六】建造正确性红线。
+
+
 `run_server_command` 以控制台身份执行指令。**本手册是基岩版(Bedrock)语法, 不是 Java 版** —— 写错版本会 Syntax error。方块 ID 不确定先用 `find_items` 查(唯一权威来源)。
 
 ## 0. 下单前

@@ -5,6 +5,13 @@ description: 光照与夜景手册——光级与刷怪门槛、光源方块亮�
 
 # 光照与夜景
 
+> 建造程序里埋灯可以直接用 `api.lib`: `lantern_ceiling(u1, w1, u2, w2, v, spacing)`
+> 天花吊灯阵、`chandelier` 吊灯、`floor_lamp` 落地灯、`lamp_post` 路灯、
+> `stone_lantern` 石灯笼、`window_seat`/`fireplace` 自带氛围光。
+> 这些函数只放光源方块, **隐藏光源(地毯下/半砖下/画后)仍按本手册手埋**。
+> 大型建筑的配光与“门前必加灯、庭院中心必加泉”的装饰守则, 见技能 `mc-build` 的
+> `references/mega-build-guide.md`【三】。
+
 ## 1. 先记住两条硬规则
 
 - **方块光从 15 起，每向外一格衰减 1**（穿过的方块会挡光，玻璃不挡，水会衰减）。

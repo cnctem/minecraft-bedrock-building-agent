@@ -79,6 +79,10 @@ description: 做旧与绿化细节手册——A. 做旧:风化预算、材质风
 
 ## 6. 落地流程
 
+0. **园林构筑直接调函数**(`api.lib`, 见 **`references/functions-garden.md`**)):
+   水池 `water_basin`/`round_basin`、跌水 `cascade`、九曲桥 `zigzag_bridge`、石舫 `stone_boat`、
+   太湖石 `rockery`(内部真镂空)、游廊 `covered_walkway`、花池 `flower_bed`、花架 `arbor`。
+   手搓假山必成“方块球”, 手搓跌水必成“水柱”——这两个是固定失败模式。
 1. `get_slice` 读原结构与材质、`get_heightmap` 看地坪高差；`get_player_position` 定观察方向，先远看轮廓。
 2. 用 `find_items` 找同族旧化方块，先做 3×3 小样确认颜色层级。
 3. `pin_region` 覆盖施工面；表面换色用 `fill ... replace`，局部损伤用 `setblock`。
@@ -100,6 +104,12 @@ description: 做旧与绿化细节手册——A. 做旧:风化预算、材质风
 ---
 
 # B. 绿化与景观
+
+> **园林/景观的主依据是原模组的 ShapeGuide 圆明园与园林组团章节**：
+> 见技能 `mc-architecture` 的 `references/shape-guide-garden-western.md`
+> （两种语汇并存、水法/石舫/九曲桥/叠石/游廊的做法与“圆明园不要做的事”），
+> 以及技能 `mc-build` 的 `references/mega-build-guide.md`【三】装饰守则。
+> 本章的密度/配色/口袋公园是补充。
 
 # 绿化与景观手册(室内 / 园林 / 城市)
 

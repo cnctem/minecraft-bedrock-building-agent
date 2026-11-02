@@ -57,6 +57,8 @@ bot.py(入口) → viktor.selftest(--test)
 | `viktor/bot_app.py` | `logs/server.log` tail 解析、启动握手、主循环 |
 | `viktor/session.py` | `Session`(append-only 上下文) 与 `OneShotContext` |
 | `viktor/bus.py` / `viktor/bridge.py` | 服务端请求总线 / `screen` 注入与 `tellraw` |
+| `viktor/build.py` / `viktor/bot_build.py` | 建造程序编译(沙箱/体素化/RLE) / 预览·渲染·提交·撤销工具 |
+| `viktor/buildlib/` | 建筑函数库：216 个几何/构件/装饰/生成器函数 + `registry.py`(签名元数据) |
 | `viktor/profiles.py` | 模式组合表：提示词 × 限制 × 工具白名单 |
 | `viktor/models.py` | 模型档案：触发词 / 模型 ID / Base URL / key / 窗口 / 输出上限 / 思考强度映射 / 是否回传思考链 / 温度 |
 | `viktor/prompts.py` / `viktor/schemas.py` / `viktor/constants.py` / `viktor/paths.py` | 提示词 / 工具 schema / 常量 / 路径与日志(叶子层) |
@@ -317,31 +319,46 @@ python3 bot.py --test         # 解析逻辑自测
 - **去重**：同一会话内重复载入同一技能会直接返回“已载入过”（`Session.loaded_skills`），加 `force=true` 可强制重载。
 - **优先级**：技能只是补充说明，**与 system prompt 冲突时以 system prompt 为准**（已写入技能清单注记）。
 
-内置示例（9 本）：
+内置示例（9 本；其中 mc-architecture / mc-build / mc-plan / mc-verify / mc-terrain 的
+理论部分由 `tools/gen_skill_guides.py` 从原模组类中抽取）：
 
-- `skills/mc-build/`（**建造引擎 + 体素造型**：受限 Python 程序 API(fill/box/walls/cylinder/sphere/
-  pyramid/roof/stair/pattern)、KEEP 语义、多格方块规则、对称/悬空自检、造型公式与半径表；
-  附表 `references/circle-tables.md`（半径 1–30 弧表/环表/球层表）、`references/dome.md`、
+- `skills/mc-build/`（**建造引擎 + 体素造型**：受限 Python 程序 API、`api.lib` 用法、KEEP 语义、
+  多格方块、对称/悬空自检；**大规模建造硬规则见 `references/mega-build-guide.md`**（抽取自原模组
+  MegaBuildGuide：纪念性结构、装饰函数与 y 位置例外、预制风格库与占地契约、分区策略、正确性红线）；
+  附表 `references/functions-geometry.md`、`references/circle-tables.md`、`references/dome.md`、
   `references/slopes.md`、`references/smooth-surfaces.md`、`references/spiral.md`）。
 - `skills/mc-verify/`（**检查与修复**：由粗到细的验收阶梯、mismatch/holes/wrong 补丁流程、
-  诊断表、交付前检查清单）。
+  诊断表、交付前检查清单；**判据见 `references/audit-rules.md`**——抽取自原模组
+  BuildGeometryAudit / BuildStructureAudit / BuildFootprints / BuildQualityFeedback：
+  Y 层尖峰、等截面柱、飘空薄板、散点层、门窗悬空、结构碎裂、外壳缺口、占地相交）。
 - `skills/mc-commands/`（**命令 + 文本**：fill/setblock/clone 变体、方块状态与朝向、超量分段；
   tellraw 文本组件与可点击消息 + `send_menu`；附表 `references/block-states.md`、
   `references/rawtext.md`、`references/examples.md`）。
 - `skills/mc-lighting/`（**光照与夜景**：光级与刷怪门槛、光源亮度表、隐藏光源配方、
   三层次配光法、外景路灯、在建造程序里埋灯）。
-- `skills/mc-architecture/`（建筑设计与结构手册：体块/比例/模数、承重体系、立面门窗屋顶、风格库；
-  附表 `references/structure.md`、`references/facade.md`、`references/styles.md`、`references/detail.md`）。
+- `skills/mc-architecture/`（建筑设计与结构手册；**理论主依据是原模组的 `ShapeGuide` 与
+  `BuildCategoryGuide`**：`references/shape-guide-chinese.md`（流派路由 + 官式/故宫/地域构件）、
+  `references/shape-guide-garden-western.md`（圆明园双語汇/水景/园林组团）、
+  `references/shape-guide-advanced.md`（曲面/拱顶/现代结构）、
+  `references/category-guide.md`（九类建筑的设计标准 + 输出前自检）；
+  另有体块/比例/材质速查 `references/structure.md`、`facade.md`、`styles.md`、`detail.md`，
+  以及函数目录 `references/functions-index.md`、`functions-chinese.md`、`functions-vault.md`、
+  `functions-western.md`）。
 - `skills/mc-interior/`（室内装修：家具方块能力总表、房间清单、家具拼搭、配色；
   附表 `references/furniture.md`、`references/rooms.md`、`references/palette-light.md`、
-  `references/expert-rules.md`）。
+  `references/expert-rules.md`、`references/functions-interior.md`（成套家具函数）。
 - `skills/mc-terrain/`（地形与景观：自然感五律、高度场方法、山崖河谷湖海沙丘、自定义树木、水景道路桥；
+  **生成器口径见 `references/domain-generators.md`**（抽取自原模组 DomainGenerators）；
   附表 `references/landforms.md`、`references/vegetation.md`、`references/water-road.md`、
-  `references/expert-rules.md`）。
+  `references/expert-rules.md`、`references/functions-generators.md`）。
+- `skills/mc-plan/`（**施工规划**：场地分析口径 `references/site-analysis.md`（BuildingPlanner）、
+  规模档位与目标方块数 `references/scale-tiers.md`（BuildScale + 整栋方块数表）、
+  分层体块法 `references/blockout-layers.md`（LayeredBuildGuide）、
+  照参考图施工 `references/reference-image.md`（ImageBuildGuide：剪影保真/主色映射/纵深分层））。
 - `skills/mc-details/`（**做旧 + 绿化**：风化预算与材质配方、损伤语法、生活道具；
   室内绿植、庭院花园、绿墙绿顶、水景、口袋公园；附表 `references/aging.md`、
   `references/details.md`、`references/plants.md`、`references/landscape.md`、
-  `references/pocket-parks.md`）。
+  `references/pocket-parks.md`、`references/functions-garden.md`（水池/跌水/九曲桥/石舫/假山/游廊函数））。
 
 以上技能全模式可用（含一次性/计划）。
 
@@ -364,6 +381,7 @@ BDS 控制台 **不回显玩家聊天**，所以用行为包 `viktor_bridge` 订
 - `scriptevent viktor:caps [id]` → `[VIKTOR-CAPS]` + JSON：协议版本、可用 API（`runJob`/`fillBlocks`）、各项上限（能力广播）。
 - `scriptevent viktor:snapshot [id] <x1 y1 z1 x2 y2 z2> [维度]` → `[VIKTOR-SNAP]` + JSON：稠密快照（palette + RLE，≤65536 格），供建造程序读世界；索引 0 固定为 `?`（未加载）。
 - **建造引擎（v4）**：`viktor:build put <jid> <i>/<n> <片段>`（上行分帧）→ `preview` / `commit` / `undo` / `list` / `abort` / `drop` → `[VIKTOR-BUILD] <rid>` + 分帧 JSON。
+  建造程序里另有 `api.lib` 建筑函数库（216 个函数，见下文「建筑函数库」），流程与限额完全不变。
   上行必须分帧：`[实测]` 单条 `scriptevent` 消息体 ≤700 字符可用，750 整条被丢弃（全行约 768 字节），所以每帧 ≤560 字符、**一帧一次 `screen stuff`**。
   期望体积编码：`palette`（索引 0 固定 = KEEP 不写）+ 分层 RLE（`idx:count`，base36）；提交时按层贪心合并成单方块长方体再调 `fillBlocks`。
 - `scriptevent viktor:hello <nonce>` → `[VIKTOR-HELLO] <nonce> v4`：bot 启动时的协议握手；协议号决定可用能力（v3 = 空间感知原语，v4 = 建造引擎），过旧会明确提示重载行为包。
@@ -375,6 +393,38 @@ BDS 控制台 **不回显玩家聊天**，所以用行为包 `viktor_bridge` 订
 
 行为包源码就放在本仓库 `behavior_pack/viktor_bridge/`（见该目录 [README](behavior_pack/README.md)），
 服务器的 `behavior_packs/viktor_bridge` 是指向它的软链接——改仓库里的文件即改线上脚本，不存在两份拷贝。
+
+### 建筑函数库（`api.lib`）
+
+建造程序里除了基础原语，还有一个 bot 自带的几何库：**216 个函数，7 个类别**。
+来源是从一个 Java 建筑模组（ShapeFunctions / AncientShapes / GardenShapes / RegionalShapes /
+VaultShapes / StructureShapes / SurfaceShapes / MonumentFunctions / HouseDecor /
+DecorationFunctions / DomainGenerators / MegaStyles）反编译后**按算法移植**，
+并统一改写为：局部坐标 `(u, v, w)`、基岩版方块 ID、整数确定性、非法参数直接报错。
+
+| 类别 | 内容 | 文档 |
+|---|---|---|
+| `chinese` | 中式屋顶(`chinese_roof` 七种形制)/斗拱/须弥座/月洞门/塔/牌坊/藻井 | `skills/mc-architecture/references/functions-chinese.md` |
+| `regional` | 江南观音兜、徽派马头墙/天井、闽南燕尾脊、岭南镬耳墙、川蜀穿斗/吊脚楼、窑洞、碉房、土楼 | 同上 |
+| `vault` | 十字拱/肋拱/扇拱、水道桥、网架、双曲面/马鞍面/螺旋面、幕墙、斜交网格、旋转楼梯 | `functions-vault.md` |
+| `western` | 柱式/门廊/卷涡/宝瓶栏/拱券窗/壁柱/檐口、玫瑰窗、飞扶壁、凯旋门、尖塔、城堡、剧场、城墙 | `functions-western.md` |
+| `geometry` | 圆/球/椭球/锥/多边形/环面、筒拱/双坡/孟莎/单坡、弧墙、悬链线、楼梯 | `skills/mc-build/references/functions-geometry.md` |
+| `decor` | 门套/窗排/老虎窗/阳台/壁炉/吊灯 + 客厅/卧室/厨房/玄关整套 | `skills/mc-interior/references/functions-interior.md` |
+| `garden` | 水池/跌水/九曲桥/石舫/叠石假山/游廊/花池 | `skills/mc-details/references/functions-garden.md` |
+| `create` | 确定性地形/植被/遗迹/道路生成器 + 半木小屋/中式亭/罗马神庙/现代别墅等整栋模板 | `skills/mc-terrain/references/functions-generators.md` |
+
+设计上刻意**只产出普通 ops**，所以完全复用现有 preview / render / commit / undo / 限额 / 校验：
+
+- `viktor/buildlib/`：分文件实现（`core` 基类、`shapes`、`chinese`、`structures`、`regional`、
+  `gardens`、`decor`、`creations`）+ `registry.py`（函数名、类别、一行签名，是唯一元数据源）。
+- 沙箱注入：`LIB_SOURCE` 随 payload 经 stdin 传给子进程（不占命令行长度），在用户程序 `exec` 前构建
+  `api.lib`；用户程序仍然不能 `import`/读文件/访问下划线属性。
+- 参数写错 → `xxx 参数不对: … 接口: xxx(...)`（签名来自 `registry.SPEC`，模型可自纠）。
+- `print(...)` 被重定向：输出不进 stdout，而是作为 `[程序输出]` 附在 `build_preview` 结果里，
+  适合 `print(api.lib.help("roof"))` 反查。
+- 方块名走统一别名表（`stone_bricks`→`stonebrick`、`bricks`→`brick_block`、`dandelion`→`yellow_flower` …），
+  Java 版写法也能跑通；未知名字仍由编译器报 `未知方块`。
+- 文档由 `tools/gen_buildlib_docs.py` 从 `registry.py` 生成（`--check` 可在 CI/自测里查漂移）。
 
 #### 服务端请求总线（降低查询延迟）
 

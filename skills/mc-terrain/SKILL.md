@@ -18,6 +18,23 @@ description: 地形与景观手册——山脉丘陵、悬崖峭壁、河谷峡�
 
 > 任何装饰都要能回答"为什么长在这里"：水边=苔/苇，背阴=苔/蕨，人为=grass_path/砂土。
 
+## 0.5 生成器优先(原模组的 DomainGenerators)
+
+原模组给了四个**确定性**生成器（同坐标同 seed 永远同结果，可分块施工、可重跑）：
+
+| 函数 | 作用 | 参数 |
+|---|---|---|
+| `terrain(cu, v, cw, size, profile)` | 起伏地面 | profile: hills（默认）/ mountains / plateau / basin / islands（后两者低处自动灌水） |
+| `vegetation(cu, v, cw, size, biome)` | 乔木 + 地被 | biome: forest（默认）/ plains / taiga / jungle / savanna / swamp / desert / birch |
+| `ruins(cu, v, cw, size, age)` | 遗迹院落 | age 0~100（0 = 基本完好，100 = 只剩墙根残基） |
+| `road(u1,v1,w1, u2,v2,w2, width, kind)` | 自然弯曲道路 | width 默认 5；kind: dirt / stone / cobble / mud / highway |
+
+推荐串法：`terrain` 出起伏 → `ruins` 放废墟 → `vegetation` 种树 → `road` 从路口通到废墟
+（原模组的“被森林吞没的古代遗迹”）。完整说明见 **`references/domain-generators.md`**。
+
+它们只铺“地表 + 下两层”与自然物分布，**不做大尺度体量**：山形、谷地、湖岸的骨架仍按 §2
+的高度场分层做；生成器负责表面材质、植被密度、遗迹风化与道路走向这些“自然感”部分。
+
 ## 1. 工作流
 
 1. `get_heightmap` 默认摘要看现有高度(可先用 `find_blocks` 找水面 y)，先定最低水面、谷底和建筑基址；需要逐列塑形时再把局部缩到 ≤32×32 用 `detail="heights"`，需要岸线/顶面分布时才用 `full`。

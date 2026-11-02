@@ -63,6 +63,19 @@ description: 室内装修/内饰手册——房间功能分区、家具方块能
 
 ## 4. 配方库
 
+- **整间房优先用函数**(`api.lib`, 见 **`references/functions-interior.md`**)):
+  `living_room_set(cu, v, cw, facing)` 客厅、`bedroom_set` 卧室、`kitchen_counter` 厨房台面、
+  `entryway_set` 玄关、`storage_nook` 储物、`shelf_run` 置物架、`clutter_corner` 杂物、
+  `room_divider` 隔断、`lantern_ceiling` 吊灯阵; 小户型整套用 `cottage_interior`。
+  函数一次性摆好“地毯 + 大件 + 焦点 + 灯”, 之后只做换材质和挪位置, 比逐件手摆快且不乱。
+- **装饰守则与 y 语义（原模组硬规则，见技能 `mc-build` 的
+  `references/mega-build-guide.md`【三】/【三·补】）**：
+  窗一律用 `windowUnit`/`windowBand`（不要徒手挖洞）；屋顶完成必加 `eavesTrim`；
+  墙面按上/中/下三段分别用 `wallTrim`/`crownMolding`；
+  室内必备 `carpetArea` + `chandelier` 或 `fireplace`；门前 `lampPost`；
+  庭院中心 `fountain` + `gardenPath`；广场四周 `statueGroup` + `planterRow`。
+  装饰方块应占总量 5%~10%（小房子 15%~25%）。
+  ★ `gardenPath`/`carpetArea`/`lanternCeiling` 等 7 个函数的 **y 在最后一个参数位**。
 - 现有 40+ 件餐桌椅、沙发、床、柜、厨房、卫浴、壁炉、灯具做法见 **`references/furniture.md`**。
 - 网上教程提炼的 60+ 件房间配方、现代电视墙、四柱床、隐藏营火壁炉、厨房三角等见 **`references/expert-rules.md`**。
 - 通用映射：楼梯=座椅/靠背；半砖=桌面/台面；栅栏+压力板=小圆桌；活板门=柜门/扶手/面板；木桶=柜体；炼药锅=水盆；展示框=挂件/屏幕/把手；地毯=床品/地垫/藏灯盖；灯笼=默认灯具。
@@ -90,7 +103,8 @@ description: 室内装修/内饰手册——房间功能分区、家具方块能
 
 1. `get_slice` 量房、`inspect_region` 读材质；`pin_region` 覆盖全房。
 2. 定焦点、调色板、家具清单；先摆最大件，再补小件。
-3. 用 `ptc` 批量提交 `run_server_command` 的 `setblock`/`fill`；家具用相对坐标批处理。
+3. 落地二选一: 小改动用 `ptc` 批量提交 `setblock`；整间房/整栋用建造引擎写程序,
+   直接调 `api.lib` 的成套函数(预览 → 看渲染 → 提交, 可撤销)。家具坐标仍是局部 `(u, v, w)`。
 4. 摆放后抽检状态：楼梯 `weirdo_direction` 0东 1西 2南 3北，半砖 `vertical_half`，活板门方向/开合。
 5. 灯光最后做：先隐藏光源消灭暗角，再装主灯；`inspect_region`/`get_block` 检查光照 ≥1。
 6. 交付自检：动线、焦点、无悬空、无挡门、材质 ≤5、杂物 ≥3、光 ≥1。
