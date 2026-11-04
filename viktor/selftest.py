@@ -16,13 +16,11 @@ from . import Bot, history, paths, render, webfetch, wiki
 from .bridge import ScreenBridge
 from .config import load_config
 from .constants import (
+    CREATIVE_MODES,
     MODE_CREATIVE,
     MODE_CREATIVE_MAX,
-    MODE_EXECUTE,
     MODE_NORMAL,
     MODE_ONESHOT,
-    MODE_PLAN,
-    PIN_MODES,
 )
 from .profiles import MODES
 from .session import Session, memory_note
@@ -654,7 +652,6 @@ def self_test():
     bot2.session = Session(2001)
     bot2.session.add_system(memory_note())
     bot2.running = True
-    bot2._nudge = False
     bot2._backup_running = True
     bot2.pending.clear()
     bot2.pending.append(("A", "任务"))
@@ -1535,59 +1532,10 @@ def self_test():
     assert _m == bot2.cfg["ptc_max_calls"], _m
     print("创造模式自测 OK")
 
-    # ===== 计划模式自测 =====
-    psaid = []
-    orig_say_plan = bot2.bridge.say_as_viktor
-    bot2.bridge.say_as_viktor = lambda text, *a, **k: psaid.append(text)
-    if not bot2.session:
-        bot2.players.add("T")
-        bot2._start_session()
-    bot2.agent_busy = False
-    bot2.pending.clear()
-    bot2._nudge = False
-    bot2.mode = MODE_NORMAL
-    # 任何玩家可进入; 以 nudge 触发一次引导回合, 不进用户消息
-    bot2.process_line("[2026-10-10 18:46:00:000 INFO] [Scripting] [VIKTOR-CHAT] 路人乙: 计划模式")
-    assert bot2.mode == MODE_PLAN, bot2.mode
-    assert bot2._nudge and not bot2.pending, "进入计划模式应 nudge 引导, 不入队用户消息"
-    assert psaid and "计划模式" in psaid[-1] and "退出计划" in psaid[-1], psaid
-    # 计划模式工具: 黑名单挡住 MC 命令/改世界; 查询/说话/ptc/set_mode 保留
-    ptools = bot2._allowed_tools(MODE_PLAN)
-    assert not ({"run_server_command", "pin_region"} & ptools), ptools
-    assert {"get_player_position", "inspect_region", "get_slice", "get_heightmap",
-            "find_blocks", "get_block",
-            "send_chat_message", "ptc", "set_mode"} <= ptools, ptools
-    # 计划/执行: effort high, 其余对齐创造max(heavy ×2)
-    pp = bot2._mode_params(MODE_PLAN)
-    ep = bot2._mode_params(MODE_EXECUTE)
-    assert pp["effort"] == "high" == ep["effort"], (pp, ep)
-    assert pp["tool_rounds"] == ep["tool_rounds"] == 2 * bot2.cfg["creative_max_tool_rounds"]
-    assert pp["max_tokens"] == ep["max_tokens"] == 2 * bot2.cfg["creative_max_reply_tokens"]
-    assert pp["ptc_calls"] == ep["ptc_calls"] == 2 * bot2.cfg["creative_ptc_max_calls"]
-    # 计划→执行: 任何玩家都可(不受指令权限限制)
-    r = bot2._tool_set_mode({"mode": MODE_EXECUTE, "reason": "计划定稿"})
-    assert bot2.mode == MODE_EXECUTE and "执行" in r, (r, bot2.mode)
-    # 执行模式为一次性: 回合结束程序自动回 normal
-    bot2._maybe_exit_execute()
-    assert bot2.mode == MODE_NORMAL, bot2.mode
-    # 退出计划: 非计划模式时提示; 计划模式时回 normal
-    psaid.clear()
-    bot2._on_exit_plan("路人乙")
-    assert bot2.mode == MODE_NORMAL and "不在计划模式" in psaid[-1], psaid
-    bot2.mode = MODE_PLAN
-    bot2._on_exit_plan("路人乙")
-    assert bot2.mode == MODE_NORMAL and "已退出计划模式" in psaid[-1], psaid
-    # 会话结束应把 plan/execute 也复位
-    bot2.mode = MODE_PLAN
-    bot2._end_session()
-    assert bot2.mode == MODE_NORMAL, bot2.mode
-    bot2.bridge.say_as_viktor = orig_say_plan
-    print("计划模式自测 OK")
-
-    # 常加载仅创造/执行模式支持: normal/oneshot/plan 都不暴露 pin_region
-    for _m in (MODE_NORMAL, MODE_ONESHOT, MODE_PLAN):
+    # 常加载仅创造模式支持: normal/oneshot 都不暴露 pin_region
+    for _m in (MODE_NORMAL, MODE_ONESHOT):
         assert "pin_region" not in bot2._allowed_tools(_m), (_m, bot2._allowed_tools(_m))
-    for _m in PIN_MODES:
+    for _m in CREATIVE_MODES:
         assert "pin_region" in bot2._allowed_tools(_m), _m
     # 离开创造模式 -> 自动清理常加载
     unp = []
@@ -1605,7 +1553,7 @@ def self_test():
     rp = Path("/tmp/viktor-resume-test.jsonl")
     rp.write_text("\n".join(json.dumps(m, ensure_ascii=False) for m in [
         {"role": "system", "content": memory_note()},
-        {"role": "system", "content": bot2._mode_note(MODE_PLAN)},
+        {"role": "system", "content": bot2._mode_note(MODE_CREATIVE)},
         {"role": "user", "content": "T: 接着规划"},
         {"role": "assistant", "content": None, "tool_calls": [
             {"id": "r1", "type": "function",
@@ -1615,7 +1563,7 @@ def self_test():
     ]) + "\n", encoding="utf-8")
     saved_sess, saved_mode = bot2.session, bot2.mode
     bot2.resume_session(str(rp))
-    assert bot2.mode == MODE_PLAN, bot2.mode
+    assert bot2.mode == MODE_CREATIVE, bot2.mode
     assert any(m.get("content") == "计划定稿" for m in bot2.session.messages)
     # 恢复时若技能清单与旧会话不同, 末尾补注一条(append-only, 不破坏前缀缓存)
     _sk = [m for m in bot2.session.messages if m.get("role") == "system"
@@ -2470,11 +2418,11 @@ api.set(6, 0, 0, "tall_grass")
     print("蓝图墙(马赛克)自测 OK")
 
     # 模式门禁: 建造工具只在创造模式家族可见(用户明确要求)
-    for mode in (MODE_NORMAL, MODE_PLAN, MODE_EXECUTE, MODE_ONESHOT):
+    for mode in (MODE_NORMAL, MODE_ONESHOT):
         names = bot2._allowed_tools(mode)
         assert not ({"build_preview", "build_commit", "build_undo", "build_status"} & names), \
             (mode, sorted(names))
-    for mode in (MODE_CREATIVE, MODE_CREATIVE_MAX):
+    for mode in CREATIVE_MODES:
         names = bot2._allowed_tools(mode)
         assert {"build_preview", "build_commit", "build_undo", "build_status"} <= names, mode
     print("建造工具模式门禁自测 OK(仅 creative / creative_max)")

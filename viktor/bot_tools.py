@@ -18,7 +18,6 @@ from .constants import (
     BUS_TIMEOUT_TEXT,
     BUS_TOOLS,
     CREATIVE_MODES,
-    PIN_MODES,
     PIN_NAME,
     RE_LINE,
     CELLS_HARD,
@@ -760,8 +759,8 @@ class BotToolsMixin:
             return self._pin_region_locked(args)
 
     def _pin_region_locked(self, args: dict) -> str:
-        """pin_region: 创造/执行模式下把施工区域设为常加载(ticking area)。
-        生命周期 = 创造/执行模式: 离开这些模式(切回 normal 等)或会话结束时由 _unpin_all 移除。"""
+        """pin_region: 创造模式下把施工区域设为常加载(ticking area)。
+        生命周期 = 创造模式: 离开该模式(切回 normal 等)或会话结束时由 _unpin_all 移除。"""
         try:
             x1, z1, x2, z2 = (int(args[k]) for k in ("x1", "z1", "x2", "z2"))
         except (KeyError, TypeError, ValueError):
@@ -798,7 +797,7 @@ class BotToolsMixin:
         log(f"[常加载] 已设置 {len(self._pinned)} 个区域覆盖 "
             f"({x1},{z1})~({x2},{z2}): {', '.join(self._pinned)}")
         return (f"已设置 {len(self._pinned)} 个常加载区域, 覆盖 ({x1},{z1})~({x2},{z2}) "
-                "整列(不限高度)。离开创造/执行模式时会自动移除; 再次调用会移动区域。")
+                "整列(不限高度)。离开创造模式时会自动移除; 再次调用会移动区域。")
 
     def _unpin_all(self):
         """移除本任务设置的常加载区域(任务结束/中止/会话结束/进程退出时调用)。"""
@@ -945,8 +944,8 @@ class BotToolsMixin:
             return f"当前已处于 {MODES[mode].label} 模式。"
         was_creative = self.creative_mode
         self.mode = mode
-        if mode not in PIN_MODES:
-            self._unpin_all()  # 离开创造/执行模式 -> 常加载区域生命周期结束
+        if mode not in CREATIVE_MODES:
+            self._unpin_all()  # 离开创造模式 -> 常加载区域生命周期结束
         p = self._mode_params()
         if mode in CREATIVE_MODES:
             log(f"[模式] {'切换' if was_creative else '进入'}创造模式: {mode} "

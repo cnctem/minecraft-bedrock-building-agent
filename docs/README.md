@@ -8,7 +8,7 @@
 | 文档 | 内容 | 主要代码依据 |
 |---|---|---|
 | [架构与代码结构](architecture.md) | 数据流、依赖方向、模块职责、运行时文件 | `viktor/__init__.py`、`bot.py` |
-| [运行模式与对话策略](modes.md) | normal/creative/plan/execute/oneshot、沉默、插话、轮次收尾 | `profiles.py`、`prompts.py`、`bot_agent.py` |
+| [运行模式与对话策略](modes.md) | normal/creative/creative_max/oneshot、沉默、插话、轮次收尾 | `profiles.py`、`prompts.py`、`bot_agent.py` |
 | [会话、上下文与模型](conversation.md) | 生命周期、append-only、模型档案、压缩、恢复 | `session.py`、`models.py`、`bot_control.py` |
 | [工具、资料查询与并发](tools.md) | function calling、ID/Wiki/URL/历史、ptc、指令安全 | `schemas.py`、`capabilities.py` |
 

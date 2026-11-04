@@ -130,7 +130,6 @@ class BotCoreMixin:
         self.abort = threading.Event()   # 置位 = 立即中止当前任务(强制停止)
         self.soft_abort = threading.Event()  # 置位 = 到安全点停止(不打断工具内部等待)
         self.agent_busy = False          # 当前是否有任务在跑(供停止词判断)
-        self._nudge = False              # 置位 = 唤醒 worker 但不带用户消息(计划模式主动引导用)
         self.mode = MODE_NORMAL          # 主对话当前模式(见 MODES); 一次性线程各自用 MODE_ONESHOT
         # 主对话当前模型别名(见 models.py): 只在「清空」/「清空k」开新会话时选定,
         # 会话内不可切换; 一次性对话固定用默认模型, 不受这里影响。

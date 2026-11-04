@@ -75,7 +75,7 @@ find_blocks("water"/"lava")  水域 / 岩浆范围
 1. `logs/sessions/*.jsonl` 里找 `build_preview` 的 program 与 `origin/facing`；
 2. 重新 preview 一次（KEEP 语义保证已建部分 `noop`，不会重复覆盖）；
 3. 只补 `verify.holes/wrong` 列出的格子，或继续下一个模块；
-4. 计划模式下把“已完成/待建”写清楚，避免重复施工。
+4. 把“已完成/待建”写清楚，避免重复施工。
 
 ## 6. 本项目落地清单
 

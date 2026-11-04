@@ -1,4 +1,4 @@
-"""控制面: 停止/清空/压缩/状态/备份/计划模式/恢复会话/一次性对话等硬编码控制词(不走模型)。
+"""控制面: 停止/清空/压缩/状态/备份/恢复会话/一次性对话等硬编码控制词(不走模型)。
 
 依赖方向: bot_control → session/profiles/constants/paths/capabilities; 不 import 其它 bot_* 模块。
 """
@@ -11,7 +11,7 @@ from pathlib import Path
 import capabilities
 
 from . import models, paths
-from .constants import Aborted, MODE_NORMAL, MODE_ONESHOT, MODE_PLAN, ONESHOT_TRIGGER
+from .constants import Aborted, MODE_ONESHOT, ONESHOT_TRIGGER
 from .paths import log
 from .profiles import MODES
 from .prompts import COMPACT_NOTE, SMART_COMPACT_NOTE, SMART_SUMMARY_HEADER
@@ -24,7 +24,7 @@ _NO_FORWARD_TOOLS = frozenset({"send_chat_message", "stay_silent"})
 
 
 class BotControlMixin:
-    """控制词 / 计划模式 / 恢复会话 / 一次性对话。"""
+    """控制词 / 恢复会话 / 一次性对话。"""
 
     def _on_soft_stop(self, name: str):
         """玩家发来完全匹配的“停止”: 到安全点停止, 不经过模型。
@@ -540,49 +540,6 @@ class BotControlMixin:
             return str(meta.get("model") or "")
         except (OSError, ValueError, AttributeError):
             return ""
-
-    # ---------- 计划模式(硬编码控制词, 程序处理, 不走模型) ----------
-
-    def _program_set_mode(self, mode: str, name: str) -> None:
-        """程序侧切模式: 设置模式并追加一条模式注记(append-only, 不改前缀)。"""
-        self.mode = mode
-        if self.session:
-            self.session.add_system(self._mode_note())
-        log(f"[计划] {name} 切换到 {MODES[mode].label} 模式")
-
-    def _on_plan_mode(self, name: str):
-        """硬编码控制词"计划模式": 任何玩家可进入。不重置上下文(以便利用既有上下文,
-        如之前用创造模式造过什么), 进入后追加模式注记并 nudge 一次让 Agent 主动引导。"""
-        with self.cv:
-            busy = self.agent_busy or bool(self.pending)
-        if busy:
-            self._sys("现在有任务在进行, 请先发「停止」或等它做完, 再进入计划模式。")
-            return
-        if self.mode == MODE_PLAN:
-            self._sys("已在计划模式中, 发送「退出计划」可退出。")
-            return
-        if not self.session:
-            self.players.add(name)
-            self._start_session()
-        self._program_set_mode(MODE_PLAN, name)
-        self._sys("已切换到计划模式, 发送「退出计划」可退出计划模式。")
-        # 让 Agent 主动开口引导(无用户消息, 仅以 nudge 触发一次模型回合)
-        with self.cv:
-            self._nudge = True
-            self.cv.notify()
-
-    def _on_exit_plan(self, name: str):
-        """硬编码控制词"退出计划": 从计划模式回到普通模式(程序处理, 不走模型)。"""
-        with self.cv:
-            busy = self.agent_busy or bool(self.pending)
-        if busy:
-            self._sys("我正在回复, 请稍后再发「退出计划」。")
-            return
-        if self.mode != MODE_PLAN:
-            self._sys("当前不在计划模式。")
-            return
-        self._program_set_mode(MODE_NORMAL, name)
-        self._sys("已退出计划模式, 回到普通模式。")
 
     # ---------- 一次性对话(可并发, 与主对话完全隔离) ----------
 

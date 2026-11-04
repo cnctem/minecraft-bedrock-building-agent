@@ -54,11 +54,7 @@ Minecraft 世界
 权限以 `viktor/profiles.py` 为准：
 
 - `creative`、`creative_max` 暴露完整的预览、提交、撤销、状态、渲染与蓝图工具。
-- `plan` 不暴露 `build_preview` / `build_commit` / `build_undo` / `build_status`；当前 profile 仍保留
-  `render_build` 和 `build_blueprint`。后者只能生成一个新的预览，plan 没有 commit，因此不能经它写世界。
-- `execute` 没有 `build_*` / `render_build` / `build_blueprint`；它可以执行服务器指令和使用 `pin_region`。
-- `normal` 与 `execute` 的建造相关只读能力仅有 `render_region`；plan 还可渲染已有本地计划。
-  `render_region` 通过世界快照工作，不属于写入门禁。
+- `normal` 的建造相关只读能力仅有 `render_region`；`render_region` 通过世界快照工作，不属于写入门禁。
 - 一次性模式的白名单不包含上述建造/渲染工具。
 - 除 schema 白名单外，执行层还会按当前模式再次拒绝禁用工具，防止经 `ptc` 夹带。
 

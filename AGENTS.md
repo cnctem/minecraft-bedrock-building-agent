@@ -104,8 +104,7 @@ bot.py
 5. ptc 是否可绕过限制、子线程是否继承限制；
 6. 自测、[docs/tools.md](docs/tools.md) 和相关技能书。
 
-特别注意：建造事务工具只在 creative/creative_max；execute 没有 build_*；pin_region 才支持 creative 家族和 execute。
-不要从旧文档恢复“execute 可用建造引擎”的历史描述。
+特别注意：建造事务工具只在 creative/creative_max；pin_region 只在 creative 家族可用。
 
 ### 2.4 行为包协议
 

@@ -13,8 +13,7 @@ import capabilities
 
 from . import models
 from .constants import (Aborted, CONTEXT_WARN_START_PCT, CONTEXT_WARN_STEP_PCT, CREATIVE_MODES,
-                        MODE_EXECUTE, MODE_NORMAL, PIN_MODES, RETRYABLE_HTTP,
-                        SMART_COMPACT_AUTO_PCT)
+                        RETRYABLE_HTTP, SMART_COMPACT_AUTO_PCT)
 from .paths import log
 from .profiles import EFFORT_KEYS, LIMIT_DEFAULTS, LIMIT_KEYS, MODES, PROMPTS, TOOLS, Mode
 from .prompts import SMART_COMPACT_PROMPT
@@ -177,7 +176,7 @@ class BotAgentMixin:
 
     def _mode_params(self, mode: str | None = None) -> dict:
         """当前(或指定)模式的 API 参数, 全部来自该模式的限制 profile(×scale)。
-        四态+未来模式都走同一张表, 不再逐个 if。"""
+        所有模式都走同一张表, 不再逐个 if。"""
         m = self._mode_info(mode)
         k = LIMIT_KEYS[m.limits]
         s = m.scale
@@ -229,8 +228,8 @@ class BotAgentMixin:
             allow = names - set(spec.get("except", ()))
         if not m.next_modes:
             allow.discard("set_mode")
-        # 常加载仅创造/执行模式支持
-        if (mode or self._mode()) not in PIN_MODES:
+        # 常加载仅创造模式支持
+        if (mode or self._mode()) not in CREATIVE_MODES:
             allow.discard("pin_region")
         return allow
 
@@ -800,12 +799,11 @@ class BotAgentMixin:
                 # 「备份」与「智能压缩」期间不开新任务: 消息继续入队, 备份结束
                 # (_run_backup 会 notify) / 摘要写完(_run_smart_compact 会 notify)再处理
                 while self.running and (self._backup_running or self._smart_compact_running
-                                        or (not self.pending and not self._nudge)):
+                                        or not self.pending):
                     self.cv.wait(timeout=1)
                 # 积压多条时合并成一次请求(所有消息已在上下文中, 一次回复即可)
                 batch, self.pending = self.pending[:], []
-                nudge, self._nudge = self._nudge, False
-            if not self.session or (not batch and not nudge):
+            if not self.session or not batch:
                 continue
             self.abort.clear()       # 新任务开始, 清掉上一次的中止信号
             self.soft_abort.clear()
@@ -844,13 +842,3 @@ class BotAgentMixin:
             if (reply is not None and not self._abort().is_set()
                     and not self._soft_abort().is_set()):
                 self._update_dialog(self._tls.turn_players, self._tls.spoken, spoke)
-            self._maybe_exit_execute()
-
-    def _maybe_exit_execute(self):
-        """执行模式是一次性周期: 本回合结束(完成/停止/出错)后程序自动回 normal。
-        计划模式不在此列——它靠模型 set_mode("execute") 或玩家「退出计划」结束。"""
-        if self.mode == MODE_EXECUTE:
-            self.mode = MODE_NORMAL
-            if self.session:
-                self.session.add_system(self._mode_note())
-            log("[计划] 执行周期结束, 已自动回到普通模式")

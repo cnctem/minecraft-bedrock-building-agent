@@ -6,18 +6,16 @@
 from .constants import (
     MODE_CREATIVE,
     MODE_CREATIVE_MAX,
-    MODE_EXECUTE,
     MODE_NORMAL,
     MODE_ONESHOT,
-    MODE_PLAN,
 )
-from .prompts import CREATIVE_PROMPT, EXECUTE_PROMPT, ONESHOT_PROMPT, PLAN_PROMPT
+from .prompts import CREATIVE_PROMPT, ONESHOT_PROMPT
 
 
 class Mode:
     """一个运行模式 = 提示词 profile + 限制 profile + 工具白名单 profile(+倍率/可达模式)。
-    三个维度互相独立、可复用: 计划/执行模式提示词不同但可共用 heavy 限制;
-    creative_max 只是 heavy 限制 ×2 再换 max 思考强度; 一次性则换一张工具白名单。"""
+    三个维度互相独立、可复用: creative 与 creative_max 共用提示词但限制/思考强度不同;
+    一次性则换一张工具白名单。"""
     __slots__ = ("prompt", "limits", "tools", "effort", "scale", "label",
                  "next_modes", "reset_to", "reveal_rounds")
 
@@ -42,8 +40,6 @@ class Mode:
 PROMPTS = {
     "none": "",
     "creative": CREATIVE_PROMPT.strip(),
-    "plan": PLAN_PROMPT.strip(),
-    "execute": EXECUTE_PROMPT.strip(),
     "oneshot": ONESHOT_PROMPT.strip(),
 }
 
@@ -84,16 +80,13 @@ TOOLS = {
         "inspect_region", "find_blocks", "ptc",
         "find_items", "use_skill",
     }},
-    # 计划模式: 黑名单, 不让它执行 MC 命令/动世界(查询、说话、记忆、ptc 仍在)
-    "no_commands": {"except": {"run_server_command", "pin_region",
-                               "build_preview", "build_commit", "build_undo", "build_status"}},
     # 建造引擎(含 Python 沙箱)只在创造模式家族暴露: 其它模式连工具名都看不到
     "no_build": {"except": {"build_preview", "build_commit", "build_undo", "build_status",
                             "render_build", "build_blueprint"}},
 }
 
 # 模式表: 只组合上面的 profile。next_modes = set_mode 允许切到的目标(其它模式对模型“不可知”);
-# 空元组 = 不可切换(连 set_mode 都不暴露)。plan/oneshot 不在任何 next_modes 里 -> 无法被切进去。
+# 空元组 = 不可切换(连 set_mode 都不暴露)。oneshot 不在任何 next_modes 里 -> 无法被切进去。
 MODES = {
     MODE_NORMAL:       Mode("none",     "quick",   "no_build", "normal",       label="普通",
                             next_modes=(MODE_CREATIVE, MODE_CREATIVE_MAX)),
@@ -101,10 +94,6 @@ MODES = {
                             next_modes=(MODE_NORMAL, MODE_CREATIVE_MAX)),
     MODE_CREATIVE_MAX: Mode("creative", "heavy",   "all",      "creative_max", label="创造max", scale=2,
                             next_modes=(MODE_NORMAL, MODE_CREATIVE)),
-    MODE_PLAN:         Mode("plan",     "heavy",   "no_commands", "creative",     label="计划", scale=2,
-                            next_modes=(MODE_EXECUTE,)),
-    MODE_EXECUTE:      Mode("execute",  "heavy",   "no_build",    "creative",     label="执行", scale=2,
-                            next_modes=(MODE_NORMAL,)),
     MODE_ONESHOT:      Mode("oneshot",  "oneshot", "oneshot",  "oneshot",      label="一次性",
                             reveal_rounds=True),
 }

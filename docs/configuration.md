@@ -76,7 +76,7 @@ cp config.example.json config.json
 | `oneshot_max_reply_tokens` / `oneshot_max_tool_rounds` | 一次性输出与工具轮次上限，默认 6000/4 |
 | `oneshot_max_concurrent` | 一次性对话最大并发，默认 4 |
 
-`creative_max`、plan、execute 的倍率与工具权限由 `viktor/profiles.py` 组合，不是简单读取同名字段。
+`creative_max` 的倍率与工具权限由 `viktor/profiles.py` 组合，不是简单读取同名字段。
 `max_queue` 已移除：普通聊天都交给模型判断，不使用旧的固定队列上限配置。
 
 ## 4. 日志、总线与空间查询

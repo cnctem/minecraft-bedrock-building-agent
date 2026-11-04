@@ -11,7 +11,7 @@ mc-ai-bot 入口: 把 MC 基岩版服务器(screen 会话)的聊天接入大模�
 
 实现按职责拆在 viktor/ 包内(依赖方向见 viktor/__init__.py 的分层图):
   - viktor/bot_core.py     构造、请求上下文、会话生命周期、待处理队列
-  - viktor/bot_control.py  控制词/计划模式/恢复会话/一次性对话
+  - viktor/bot_control.py  控制词/恢复会话/一次性对话
   - viktor/bot_tools.py    能力工具 handler(聊天/查询/指令/常加载/备份/模式)
   - viktor/bot_agent.py    function calling 循环与模式参数(请求按当前模型档案拼)
   - viktor/models.py       模型档案(触发词/模型名/Base URL/key/窗口/思考强度映射)

@@ -14,7 +14,7 @@ handler 由 `BotCore` 注册；每个模式实际看到的子集由 `viktor/prof
 | `update_memory(content)` | 仅在玩家明确要求记住、修改或忘记时，整体重写长期记忆；旧内容需自行保留 |
 | `get_player_activity(minutes)` | 从日志查询最近玩家进出记录 |
 | `run_server_command(command)` | 以控制台身份执行基岩版指令（不带 `/`），输出返回模型；受危险指令黑名单限制 |
-| `pin_region(x1, z1, x2, z2)` | 创造/执行模式设置主世界常加载区域；按 ≤100 区块切片，离开这些模式或会话结束时自动移除 |
+| `pin_region(x1, z1, x2, z2)` | 创造模式设置主世界常加载区域；按 ≤100 区块切片，离开创造模式或会话结束时自动移除 |
 | `set_mode(mode, reason?)` | 在当前模式允许的目标间切换；enum 动态注入 |
 
 ### 1.2 玩家与空间查询

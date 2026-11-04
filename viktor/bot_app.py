@@ -14,13 +14,11 @@ from .constants import (
     BODY_OFF_WORD,
     BODY_ON_WORD,
     COMPACT_WORD,
-    EXIT_PLAN_WORD,
     FORCE_STOP_WORD,
     IGNORE_TRIGGER,
     NO_STOP_WORD,
     ONESHOT_FORCE_STOP,
     ONESHOT_TRIGGER,
-    PLAN_WORD,
     RE_BRIDGE,
     RE_CHAT,
     RE_BPROG,
@@ -129,12 +127,6 @@ class BotAppMixin:
                 return
             if stripped == BACKUP_WORD:
                 self._on_backup(name)
-                return
-            if stripped == PLAN_WORD:
-                self._on_plan_mode(name)
-                return
-            if stripped == EXIT_PLAN_WORD:
-                self._on_exit_plan(name)
                 return
             if stripped == RESTORE_WORD:
                 self._on_restore_session(name)

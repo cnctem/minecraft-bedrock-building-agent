@@ -50,7 +50,7 @@ bot.py（入口） → viktor.selftest（--test）
 | `bot.py` | 参数解析、`--test`、`--resume` 与启动 |
 | `viktor/__init__.py` | 组合 `Bot` 与职责 mixin，声明依赖方向 |
 | `viktor/bot_core.py` | 构造、请求上下文、会话生命周期、待处理队列、能力注册 |
-| `viktor/bot_control.py` | 控制词、一次性对话调度、计划模式、恢复会话 |
+| `viktor/bot_control.py` | 控制词、一次性对话调度、恢复会话 |
 | `viktor/bot_tools.py` | 聊天、查询、指令、记忆、常加载、模式切换等工具 handler |
 | `viktor/bot_agent.py` | 模型参数、function calling 循环、worker、插话安全点、收尾汇报 |
 | `viktor/bot_app.py` | `logs/server.log` tail、事件解析、启动握手、主循环 |
