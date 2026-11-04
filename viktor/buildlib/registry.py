@@ -146,7 +146,8 @@ SPEC: dict[str, tuple] = {
     "horse_head_wall": ("horse_head_wall(u1, w1, u2, w2, base_v, steps, step_width, step_height, block)", "马头墙(徽派, 两端高)"),
     "screen_wall": ("screen_wall(cu, cv, cw, axis, width, height, block, cap_block=None)", "影壁/照壁"),
     "paifang": ("paifang(cu, cv, cw, axis, spans, height, span_width, column_block, beam_block, roof_block)", "牌坊(间数 3 = 三间四柱)"),
-    "ridge_beasts": ("ridge_beasts(u1, w1, u2, w2, v, count, block)", "屋脊吻兽"),
+    "ridge_beasts": ("ridge_beasts(u1, w1, u2, w2, v, count, block)",
+                     "屋脊吻兽: 范围给**正脊**两端(不是屋檐外框), v 给脊顶所在层; 给成屋檐范围会把吻兽挂到脊外"),
     "stepped_terrace": ("stepped_terrace(u1, w1, u2, w2, base_v, steps, step_height, step_depth, block)", "月台/踏道台阶"),
 
     # ---------- regional ----------

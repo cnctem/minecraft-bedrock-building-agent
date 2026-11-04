@@ -22,6 +22,20 @@ def name_of(entry) -> str:
 SYMBOLS = "#=+*%@&$~^<>oOxXvVzZ0123456789"
 
 # 方块族 -> 颜色(做 PNG 用)。没命中的走稳定哈希色, 保证同一方块每次同色。
+# 精确/前缀优先: 先匹配这些, 再走下面的“族”规则(否则 terracotta 会把黄琉璃吃成褐色)。
+_EXACT_COLORS = [
+    (("yellow_glazed",), (235, 200, 70)),
+    (("green_glazed",), (110, 170, 90)),
+    (("blue_glazed",), (90, 130, 200)),
+    (("red_glazed",), (190, 70, 60)),
+    (("yellow_terracotta",), (222, 170, 70)),
+    (("red_terracotta",), (170, 80, 60)),
+    (("orange_terracotta",), (200, 120, 70)),
+    (("white_terracotta",), (230, 228, 222)),
+    (("deepslate_tiles", "deepslate_tile"), (70, 72, 80)),
+    (("quartz",), (238, 238, 232)),
+]
+
 _FAMILY_COLORS = [
     (("stone", "cobble", "deepslate", "andesite", "granite", "diorite", "tuff", "basalt"),
      (128, 128, 132)),
@@ -48,6 +62,9 @@ _FAMILY_COLORS = [
 
 def block_color(name: str) -> tuple:
     base = str(name).replace("minecraft:", "", 1)
+    for keys, rgb in _EXACT_COLORS:
+        if any(k in base for k in keys):
+            return rgb
     for keys, rgb in _FAMILY_COLORS:
         if any(k in base for k in keys):
             return rgb
