@@ -29,7 +29,7 @@ SANDBOX_MEM_MB = 256
 
 FACINGS = ("north", "south", "east", "west")
 
-# 多格方块: 编译器自动展开成两格(实测状态名, 见 docs/p2-build-engine.md)
+# 多格方块: 门/双格植物自动展开, 床按 direction 补床尾(见 docs/build-engine.md)
 TALL_PLANTS = {
     "tall_grass", "large_fern", "sunflower", "lilac", "rose_bush", "peony",
     "pitcher_plant", "tall_dripleaf",

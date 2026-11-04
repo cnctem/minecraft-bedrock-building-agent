@@ -1,8 +1,10 @@
 # 行为包源码（viktor_bridge）
 
-这里是 **BDS 行为包 `viktor_bridge` 的唯一源码位置**。服务器目录
-`/home/jrj/minecraft-bedrock/behavior_packs/viktor_bridge` 是指向本目录的**软链接**，
-所以：
+这里是 **BDS 行为包 `viktor_bridge` 的唯一源码位置**。在参考部署服务器上，
+`/home/jrj/minecraft-bedrock/behavior_packs/viktor_bridge` 是指向本目录的**软链接**；其他部署应使用各自的仓库和 BDS 路径。
+开发设备上的独立 checkout 可以只有源码，不意味着它已经连接到某个线上服务器。
+
+在已配置软链接的部署中：
 
 - 改这里的 `scripts/main.js` = 改服务器上正在用的脚本，不需要拷贝/同步；
 - 提交到本仓库即等于给行为包做了版本管理（改之前能随时回滚）；
@@ -29,11 +31,15 @@
 
 ## 协议
 
-脚本实现的行为包协议见仓库根 `README.md` 的「行为包脚本桥」一节（协议 v2：请求 id 回显 +
-`system.runJob` 非阻塞扫描）。服务器不在人少/无人时不要随意 `reload`：重载会中断正在进行的扫描。
+脚本实现的行为包协议见 [`docs/behavior-pack.md`](../docs/behavior-pack.md)（当前协议 **v4**：请求 id 路由、
+分帧回包、空间感知、世界快照与建造引擎）。服务器有玩家或 Bot 忙时不要随意 `reload`：重载会中断正在进行的扫描，
+并清空建造暂存与撤销栈。
+
+如果当前只是开发设备、没有运行中的 BDS，只做 `node --check` 和离线自测即可；不要假定这里一定已软链接到线上服务器。
+环境判断见根目录 [`AGENTS.md`](../AGENTS.md)。
 
 ## 备份
 
-纳入 git 之前的原始副本留在 `/home/jrj/viktor_bridge.pre-git.backup.20261023`（仅作应急，
-确认历史提交可用后可删）。注意**不要**把备份目录放进 `behavior_packs/` 里——BDS 会把它当第二个包扫到，
-UUID 冲突会导致加载失败。
+参考部署机上可能留有纳入 git 前的原始副本 `/home/jrj/viktor_bridge.pre-git.backup.20261023`（仅作应急，
+先确认文件确实存在；它不属于本仓库，开发设备不要假定可用）。注意**不要**把备份目录放进 `behavior_packs/` 里——
+BDS 会把它当第二个包扫到，UUID 冲突会导致加载失败。

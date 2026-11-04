@@ -1,7 +1,21 @@
 # 建筑函数库（`api.lib` / `viktor/buildlib/`）
 
 把 Java 建筑模组里的几何库**按算法移植**到 bot 的建造引擎上：模型不再手写几百行循环去逼近
-一个中式屋顶或十字拱，而是写 `api.lib.chinese_roof(...)`。
+一个中式屋顶或十字拱，而是写 `api.lib.chinese_roof(...)`。底层沙箱、preview/commit/verify/undo、
+坐标和渲染见[建造引擎](build-engine.md)。
+
+当前共有 **8 类、216 个函数**，全部只产出普通形状 ops，因此复用同一套编译限额、预览、提交、撤销、渲染与校验。
+
+| 类别 | 内容 | 签名文档 |
+|---|---|---|
+| `geometry` | 圆/球/椭球/锥/多边形/环面、拱顶、坡屋顶、楼梯 | [`functions-geometry.md`](../skills/mc-build/references/functions-geometry.md) |
+| `chinese` | 中式屋顶、斗拱、须弥座、月洞门、塔、牌坊、藻井 | [`functions-chinese.md`](../skills/mc-architecture/references/functions-chinese.md) |
+| `regional` | 江南、徽派、闽南、岭南、川蜀、窑洞、碉房、土楼 | 同 `functions-chinese.md` |
+| `vault` | 十字拱/肋拱/扇拱、曲面、网架、幕墙、旋转楼梯 | [`functions-vault.md`](../skills/mc-architecture/references/functions-vault.md) |
+| `western` | 柱式、门廊、拱券、玫瑰窗、飞扶壁、城堡、剧场 | [`functions-western.md`](../skills/mc-architecture/references/functions-western.md) |
+| `garden` | 水池、跌水、九曲桥、石舫、假山、游廊、花池 | [`functions-garden.md`](../skills/mc-details/references/functions-garden.md) |
+| `decor` | 门窗、线脚、阳台、壁炉、吊灯与成套室内家具 | [`functions-interior.md`](../skills/mc-interior/references/functions-interior.md) |
+| `create` | 确定性地形/植被/遗迹/道路生成器与整栋模板 | [`functions-generators.md`](../skills/mc-terrain/references/functions-generators.md) |
 
 - 实现：`viktor/buildlib/{core,shapes,chinese,structures,regional,gardens,decor,creations}.py`
 - 元数据（唯一来源）：`viktor/buildlib/registry.py` → `CATEGORIES` / `SPEC`
@@ -9,6 +23,9 @@
   之前构造 `api.lib`
 - 文档：`python3 tools/gen_buildlib_docs.py` → `skills/*/references/functions-*.md`
 - 自测：`python3 bot.py --test` 内的「建筑函数库分类自测 / 函数库 help/别名自测」
+
+`print(api.lib.help(...))` 等程序输出不会直接写 stdout，而会作为 `[程序输出]` 附在 build_preview 结果里。
+参数错误会带出 `registry.SPEC` 中的接口签名，便于模型自行纠正。
 
 ## 1. 为什么不做成“第二套 DSL”
 
@@ -71,7 +88,7 @@
 2. 在 `registry.CATEGORIES` 里登记类别，在 `registry.SPEC` 里写一行签名 + 一句话说明。
    `missing_from_spec()` 会校验两边一致（自测里跑）。
 3. `python3 tools/gen_buildlib_docs.py` 重生成技能文档（`--check` 查漂移）。
-4. `cd ~/repo/mc-ai-bot && python3 bot.py --test`。
+4. `python3 bot.py --test`。
 5. 需要视觉确认时用 `build_preview` + `render_build(views=["front","top","iso"])` 看字符图/PNG。
 
 ## 5. 已知取舍
@@ -92,4 +109,3 @@
 - 若要对外分发本仓库，先确认原模组的许可证是否允许衍生/再分发；只在私人服务器自用则不受影响。
 - 原模组的数值、比例建议（屋顶高度系数、柱高比、开窗节奏等）被整理进技能书，属于“经验参数”，
   实际以渲染/实机效果为准。
-\n
