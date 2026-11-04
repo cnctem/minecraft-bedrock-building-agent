@@ -5,14 +5,15 @@
 
 仅创造模式可见(profiles.TOOLS 的白名单 + 执行层黑名单双重保证)。
 
-依赖方向: bot_build → build/bus/constants/capabilities; 不 import 其它 bot_* 模块。
+依赖方向: bot_build → build/render/models/bus/constants/capabilities; 不 import 其它 bot_* 模块。
 """
+import base64
 import json
 import time
 
 import capabilities
 
-from . import build, render
+from . import build, models, render
 from .bus import Req
 from .constants import (
     BUILD_FRAME_CHARS,
@@ -202,6 +203,36 @@ class BotBuildMixin:
                    "要改就先改程序再 build_preview。")
         return "\n".join(out)
 
+    # ---------- 渲染图 -> 模型 ----------
+
+    def _attach_render_images(self, palette: list, cells: dict, bounds: tuple,
+                              views: list) -> int:
+        """把渲染图作为图片内容块附给模型, 返回实际附上的张数。
+
+        字符图给的是“哪一格是什么方块”(有图例、有坐标), 图片给的是“一眼看出的形状/比例”;
+        两者互补, 不互相替代。实测(2026-11, flash/kimi 都能读图): 同一道“左右是否对称”的判断,
+        只给字符图时 flash 的思考 token 波动 632~4982、单次 6~35 秒; 加一张正面图后稳定在
+        300~380 token、约 3 秒, 结论一致。flash 按张计费(189 token/张, 与分辨率无关),
+        kimi 按像素计费, 所以这里用 1~2 像素/格的小图。
+        """
+        if not self.cfg.get("render_attach_png", True):
+            return 0
+        if not models.spec(self.cfg, getattr(self, "model_alias", None)).get("vision", True):
+            return 0  # 模型档案标明不支持看图: 只留字符图, 别把请求打成 400
+        limit = max(0, int(self.cfg.get("render_attach_max", 2)))
+        attached = 0
+        for view in views[:limit]:
+            try:
+                px = render._pixels(palette, cells, bounds, view)
+                b64 = base64.b64encode(render.png_bytes(px, render.model_scale(px))).decode()
+            except Exception as e:
+                log(f"[渲染] {view} 附图失败: {e}")
+                continue
+            if not capabilities.add_image(b64, "image/png"):
+                break
+            attached += 1
+        return attached
+
     VIEWS = ("front", "back", "left", "right", "top", "iso")
 
     def _render_args(self, args: dict) -> tuple:
@@ -233,12 +264,16 @@ class BotBuildMixin:
                 scale=int(args.get("scale") or 6))
         except Exception as e:
             return f"渲染失败: {e}"
+        shots = self._attach_render_images(palette, cells, bounds, views)
         out = [f"渲染 {jid} 「{self._build_name(jid) or '未命名'}」 "
                f"{len(cells)} 格, 包围盒 {bounds[3]-bounds[0]+1}×{bounds[4]-bounds[1]+1}×{bounds[5]-bounds[2]+1}",
                text]
+        if shots:
+            out.append(f"已附 {shots} 张渲染图({', '.join(views[:shots])})在这条结果里: "
+                       "形状/比例/对称直接看图判断, 具体方块名看上面字符图的图例。")
         if pngs:
-            out.append("PNG: " + ", ".join(str(p) for p in pngs))
-        log(f"[渲染] {jid} views={views} cells={len(cells)} png={len(pngs)}")
+            out.append("PNG 存档: " + ", ".join(str(p) for p in pngs))
+        log(f"[渲染] {jid} views={views} cells={len(cells)} png={len(pngs)} img={shots}")
         return "\n".join(out)
 
     def _tool_render_region(self, args: dict) -> str:
@@ -274,12 +309,16 @@ class BotBuildMixin:
                 scale=int(args.get("scale") or 4))
         except Exception as e:
             return f"渲染失败: {e}"
+        shots = self._attach_render_images(palette, cells, bounds, views)
         out = [f"区域渲染 ({xs[0]}, {ys[0]}, {zs[0]})..({xs[1]}, {ys[1]}, {zs[1]}) "
                f"{vol} 格" + (f", 未加载 {data.get('unloaded')} 格" if data.get("unloaded") else ""),
                text]
+        if shots:
+            out.append(f"已附 {shots} 张渲染图({', '.join(views[:shots])})在这条结果里, "
+                       "可以直接看图; 具体方块名看字符图图例。")
         if pngs:
-            out.append("PNG: " + ", ".join(str(p) for p in pngs))
-        log(f"[渲染] 区域 {xs[0]},{ys[0]},{zs[0]} views={views} cells={len(cells)}")
+            out.append("PNG 存档: " + ", ".join(str(p) for p in pngs))
+        log(f"[渲染] 区域 {xs[0]},{ys[0]},{zs[0]} views={views} cells={len(cells)} img={shots}")
         return "\n".join(out)
 
     def _tool_build_blueprint(self, args: dict) -> str:

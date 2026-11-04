@@ -261,11 +261,12 @@ RENDER_BUILD_SCHEMA = {
     "function": {
         "name": "render_build",
         "description": (
-            "【视觉反馈】把 build_preview 编译好的建造计划渲染成**字符图**（并可导出 PNG）。"
-            "不读世界、不写世界，随时可用；用来在动手前看比例、屋顶收口、立面节奏、体块关系。\n"
-            "views 可选: front(正面) / back(背面) / left / right(侧立面) / top(俯视) / iso(等距立体)。\n"
+            "【视觉反馈】把 build_preview 编译好的建造计划渲染成**字符图 + 图片**。"
+            "前两个视角的渲染图会作为图片直接附在结果里(你能看到), 用来看比例/对称/屋顶收口;"
+            "字符图保留精确方块名与逐格位置(看图辨不出的方块名看图例)。"
+            "不读世界、不写世界，随时可用; views 可选: front/back/left/right/top/iso。\n"
             "字符图里 '.' 是空气, 其余符号见「图例」。大图会自动降采样。\n"
-            "PNG 会写到服务器 logs/renders/ 下(玩家看不了游戏内, 但要留档/给运营看时有用)。"
+            "PNG 同时写到服务器 logs/renders/ 留档; 想看更多视角就分两次调。"
         ),
         "parameters": {
             "type": "object",
@@ -285,9 +286,10 @@ RENDER_REGION_SCHEMA = {
     "function": {
         "name": "render_region",
         "description": (
-            "【视觉反馈】把世界里的一块区域渲染成字符图 + PNG（只读，用稠密快照）。\n"
-            "视角同 render_build: front/back/left/right/top/iso。\n"
-            "用途: 看玩家已有建筑的整体形态、比例、体块关系; 逐格细节仍用 get_slice/inspect_region。\n"
+            "【视觉反馈】把世界里的一块区域渲染成字符图 + 图片（只读，用稠密快照）。"
+            "前两个视角的渲染图会作为图片直接附在结果里, 用来看整体形态/比例/体块关系;"
+            "逐格细节仍用 get_slice/inspect_region。\n"
+            "视角同 render_build: front/back/left/right/top/iso。"
             "区域体积 ≤65536 格; 未加载的格子按空气处理并会在标题里注明。"
         ),
         "parameters": {

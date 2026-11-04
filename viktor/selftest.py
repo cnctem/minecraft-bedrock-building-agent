@@ -2380,6 +2380,62 @@ api.set(6, 0, 0, "tall_grass")
     png.unlink(missing_ok=True)
     print("视觉反馈(渲染/PNG)自测 OK")
 
+    # 渲染图直接附给模型: 开关 / 张数上限 / kimi 按像素计费所以要小图 / 关掉就不附
+    assert R.model_scale([[0] * 20 for _ in range(10)]) == 2      # 小件 2 像素/格
+    assert R.model_scale([[0] * 400 for _ in range(10)]) == 1     # 大件 1 像素/格
+    assert R.png_bytes([[ (1,2,3,255) ]], 1)[:8] == b"\x89PNG\r\n\x1a\n"
+    assert R.block_color("gray_glazed_terracotta")[0] < 130, R.block_color("gray_glazed_terracotta")
+    assert R.block_color("red_wool")[0] > R.block_color("red_wool")[2], R.block_color("red_wool")
+    _keep = {k: bot2.cfg.get(k) for k in ("render_attach_png", "render_attach_max")}
+    _payloads = getattr(bot2, "_build_payloads", None)
+    _wrote = []
+    try:
+        bot2._build_payloads = {"t1": p3}
+        bot2.cfg["render_attach_png"] = True
+        bot2.cfg["render_attach_max"] = 2
+        capabilities.take_images()
+        _out = bot2._tool_render_build({"operation_id": "t1",
+                                        "views": ["front", "iso", "top"]})
+        _imgs = capabilities.take_images()
+        assert len(_imgs) == 2, (_out, len(_imgs))                # 三个视角只附前两个
+        assert all(i["type"] == "image_url" and
+                   i["image_url"]["url"].startswith("data:image/png;base64,") for i in _imgs)
+        assert "已附 2 张渲染图" in _out, _out
+        _wrote = [l.split("PNG 存档: ")[1] for l in _out.splitlines() if l.startswith("PNG 存档: ")]
+        # 关掉开关 -> 只回字符图, 不再附图; 下次渲染不会续上一批
+        bot2.cfg["render_attach_png"] = False
+        _out2 = bot2._tool_render_build({"operation_id": "t1", "views": ["front"]})
+        assert capabilities.take_images() == [] and "已附" not in _out2, _out2
+        # 模型档案声明不支持看图 -> 同样不附(避免 400)
+        bot2.cfg["render_attach_png"] = True
+        _specs = bot2.cfg.setdefault("models", {})
+        _flash = _specs.setdefault("flash", {})
+        _old_vision = _flash.get("vision", None)
+        _flash["vision"] = False
+        try:
+            bot2._tool_render_build({"operation_id": "t1", "views": ["front"]})
+            assert capabilities.take_images() == [], "vision=false 时不应附图"
+        finally:
+            if _old_vision is None:
+                _flash.pop("vision", None)
+            else:
+                _flash["vision"] = _old_vision
+    finally:
+        for k, v in _keep.items():
+            if v is None:
+                bot2.cfg.pop(k, None)
+            else:
+                bot2.cfg[k] = v
+        if _payloads is None:
+            bot2.__dict__.pop("_build_payloads", None)
+        else:
+            bot2._build_payloads = _payloads
+        capabilities.take_images()
+        for _s in _wrote:
+            for _p in _s.split(", "):
+                Path(_p).unlink(missing_ok=True)
+    print("渲染图附图自测 OK")
+
     # 限额报错要"可行动": 给等价尺寸与超出倍数
     _be, _bp = bot2.bus_enabled, bot2.pack_proto
     bot2.bus_enabled, bot2.pack_proto = True, 4

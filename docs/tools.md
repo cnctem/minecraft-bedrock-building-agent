@@ -28,7 +28,7 @@ handler 由 `BotCore` 注册；每个模式实际看到的子集由 `viktor/prof
 | `get_slice(axis, level, x1..z2, dimension?)` | 俯视/立面/剖面字符图与图例，≤4096 格 |
 | `inspect_region(x1..z2, dimension?, filter?, detail?, limit?)` | 三维类型计数；filter 时给 match/mismatch 和不符合坐标，≤32768 格 |
 | `find_blocks(block, x1..z2, dimension?, limit?)` | 区域内按方块类型子串查找坐标，≤32768 格 |
-| `render_region(x1..z2, views?, scale?)` | 通过稠密快照生成区域字符图与 PNG；只读，≤65536 格 |
+| `render_region(x1..z2, views?, scale?)` | 通过稠密快照生成区域字符图与 PNG；前两个视角的图直接附给模型；只读，≤65536 格 |
 
 空间查询分工：
 
@@ -58,7 +58,7 @@ handler 由 `BotCore` 注册；每个模式实际看到的子集由 `viktor/prof
 | `build_commit(operation_id)` | 重新 diff 后批量写入并自动 verify；只有已加载目标 mismatch=0 才算这些目标通过 |
 | `build_undo(operation_id?)` | 用 before 体积撤销指定或最近操作；撤销栈 2 个，reload 清空 |
 | `build_status()` | 列出暂存与可撤销操作 |
-| `render_build(operation_id, views?, scale?)` | 将本地编译结果渲染成 front/back/left/right/top/iso 字符图与 PNG |
+| `render_build(operation_id, views?, scale?)` | 将本地编译结果渲染成 front/back/left/right/top/iso 字符图与 PNG，前两个视角的图直接附给模型 |
 | `build_blueprint(operation_id, view, at, direction, step?)` | 生成游戏内混凝土蓝图墙的新预览，仍须 commit 才写入 |
 
 完整 API、权限、坐标、沙箱和验收语义见[建造引擎](build-engine.md)，`api.lib` 见[建筑函数库](buildlib.md)。

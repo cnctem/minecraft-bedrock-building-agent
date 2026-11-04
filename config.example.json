@@ -107,5 +107,7 @@
   "session_read_max_chars": 12000,
   "build_progress": true,
   "build_progress_min_sec": 2.0,
+  "render_attach_png": true,
+  "render_attach_max": 2,
   "replay_log_on_truncate": false
 }

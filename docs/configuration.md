@@ -103,6 +103,8 @@ BDS 重启后 screen 日志设置会失效，必须重新执行 run.sh 或重启
 |---|---|
 | `build_progress` | 是否向玩家转发建造阶段进度，默认 true |
 | `build_progress_min_sec` | Bot 侧再次转发进度的最小间隔，默认 2 秒 |
+| `render_attach_png` | 渲染图是否直接作为图片附给模型（flash/kimi 都能读图），默认 true |
+| `render_attach_max` | 一次渲染最多附几张图，默认 2；其余视角只给字符图 |
 | `pin_max_areas` | pin_region 单次最多切出的常加载片数，默认 6；同时受 BDS 每维度上限约束 |
 
 编译器体积、源码、沙箱和协议上限是代码常量，不由 config 任意放大；当前值见[建造引擎](build-engine.md)。

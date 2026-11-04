@@ -36,6 +36,27 @@ _EXACT_COLORS = [
     (("quartz",), (238, 238, 232)),
 ]
 
+# 染色名 -> 颜色。含染色词的方块(红羊毛/蓝混凝土/黄琉璃…)按染色说话,
+# 比归类到“羊毛=紫灰/混凝土=灰”更贴近眼睛看到的东西。长名放前面(light_blue 先于 blue)。
+_DYE_COLORS = [
+    ("light_blue", (100, 170, 215)),
+    ("light_gray", (160, 160, 155)),
+    ("magenta", (190, 80, 180)),
+    ("purple", (130, 70, 175)),
+    ("brown", (110, 72, 42)),
+    ("orange", (215, 120, 45)),
+    ("yellow", (230, 195, 60)),
+    ("lime", (140, 190, 60)),
+    ("green", (75, 120, 55)),
+    ("cyan", (40, 150, 160)),
+    ("blue", (60, 80, 180)),
+    ("red", (180, 55, 50)),
+    ("pink", (235, 150, 175)),
+    ("black", (35, 35, 38)),
+    ("gray", (110, 110, 112)),
+    ("white", (235, 235, 230)),
+]
+
 _FAMILY_COLORS = [
     (("stone", "cobble", "deepslate", "andesite", "granite", "diorite", "tuff", "basalt"),
      (128, 128, 132)),
@@ -64,6 +85,9 @@ def block_color(name: str) -> tuple:
     base = str(name).replace("minecraft:", "", 1)
     for keys, rgb in _EXACT_COLORS:
         if any(k in base for k in keys):
+            return rgb
+    for dye, rgb in _DYE_COLORS:
+        if dye in base:
             return rgb
     for keys, rgb in _FAMILY_COLORS:
         if any(k in base for k in keys):
@@ -288,8 +312,19 @@ def _pixels(palette: list, cells: dict, bounds: tuple, view: str):
     return px
 
 
-def write_png(path: str | Path, pixels: list, scale: int = 1) -> Path:
-    """最小 PNG 写入(标准库 zlib+struct), 1 像素 1 格, 可选整数放大。"""
+def model_scale(pixels: list, max_dim: int = 256) -> int:
+    """给模型看的放大倍数: 1~2 像素/格。
+
+    视觉编码器本来就会把图重采样到自己的分块尺寸, 超过 1 像素/格不增加信息,
+    只会让按像素计费的模型(kimi 按分块算)多花钱。大件统一用 1。
+    """
+    h = len(pixels)
+    w = len(pixels[0]) if h else 0
+    return 2 if max(w, h) <= max_dim else 1
+
+
+def png_bytes(pixels: list, scale: int = 1) -> bytes:
+    """最小 PNG 编码(标准库 zlib+struct), 1 像素 1 格, 可选整数放大。不落盘。"""
     h = len(pixels)
     w = len(pixels[0]) if h else 0
     scale = max(1, int(scale))
@@ -303,13 +338,17 @@ def write_png(path: str | Path, pixels: list, scale: int = 1) -> Path:
     def chunk(tag: bytes, data: bytes) -> bytes:
         return (struct.pack(">I", len(data)) + tag + data
                 + struct.pack(">I", zlib.crc32(tag + data) & 0xFFFFFFFF))
-    png = (b"\x89PNG\r\n\x1a\n"
-           + chunk(b"IHDR", struct.pack(">IIBBBBB", w * scale, h * scale, 8, 6, 0, 0, 0))
-           + chunk(b"IDAT", zlib.compress(bytes(raw), 6))
-           + chunk(b"IEND", b""))
+    return (b"\x89PNG\r\n\x1a\n"
+            + chunk(b"IHDR", struct.pack(">IIBBBBB", w * scale, h * scale, 8, 6, 0, 0, 0))
+            + chunk(b"IDAT", zlib.compress(bytes(raw), 6))
+            + chunk(b"IEND", b""))
+
+
+def write_png(path: str | Path, pixels: list, scale: int = 1) -> Path:
+    """写 PNG 文件(留档/给人看), 返回路径。"""
     p = Path(path)
     p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_bytes(png)
+    p.write_bytes(png_bytes(pixels, scale))
     return p
 
 

@@ -36,6 +36,7 @@ _DEFAULT_BEHAVIOR = {
     "effort_param": "effort",
     "effort_map": {"low": "low", "high": "high", "max": "max"},
     "reasoning_content": True,  # 带 tool_calls 的 assistant 要不要回传思考链
+    "vision": True,             # 能不能收图片内容块(render_build/render_region/read_url 会附)
     "temperature": _UNSET,      # _UNSET = 按模式默认; None = 一律不传; 数字 = 固定值
 }
 
