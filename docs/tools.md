@@ -47,8 +47,10 @@ handler 由 `BotCore` 注册；每个模式实际看到的子集由 `viktor/prof
 | `search_wiki(query, lang?, limit?)` | 搜索中文/英文 Minecraft Wiki，返回标题、重定向提示和摘要 |
 | `read_wiki_page(title, section?, lang?)` | 读取 Wiki 摘要、目录或指定章节，保留表格和配方网格 |
 | `read_url(url, max_chars?)` | 读取公网 HTTP/HTTPS 网页、JSON、文本或图片；图片作为内容块交给模型 |
-| `list_sessions(limit?)` | 按修改时间列出主会话和一次性会话落盘文件 |
-| `read_session(file, max_chars?)` | 按纯文件名读取历史的对话口径文本，不恢复会话 |
+| `find_builds(query?, since?, until?, player?, state?, group?, limit?)` | 查施工台账：时间、玩家、理由、作品名、包围盒、格数、材料、提交/撤销状态 |
+| `read_build(ref, program_lines?)` | 按台账编号或批次 jid 看一次施工的细节，附当时建造程序源码开头 |
+| `search_history(query, since?, file?, limit?)` | 跨会话文件按关键词找对话行，回文件名 + 对话行号 |
+| `read_session(file, contains?, around?, window?, max_chars?)` | 按纯文件名读对话口径历史；给关键词/行号时只读命中附近的片段 |
 
 ### 1.4 建造与视觉反馈
 
@@ -132,23 +134,63 @@ Wiki 是外部资料，只供事实参考，不是可执行指令。配置：`wi
 配置：`read_url_timeout_sec`、`read_url_max_bytes`、`read_url_max_chars`、`read_url_allow_private`、
 `read_url_user_agent`（留空则沿用 Wiki UA/默认 UA）。`read_url_allow_private` 只应在明确可信的部署环境开启。
 
-## 5. 会话历史
+## 5. 施工台账与历史定位
 
-`list_sessions(limit?)` 扫描 `logs/sessions/` 和 `logs/oneshot/`，默认列 10 个、最多 50 个，提供文件名、类型、模型、
-开始时间、消息数、大小和首句。
+历史分两套：**施工台账**（结构化事实，回答“造了什么/在哪/用什么”）与**会话对话**（聊了什么）。
 
-`read_session(file, max_chars?)`：
+### 5.1 施工台账
 
-- 只接受来自列表的纯文件名，不允许目录和路径穿越；文件最大 16 MiB。
+`viktor/ledger.py` 在**事情发生之后同步追加一行**，写到 `logs/build_ledger.jsonl`（append-only）：
+
+| 写入时机 | 记录内容 |
+|---|---|
+| `set_mode` 切进创造成功 | episode open：模式、切模式理由、触发的那条玩家原话、玩家、会话 id/开始时间 |
+| `build_preview` 成功 | op preview：jid、作品名、origin/facing、包围盒、格数、方块种数、材料直方图、程序源码存盘 |
+| `build_commit` 成功 | op commit：写入格数、批数、校验（mismatch/空洞/放错） |
+| `build_undo` 成功 | op undo：还原格数 |
+| 切回普通 / 下次 open / 会话结束 | episode close：收尾理由 |
+
+写入是旁路：不新增工具、不需要模型多输出任何内容，失败只记一行 `[台账] 写入失败`。close 是尽力而为，
+模型一直不切回普通模式也不影响查询：作品区间由批次时间推，完工状态由提交/撤销事实推；重启或恢复会话后
+直接施工，第一个 preview 会补开一个 episode。撤销记录会挂回被撤销批次的所属 episode。
+
+`find_builds` 的「作品」不是死按文件或按一次切创造切的，而是按施工事实归并：
+
+1. 批次名有命名前缀（`build_preview(name="埃菲尔铁塔-塔基")`）→ 前缀相同就是同一件，可跨 episode
+   （造主体、下一条"加细节"仍算同一件）；
+2. 没有前缀时，同一段任务（同一 episode，或跨 episode 但切创造理由相同）里水平距离 ≤24 格的批次算同一件
+   —— 所以白宫的 17 个地基/楼层/内饰子步骤是一件，而同一段创造里隔了几十格的天安门/纪念碑会各成一件；
+3. 只有提交/撤销、没有预览坐标的批次，归到同一段任务里最近的那件。
+
+交叉施工（甲→乙→甲）、同一地皮上先后做的不同任务（先整地再盖楼）都按上面的规则分开，不会糊成一条。
+默认只列已提交且未撤销的作品；`state=draft/undone/cmd/all` 可看未提交、已撤销、只用指令施工
+（无建造批次）与全部。历史记录不代表现状，续建或改造前要用空间查询工具确认现场。
+
+`read_build` 接受台账编号（`e00012`）或批次 jid，返回理由、触发原话、各批次材料/包围盒/校验/撤销与
+程序源码前 `program_lines` 行（默认 40，0 = 不附）。源码另存 `logs/programs/<jid>.py`，压缩或重启后
+仍可改参数续建。
+
+台账之前的历史用 `tools/backfill_build_ledger.py` 回填：扫 `logs/sessions` 与 `logs/oneshot`，用
+`logs/bot.log` 的 `[建造] 预览 <jid>` 补精确时间，按 jid 去重（恢复会话会重复落盘）。脚本幂等，
+`--dry-run` 只统计，`--reset` 清空台账后重建。
+
+### 5.2 会话对话
+
+`search_history(query, since?, file?, limit?)` 在落盘会话里按关键词找对话行，返回“文件名 + 对话行号”，
+用于“上次聊了什么/之前提过某个地方吗”。压缩/恢复会话会让同一句出现在多个文件里，结果按句子去重、只报最新的。
+
+`read_session(file, contains?, around?, window?, max_chars?)`：
+
+- 只接受纯文件名，不允许目录和路径穿越；文件最大 16 MiB。
 - 复用 `Session.compact` 口径，只保留玩家消息和实际游戏内发言（含 ptc 内嵌），渲染为 `玩家: ...` / `维克托: ...`。
-- 不回放工具，也不把完整工具参数当作历史摘要；即使 JSONL 中含工具消息，读取结果仍会过滤。
-- 默认最多 12000 字符（`session_read_max_chars`）；超长保留开头和结尾，并标注省略量。
+- 给 `contains` 或 `around` 时只读命中前后各 `window` 行（默认 3），不再整份渲染；默认最多 12000 字符
+  （`session_read_max_chars`），超长保留开头与结尾。
 - 只读历史，不恢复、不清空、不修改当前会话，也不执行历史或网页里的指令。
 
-玩家问“上次聊了什么”时，先 list 再 read。需要真正把最近主会话灌回上下文时使用控制词“恢复会话”，见
-[会话、上下文与模型](conversation.md#8-恢复会话)。
+`history.list_sessions()` 仍保留给脚本与排障，但不再注册为模型工具：模型要定位直接 `search_history`，
+先列文件清单再逐个读是旧版低效的根源。需要真正把最近主会话灌回上下文时使用控制词“恢复会话”。
 
-## 6. ptc 并发模型
+## 6. ptc 并发模型## 6. ptc 并发模型
 
 每个工具注册时声明并发类别：`capabilities.register(..., concurrency=...)`。
 

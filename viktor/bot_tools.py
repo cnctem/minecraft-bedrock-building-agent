@@ -665,17 +665,67 @@ class BotToolsMixin:
                 report += "\n[图片] 本次附带的图片太多, 这张没有附上; 需要就分批读取。"
         return report
 
-    # ---------- 会话历史: 列落盘会话 / 按文件名读(压缩口径) ----------
+    # ---------- 施工台账 / 会话历史(只读查询, 不恢复会话) ----------
 
-    def _tool_list_sessions(self, args: dict) -> str:
-        return history.list_sessions(args.get("limit", history.DEFAULT_LIST_LIMIT))
+    def _tool_find_builds(self, args: dict) -> str:
+        return history.find_builds(
+            query=str(args.get("query") or ""),
+            since=str(args.get("since") or ""),
+            until=str(args.get("until") or ""),
+            player=str(args.get("player") or ""),
+            limit=args.get("limit", history.DEFAULT_BUILD_LIMIT),
+            state=str(args.get("state") or "built"),
+            group=bool(args.get("group", True)),
+        )
+
+    def _tool_read_build(self, args: dict) -> str:
+        return history.read_build(
+            str(args.get("ref") or ""),
+            program_lines=args.get("program_lines", 40),
+        )
+
+    def _tool_search_history(self, args: dict) -> str:
+        return history.search_history(
+            str(args.get("query") or ""),
+            since=str(args.get("since") or ""),
+            file=str(args.get("file") or ""),
+            limit=args.get("limit", history.DEFAULT_SEARCH_LIMIT),
+        )
 
     def _tool_read_session(self, args: dict) -> str:
         return history.read_session(
             str(args.get("file") or ""),
+            contains=str(args.get("contains") or ""),
+            around=args.get("around"),
+            window=args.get("window", 3),
             max_chars=int(args.get("max_chars")
                           or self.cfg.get("session_read_max_chars", history.DEFAULT_MAX_CHARS)),
         )
+
+    # ---------- 台账写入上下文(给 viktor/ledger.py 用) ----------
+
+    def _ledger_ctx(self) -> dict:
+        """当前会话在哪落盘 + 本回合谁在说话: 台账要能回到会话文件与玩家。"""
+        sess = self._session()
+        started = getattr(sess, "started", None)
+        players = getattr(self._tls, "turn_players", None) or set()
+        return {"session": getattr(sess, "id", None),
+                "session_start": started.isoformat(timespec="seconds") if started else "",
+                "player": ", ".join(sorted(players)),
+                "trigger": self._last_user_text()}
+
+    def _last_user_text(self) -> str:
+        """上一条玩家消息(去掉 “玩家名: ” 前缀), 作为台账里“触发这次施工”的原话。"""
+        sess = self._session()
+        for m in reversed(getattr(sess, "messages", []) or []):
+            if m.get("role") != "user":
+                continue
+            text = str(m.get("content") or "").strip()
+            head = text.split("\n", 1)[0]
+            if re.match(r"^[^:\n]{1,24}:\s", text):
+                text = re.sub(r"^[^:\n]{1,24}:\s+", "", text, count=1)
+            return (text or head)[:400]
+        return ""
 
     def _extract_command_output(self, text: str, cmd: str) -> list[str]:
         """从日志文本里抽出指令输出。ERROR/WARN 行必须保留并加标记——
@@ -950,6 +1000,12 @@ class BotToolsMixin:
         if mode in CREATIVE_MODES:
             log(f"[模式] {'切换' if was_creative else '进入'}创造模式: {mode} "
                 f"(原因: {reason or '未说明'}; 思考强度 {p['effort']})")
+            # 台账: 从普通进创造才算一次新的施工任务; creative↔creative_max 算同一次
+            if not was_creative:
+                ctx = self._ledger_ctx()
+                self.ledger.open_episode(mode, reason, player=ctx["player"],
+                                         trigger=ctx["trigger"], session=ctx["session"],
+                                         session_start=ctx["session_start"])
             # 从普通进入创造: 第一轮是长思考, 玩家会干等几十秒没反馈。
             # 这是程序行为, 不依赖模型自觉: 开关一翻就直接播报(升档不重复播报)。
             if not was_creative and self.cfg.get("notify_creative_mode", True):
@@ -958,4 +1014,6 @@ class BotToolsMixin:
                     "并启用创造工作方式(更长输出、更多工具轮次、更大上下文)。"
                     "完成后记得用 set_mode 切回 normal。")
         log(f"[模式] 切换到 {MODES[mode].label} (原因: {reason or '未说明'})")
+        if was_creative:
+            self.ledger.close_episode(reason)  # 全是尽力而为: 不切回来也不影响已记的批次
         return f"已切换到 {MODES[mode].label} 模式。"

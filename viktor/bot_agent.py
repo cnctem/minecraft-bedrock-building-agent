@@ -8,10 +8,11 @@ import threading
 import time
 import urllib.error
 import urllib.request
+from datetime import datetime
 
 import capabilities
 
-from . import models
+from . import ledger, models
 from .constants import (Aborted, CONTEXT_WARN_START_PCT, CONTEXT_WARN_STEP_PCT, CREATIVE_MODES,
                         RETRYABLE_HTTP, SMART_COMPACT_AUTO_PCT)
 from .paths import log
@@ -107,6 +108,8 @@ class BotAgentMixin:
         senders = list(dict.fromkeys(p for p, _ in batch))
         online = sorted(self.players)
         lines = ["# 对话状态(系统记录; 以最新一条为准, 不要回应这条注记)",
+                 # 绝对时间: 模型自己算不准“今天/几天前”, 而“今天造了什么”这类问题全靠它
+                 f"- 现在是 {ledger.now_line(datetime.now())}",
                  f"- 这句话来自: {', '.join(senders) or '(系统)'}; "
                  f"当前在线 {len(online)} 人"
                  + (f": {', '.join(online[:8])}" if online else "")]

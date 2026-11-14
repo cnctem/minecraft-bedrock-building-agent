@@ -65,7 +65,8 @@ bot.py（入口） → viktor.selftest（--test）
 | `viktor/models.py` | 模型档案、触发词、上下文窗口、输出与思考参数映射 |
 | `viktor/config.py` / `viktor/paths.py` | 配置读取 / 路径、日志与运行时状态文件 |
 | `viktor/prompts.py` / `viktor/schemas.py` / `viktor/constants.py` | 提示词 / 工具 schema / 正则、控制词与协议常量 |
-| `viktor/history.py` | 会话清单与按压缩口径读取历史 |
+| `viktor/history.py` | 施工台账查询（作品聚合）与会话历史的定位读取 |
+| `viktor/ledger.py` | 施工台账：写 episode/批次事件、聚合、历史回填 |
 | `viktor/wiki.py` | Minecraft Wiki 搜索、页面解析与配方/表格文本化 |
 | `viktor/webfetch.py` | URL 读取、SSRF 防护、网页正文与图片处理 |
 | `viktor/selftest.py` | 标准库自测入口 |
@@ -101,6 +102,8 @@ bot.py（入口） → viktor.selftest（--test）
 | `logs/sessions/session-*.jsonl` | 可恢复的主会话落盘 |
 | `logs/sessions/compact-*.jsonl` | 压缩前留档，仅供排障，不参与自动恢复 |
 | `logs/oneshot/` | 每次一次性对话的独立记录 |
+| `logs/build_ledger.jsonl` | 施工台账（切创造/预览/提交/撤销），供 find_builds / read_build |
+| `logs/programs/` | 建造程序源码留档（按批次 jid），压缩或重启后可续建 |
 | `logs/memory-backup/` | 长期记忆更新前备份 |
 | `logs/renders/` | 建造计划和世界区域的 PNG 渲染 |
 | `data/raw_ids.txt` | 行为包导出的原始物品/方块 ID |

@@ -338,7 +338,11 @@ BUILD_PREVIEW_SCHEMA = {
                            "description": "局部 (0,0,0) 对应的世界坐标 [x, y, z]"},
                 "facing": {"type": "string", "enum": ["north", "south", "east", "west"],
                            "description": "建筑正面朝向，默认 south；决定局部 u/w 到世界 x/z 的映射"},
-                "name": {"type": "string", "description": "可选：给这次建造起个名字，便于 build_status 辨认"},
+                "name": {"type": "string",
+                         "description": ("可选：这次建造的名字。建议写成「作品名-分块」"
+                                         "(如 埃菲尔铁塔-塔基)：同一作品各批次共用前缀，"
+                                         "施工台账就能把它们归成一件，也能按名字搜到；"
+                                         "不写或各批不同名也可以，会按位置自动归并")},
                 "symmetry": {"type": "string",
                              "description": ("可选：对称性检查。\"u\"=左右 / \"w\"=前后，"
                                              "默认用包围盒中线；可写 \"u:0\" 指定对称轴坐标。"
@@ -548,20 +552,80 @@ READ_URL_SCHEMA = {
     },
 }
 
-LIST_SESSIONS_SCHEMA = {
+FIND_BUILDS_SCHEMA = {
     "type": "function",
     "function": {
-        "name": "list_sessions",
+        "name": "find_builds",
         "description": (
-            "列出已经落盘的会话记录(新的在前, 默认 10 个), 每项给文件名、类型、模型、"
-            "开始时间、消息条数、大小与首句, 用来挑要回看哪一段历史。"
-            "只是文件清单; 读内容用 read_session。"
+            "查系统自动记录的施工台账(进入创造模式后造过的东西), 回答“今天/最近造了什么”"
+            "“上次那座塔在哪”“之前那个工程做到哪”。每条给时间、玩家、理由(切创造的原因"
+            "与玩家原话)、作品名、各批次包围盒/格数/材料、提交与撤销状态。"
+            "关键词支持作品名/理由/材料/玩家/编号; 时间是批次时间(精确到分钟)。"
+            "这是历史记录, 之后可能已有改动: 续建或改造前再用查询工具确认现场。"
+            "问“当时聊了什么”而不是建造时, 用 search_history。"
         ),
         "parameters": {
             "type": "object",
             "properties": {
-                "limit": {"type": "integer", "description": "最多列几个, 默认 10, 上限 50"},
+                "query": {"type": "string",
+                          "description": "关键词(作品名/理由/材料/编号), 可只写一个词, 如“埃菲尔”“白宫”“铜”"},
+                "since": {"type": "string",
+                          "description": "起始时间: today/昨天/3d/2小时/2026-11-01 等, 不传则不限制"},
+                "until": {"type": "string",
+                          "description": "截止时间(含当天), 写法同 since"},
+                "player": {"type": "string", "description": "只看某个玩家要求造的"},
+                "state": {"type": "string", "enum": ["built", "all", "draft", "undone", "cmd"],
+                          "description": "built=已提交且未撤销(默认); draft=只预览没提交; "
+                                         "undone=已全部撤销; cmd=只切了创造但没走建造引擎"
+                                         "(可能用 fill 指令施工); all=全部"},
+                "group": {"type": "boolean",
+                          "description": "同名作品的后续批次(加细节/撤销)是否合并成一条, 默认 true"},
+                "limit": {"type": "integer", "description": "最多几条作品, 默认 8, 上限 30"},
             },
+        },
+    },
+}
+
+READ_BUILD_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "read_build",
+        "description": (
+            "按台账编号(如 e00012)或批次 jid 读一次施工的细节: 理由、触发原话、每个批次的"
+            "包围盒/材料/提交校验/撤销情况, 以及当时建造程序源码的开头(续建或改造时可直接改)。"
+            "编号从 find_builds 的结果里拿。属于历史记录, 现场是否还在要另行确认。"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "ref": {"type": "string", "description": "台账编号 e00012 或批次 jid(如 b621338-442)"},
+                "program_lines": {"type": "integer",
+                                  "description": "附上程序源码前多少行, 默认 40; 0 = 不附"},
+            },
+            "required": ["ref"],
+        },
+    },
+}
+
+SEARCH_HISTORY_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "search_history",
+        "description": (
+            "在所有落盘会话里按关键词找对话行(玩家说过的话与你当时的游戏内发言), "
+            "返回文件名 + 对话行号; 再用 read_session(file, around=行号) 只读命中附近几条。"
+            "用于“上次聊了什么/之前提过某个地方吗”这类问题; 问建造与坐标优先 find_builds。"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "关键词, 尽量用原话里的一个词"},
+                "since": {"type": "string",
+                          "description": "只看这段时间之后的会话: today/昨天/7d/2026-11-01"},
+                "file": {"type": "string", "description": "只在这一个会话文件里找(可选)"},
+                "limit": {"type": "integer", "description": "最多几处命中, 默认 10, 上限 40"},
+            },
+            "required": ["query"],
         },
     },
 }
@@ -571,16 +635,18 @@ READ_SESSION_SCHEMA = {
     "function": {
         "name": "read_session",
         "description": (
-            "按文件名读一段落盘的会话历史, 返回「压缩」口径的对话记录: "
-            "只有玩家消息与你在游戏内说过的话, 工具调用/结果与正文细节不在里面。"
-            "文件里本来就只有压缩后的信息, 所以不要指望看到原始工具参数或建造程序。"
-            "玩家问“上次聊了什么/之前那个工程做到哪”时先 list_sessions 找文件再读它。"
+            "按文件名读落盘会话的对话记录(只有玩家消息与你在游戏内说过的话, 工具调用/结果"
+            "不在这里)。给 contains 或 around 时只读命中附近的片段, 不要整份读。"
+            "文件名与行号来自 search_history。"
         ),
         "parameters": {
             "type": "object",
             "properties": {
                 "file": {"type": "string",
-                         "description": "会话文件名(来自 list_sessions, 如 session-20261102-134225-s1.jsonl)"},
+                         "description": "会话文件名(如 session-20261102-134225-s1.jsonl)"},
+                "contains": {"type": "string", "description": "只读含这个关键词的对话附近"},
+                "around": {"type": "integer", "description": "以第几行为中心读(行号来自 search_history)"},
+                "window": {"type": "integer", "description": "每处前后各读几行, 默认 3, 上限 20"},
                 "max_chars": {"type": "integer",
                               "description": "最多返回多少字符, 默认 12000; 超长时保留开头与结尾"},
             },

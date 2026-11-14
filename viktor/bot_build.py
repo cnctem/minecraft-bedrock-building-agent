@@ -148,6 +148,15 @@ class BotBuildMixin:
         self._build_payloads[jid] = payload
         log(f"[建造] 预览 {jid} {name} {stats['size']} {stats['cells']}格 "
             f"{frames}帧 {stats['payload_bytes']}B")
+        # 台账: 预览成功就把这一批的事实(名字/包围盒/格数/材料/程序)记下来。
+        # 模型不用为此做任何额外动作或输出 —— 写的都是它刚才调用时已经给过的参数。
+        ctx = self._ledger_ctx()
+        self.ledger.record_preview(jid, data.get("name") or name or "", data, stats,
+                                   origin=origin, facing=facing, program=program,
+                                   session=ctx["session"],
+                                   session_start=ctx["session_start"],
+                                   mode=self._mode(), player=ctx["player"],
+                                   trigger=ctx["trigger"])
         return self._render_build_preview(jid, data, stats)
 
     def _render_build_preview(self, jid: str, data: dict, stats: dict) -> str:
@@ -387,6 +396,9 @@ class BotBuildMixin:
             return data
         log(f"[建造] 提交 {jid} 写入 {data.get('changed')} 格, "
             f"{data.get('boxes')} 批, {data.get('ms')}ms, 校验 {data.get('verify')}")
+        ctx = self._ledger_ctx()
+        self.ledger.record_commit(jid, data, session=ctx["session"],
+                                  session_start=ctx["session_start"])
         return self._render_build_commit(jid, data)
 
     def _render_build_commit(self, jid: str, data: dict) -> str:
@@ -434,6 +446,9 @@ class BotBuildMixin:
         if isinstance(data, str):
             return data
         log(f"[建造] 撤销 {data.get('undoOf')} 还原 {data.get('changed')} 格")
+        ctx = self._ledger_ctx()
+        self.ledger.record_undo(jid, data, session=ctx["session"],
+                                session_start=ctx["session_start"])
         return self._render_build_commit(jid, data)
 
     def _tool_build_status(self, args: dict) -> str:

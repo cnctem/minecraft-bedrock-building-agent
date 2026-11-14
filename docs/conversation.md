@@ -209,5 +209,10 @@ python3 bot.py --resume logs/sessions/session-YYYYmmdd-HHMMSS-sN.jsonl
 
 ## 9. 会话历史工具与落盘的区别
 
-`恢复会话` 是控制面操作，把最近 session 灌回当前上下文；`list_sessions` / `read_session` 是模型工具，
-用于按需查看历史，不会自动恢复或修改当前会话。历史读取只展示玩家消息与游戏内发言，具体见[工具与并发](tools.md#5-会话历史)。
+`恢复会话` 是控制面操作，把最近 session 灌回当前上下文。模型侧的历史工具分两类，都不会自动恢复或修改当前会话：
+
+- `find_builds` / `read_build` 查**施工台账**（`logs/build_ledger.jsonl`）：时间、谁提的、切创造的理由与触发原话、
+  作品名、包围盒、格数、材料、提交与撤销状态。台账在施工发生时就自动写，不依赖事后摘要，所以压缩/重启都不丢。
+- `search_history` + `read_session` 查**对话**：先按关键词定位到“文件 + 行号”，再只读命中附近几条。
+
+具体写入时机、字段与回填脚本见[工具与并发](tools.md#5-施工台账与历史定位)。

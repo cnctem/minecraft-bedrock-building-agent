@@ -84,6 +84,17 @@ node --check behavior_pack/viktor_bridge/scripts/main.js
 脚本会：找到唯一 Bot → SIGTERM 优雅退出并落盘 → 选择 session → 在 screen `viktor` 中带 `VIKTOR_RESTORE` 启动 →
 检查进程确实出现。它包含挂断和中断后的拉起兜底，但不替代“先确认空闲”的运维判断。
 
+台账回填（升级到带台账的版本后跑一次，把历史会话补进 `logs/build_ledger.jsonl`）：
+
+```bash
+python3 tools/backfill_build_ledger.py --dry-run   # 只统计会写多少
+python3 tools/backfill_build_ledger.py             # 回填（幂等，可重复跑）
+```
+
+只读会话文件，不碰服务器与世界；`--reset` 清空台账后重建，`--no-programs` 不存建造程序源码。
+建议在 bot 停止时执行（运行中的 bot 也在追加同一份台账，同时分配记录编号会撞号，只影响可读性不影响查询）。
+自己写的程序源码会落到 `logs/programs/`，与 `logs/` 其余内容一样不提交。
+
 不要用 `kill -9` 作为常规重启方式。外部 `agent-restart.sh` 等守卫脚本只存在于特定部署机，使用前确认文件真实存在；
 它们不是本仓库的跨环境依赖。
 

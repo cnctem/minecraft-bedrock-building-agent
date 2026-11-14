@@ -12,7 +12,7 @@ from pathlib import Path
 
 import capabilities
 
-from . import Bot, history, paths, render, webfetch, wiki
+from . import Bot, history, ledger, paths, render, webfetch, wiki
 from .bridge import ScreenBridge
 from .config import load_config
 from .constants import (
@@ -35,6 +35,15 @@ def self_test():
     # 清空=完整初始化会落盘会话, 自测也指到临时目录
     paths.SESSION_DIR = Path("/tmp/viktor-sessions-test")
     paths.ONESHOT_DIR = Path("/tmp/viktor-oneshot-test")
+    paths.LEDGER_PATH = Path("/tmp/viktor-ledger-test.jsonl")
+    paths.PROGRAM_DIR = Path("/tmp/viktor-programs-test")
+    for _p in (paths.LEDGER_PATH,):
+        try:
+            _p.unlink()
+        except FileNotFoundError:
+            pass
+    import shutil as _sh
+    _sh.rmtree(paths.PROGRAM_DIR, ignore_errors=True)
     # 长期记忆也用临时文件: 真实 memory.md 会越长越占上下文, 让"压缩预算"这类用例
     # 随真实数据漂移(记忆一长, 压缩后仍超限 → 退化成清空 → 测试误报)。
     _mem_tmp = Path("/tmp/viktor-memory-test.md")
@@ -2019,30 +2028,121 @@ def self_test():
         _srv.server_close()
     print("read_url 读图/404/安全自测 OK")
 
-    # 会话历史: 列表 + 按文件名读(复用「压缩」口径: 只留玩家消息与游戏内发言)
+    # 施工台账 + 会话历史: 写入时机/查询/定位读, 全部只碰 /tmp
+    from datetime import datetime as _dt, timedelta as _td
+    assert ledger.parse_when("today", _dt(2026, 11, 14, 10, 47)) == _dt(2026, 11, 14)
+    assert ledger.parse_when("昨天", _dt(2026, 11, 14, 10, 47)) == _dt(2026, 11, 13)
+    assert ledger.parse_when("3d", _dt(2026, 11, 14, 10, 47)) == _dt(2026, 11, 11)
+    assert ledger.parse_when("2小时", _dt(2026, 11, 14, 10, 47)) == \
+        _dt(2026, 11, 14, 8, 47)
+    assert ledger.parse_when("2026-11-01", end=True) == _dt(2026, 11, 2)
+    assert ledger.parse_when("11-01", _dt(2026, 11, 14)) == _dt(2026, 11, 1)
+    try:
+        ledger.parse_when("瞎写的")
+        assert False, "看不懂的时间应报错"
+    except ValueError:
+        pass
+    assert "现在是" in bot2._dialog_note([("Tester", "hi")]), "注记要带绝对时间"
+
+    # 写入时机 1/5: set_mode 进创造 -> open, 切回普通 -> close
+    bot2.mode = MODE_NORMAL
+    bot2._tls.turn_players = {"Tester"}
+    bot2.session.messages.append({"role": "user", "content": "Tester: 帮我造一座测试桥"})
+    assert "已进入" in bot2._tool_set_mode({"mode": "creative", "reason": "测试造桥"})
+    _recs = ledger.load()
+    _open = [r for r in _recs if r.get("kind") == "episode" and r.get("action") == "open"]
+    assert _open and _open[-1]["reason"] == "测试造桥", _recs
+    assert _open[-1]["trigger"] == "帮我造一座测试桥", "trigger 应是玩家原话(去掉名前缀)"
+    assert _open[-1]["player"] == "Tester", _open[-1]
+    _ctx = bot2._ledger_ctx()
+    # 写入时机 2/3: 预览 + 提交(这里直接喂行为包回包形状, 不连服务器)
+    bot2.ledger.record_preview(
+        "b900001-1", "测试桥-桥面",
+        {"bounds": {"from": [0, 64, 0], "to": [4, 66, 4]}, "cells": 75, "paletteSize": 2},
+        {"size": [5, 3, 5], "cells": 75, "palette": 2,
+         "materials": {"stonebrick": 50, "oak_planks": 25}},
+        origin=[0, 64, 0], facing="south",
+        program='api.fill((0,0,0),(4,2,4),"stonebrick")',
+        mode="creative", **{k: _ctx[k] for k in ("session", "session_start",
+                                                 "player", "trigger")})
+    bot2.ledger.record_commit("b900001-1", {"changed": 75, "boxes": 9,
+                                            "verify": {"mismatch": 0}},
+                              session=_ctx["session"],
+                              session_start=_ctx["session_start"])
+    _out = history.find_builds(query="测试桥")
+    assert "测试桥" in _out and "(0,64,0)..(4,66,4)" in _out and "已提交" in _out, _out
+    assert "stonebrick 50" in _out and "read_build" in _out, _out
+    # 关闭(时机 5)后, 批次记录不受影响; 撤销后默认查询不再列出
+    assert "已切换" in bot2._tool_set_mode({"mode": "normal", "reason": "测试完成"})
+    _close = [r for r in ledger.load() if r.get("action") == "close"]
+    assert _close and _close[-1]["reason"] == "测试完成", _close
+    bot2.ledger.record_undo("b900001-1", {"undoOf": "b900001-1", "changed": 75},
+                            session=_ctx["session"],
+                            session_start=_ctx["session_start"])
+    assert "已全部撤销" in history.find_builds(query="测试桥", state="all")
+    assert "没有符合条件" in history.find_builds(query="测试桥")
+
+    # 回填: 从历史会话 JSONL 生成台账(幂等; 恢复会话的重复 jid 只记一次)
     _sess_name = "session-20990101-000000-s9999.jsonl"
     _sess_path = paths.SESSION_DIR / _sess_name
     paths.SESSION_DIR.mkdir(parents=True, exist_ok=True)
+
+    def _call(cid, name, args):
+        return {"id": cid, "type": "function",
+                "function": {"name": name,
+                             "arguments": json.dumps(args, ensure_ascii=False)}}
+
     _rows = [
-        {"_meta": {"session": 9999, "model": "flash", "started": "2099-01-01T00:00:00"}},
+        {"_meta": {"session": 9999, "model": "flash", "started": "2026-03-04T05:06:07"}},
         {"role": "system", "content": "# 你的长期记忆\n\n- 测试"},
         {"role": "user", "content": "Tester: 帮我看看上次的桥"},
         {"role": "assistant", "content": None, "reasoning_content": "",
-         "tool_calls": [{"id": "s1", "type": "function",
-                         "function": {"name": "send_chat_message",
-                                      "arguments": json.dumps({"text": "好的, 我调记录看看"},
-                                                              ensure_ascii=False)}}]},
+         "tool_calls": [_call("s1", "send_chat_message", {"text": "好的, 我调记录看看"})]},
         {"role": "tool", "tool_call_id": "s1", "content": "已发送到游戏内聊天。"},
         {"role": "assistant", "content": None, "reasoning_content": "",
-         "tool_calls": [{"id": "s2", "type": "function",
-                         "function": {"name": "get_block",
-                                      "arguments": json.dumps({"x": 1, "y": 2, "z": 3})}}]},
+         "tool_calls": [_call("s2", "get_block", {"x": 1, "y": 2, "z": 3})]},
         {"role": "tool", "tool_call_id": "s2", "content": "minecraft:stone"},
         {"role": "assistant", "content": "内部正文不该出现"},
+        {"role": "user", "content": "Tester: 造一座埃菲尔铁塔"},
+        {"role": "assistant", "content": None, "reasoning_content": "",
+         "tool_calls": [_call("m1", "set_mode",
+                              {"mode": "creative", "reason": "按比例建造 35×35 埃菲尔铁塔"})]},
+        {"role": "tool", "tool_call_id": "m1", "content": "已进入创造模式: ..."},
+        {"role": "assistant", "content": None, "reasoning_content": "",
+         "tool_calls": [_call("p1", "build_preview",
+                              {"program": 'api.fill((0,0,0),(2,2,2),"stonebrick")',
+                               "origin": [100, 64, 200], "name": "埃菲尔铁塔-基座",
+                               "facing": "south"})]},
+        {"role": "tool", "tool_call_id": "p1",
+         "content": "预览 b777001-9 「埃菲尔铁塔-基座」 包围盒 (100, 64, 200).."
+                    "(102, 66, 202) = 3×3×3, 将写入 27 格, 1 种方块\n差异: 新放置 27 格"},
+        {"role": "assistant", "content": None, "reasoning_content": "",
+         "tool_calls": [_call("c1", "build_commit", {"operation_id": "b777001-9"})]},
+        {"role": "tool", "tool_call_id": "c1",
+         "content": "提交 b777001-9: 写入 27 格, 4 批批量填充, 30ms\n校验: 全部正确(mismatch 0)"},
         {"role": "user", "content": "Tester: 谢谢"},
     ] + [{"role": "user", "content": "Tester: " + "填充" * 200} for _ in range(3)]
     _sess_path.write_text("".join(json.dumps(r, ensure_ascii=False) + "\n" for r in _rows),
                           encoding="utf-8")
+    _stats = ledger.backfill(bot_log=Path("/tmp/no-such-bot.log"))
+    assert _stats["episodes"] == 1 and _stats["ops"] == 1, _stats
+    assert _stats["programs"] == 1, _stats
+    _n = len(ledger.load())
+    _again = ledger.backfill(bot_log=Path("/tmp/no-such-bot.log"))
+    assert _again["episodes"] == 0 and _again["ops"] == 0 and len(ledger.load()) == _n, _again
+    _eps = [e for e in ledger.episodes() if "埃菲尔" in (e.get("reason") or "")]
+    assert len(_eps) == 1 and _eps[0]["ops"] and _eps[0]["ops"][0]["jid"] == "b777001-9", _eps
+    assert _eps[0]["ops"][0]["changed"] == 27 and _eps[0]["ops"][0]["committed"], _eps[0]
+    _hit = history.find_builds(query="埃菲尔", since="2026-03-01", until="2026-03-05")
+    assert "(100,64,200)..(102,66,202)" in _hit and "27" in _hit, _hit
+    _eid = _eps[0]["eid"]
+    _detail = history.read_build(_eid)
+    assert "埃菲尔铁塔-基座" in _detail and "b777001-9" in _detail, _detail
+    assert "[程序开始]" in _detail and 'stonebrick' in _detail, "read_build 应附程序源码"
+    assert "所有正确" not in _detail and "校验全部正确" in _detail, _detail
+    assert "b777001-9" in history.read_build("b777001-9"), "也支持按 jid 查"
+
+    # 会话读取: 列表(仅函数, 不进工具表) / 压缩口径 / 定位读
     _list = history.list_sessions(5)
     assert _sess_name in _list and "Tester: 帮我看看上次的桥" in _list, _list
     _hist = history.read_session(_sess_name)
@@ -2053,10 +2153,68 @@ def self_test():
     assert "只接受文件名" in history.read_session("../config.json")
     assert "找不到会话文件" in history.read_session("session-nope.jsonl")
     assert "省略" in history.read_session(_sess_name, max_chars=500), "超长应保留开头与结尾"
-    assert {"list_sessions", "read_session"} <= capabilities.registered_names()
-    assert {"list_sessions", "read_session"} <= bot2._allowed_tools()
-    print("会话历史 列表/读取/压缩口径自测 OK")
+    _found = history.search_history("埃菲尔铁塔")
+    assert _sess_name in _found and "造一座埃菲尔铁塔" in _found, _found
+    _idx = int(_found.split("#")[1].split(" ")[0].split("]")[0])
+    _around = history.read_session(_sess_name, around=_idx, window=1)
+    assert f"#{_idx}" in _around and "埃菲尔铁塔" in _around, _around
+    _only = history.read_session(_sess_name, contains="桥", window=0)
+    assert "上次的桥" in _only and "谢谢" not in _only, _only
+    assert "没有在会话记录里找到" in history.search_history("根本不存在的话")
+    assert {"find_builds", "read_build", "search_history", "read_session"} <= \
+        capabilities.registered_names()
+    assert "list_sessions" not in capabilities.registered_names(), "清单工具不进模型工具表"
+    assert {"find_builds", "read_build", "search_history", "read_session"} <= \
+        bot2._allowed_tools()
+    print("施工台账/会话历史 写入时机/查询/定位读自测 OK")
 
+    # 作品归并: 一段创造任务里有多件东西 / 交叉施工 / 同地点的上下部分 / 不同时间同地点
+    def _mk_ep(eid, reason, ops, ts):
+        return {"eid": eid, "ts": ts, "mode": "creative", "player": "Tester",
+                "session": 1, "session_start": "2026-03-04T05:00:00",
+                "reason": reason, "trigger": reason, "closed": "", "close_reason": "",
+                "ops": ops}
+
+    def _mk_op(name, frm, to, ts):
+        return {"jid": name + "-1", "name": name, "ts": ts, "origin": frm or [],
+                "facing": "south", "from": frm, "to": to,
+                "size": ([to[i] - frm[i] + 1 for i in range(3)] if frm else None),
+                "cells": 10, "palette": 1, "materials": {}, "blocks": [], "program": "",
+                "program_lines": 0, "committed": True, "changed": 10, "boxes": 1,
+                "verify": {"mismatch": 0}, "undone": False, "restored": 0, "stages": ["preview"]}
+
+    # ① 同一个 episode 里两件相距很远的作品(高频): 拆成两条, 且交叉施工能回到各自作品
+    w = history._works([_mk_ep("e900", "一口气造两样", [
+        _mk_op("塔A-底座", [0, 64, 0], [9, 70, 9], "2026-03-04T06:00:00"),
+        _mk_op("喷泉B-水池", [300, 64, 0], [309, 66, 9], "2026-03-04T06:05:00"),
+        _mk_op("塔A-塔身", [1, 71, 1], [8, 90, 8], "2026-03-04T06:10:00"),
+    ], "2026-03-04T06:00:00")])
+    assert len(w) == 2, [x["name_prefix"] for x in w]
+    by_pref = {x["name_prefix"]: x for x in w}
+    assert len(by_pref["塔A"]["ops"]) == 2 and len(by_pref["喷泉B"]["ops"]) == 1, w
+    # ② 同一座楼的基座与塔冠竖直不相交, 仍是同一件(白宫 17 批那种)
+    w = history._works([_mk_ep("e901", "造一座塔", [
+        _mk_op("底座浇筑", [0, 64, 0], [30, 75, 30], "2026-03-04T07:00:00"),
+        _mk_op("塔冠安装", [5, 100, 5], [25, 120, 25], "2026-03-04T07:30:00"),
+    ], "2026-03-04T07:00:00")])
+    assert len(w) == 1 and len(w[0]["ops"]) == 2, w
+    # ③ 同一块地皮上的两件不同任务(不同 episode + 不同理由): 不能并成一条
+    w = history._works([
+        _mk_ep("e902", "平整地形", [_mk_op("平整西北块", [0, 60, 0], [50, 64, 50],
+                                          "2026-03-04T08:00:00")], "2026-03-04T08:00:00"),
+        _mk_ep("e903", "按图纸造白宫", [_mk_op("白宫主体", [0, 64, 0], [50, 80, 50],
+                                              "2026-03-04T10:00:00")], "2026-03-04T10:00:00"),
+    ])
+    assert len(w) == 2, [x["reasons"] for x in w]
+    # ④ 命名前缀跨 episode 归并(主线造完, 下一条"加细节"还是同一件)
+    w = history._works([
+        _mk_ep("e904", "造大剧院-主体", [_mk_op("大剧院-壳体", [0, 64, 0], [40, 80, 40],
+                                               "2026-03-04T12:00:00")], "2026-03-04T12:00:00"),
+        _mk_ep("e905", "给大剧院加内装", [_mk_op("大剧院-内装", [2, 65, 2], [38, 79, 38],
+                                                "2026-03-04T13:00:00")], "2026-03-04T13:00:00"),
+    ])
+    assert len(w) == 1 and history._work_title(w[0]) == "大剧院", w
+    print("施工台账 作品归并自测 OK(多任务/交叉/同地点/跨 episode)")
     # 转发开关: 正文开/关、工具开/关(控制词不进上下文; 转发只显示、不进上下文)
     fwd = []
     orig_side = bot2.bridge.say_side

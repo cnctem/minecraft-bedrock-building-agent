@@ -165,6 +165,9 @@ python3 tools/gen_skill_guides.py --check
 - `config.json`、`memory.md`、`logs/` 已 gitignore，不得提交。
 - 示例秘密只写占位符到 `config.example.json`；不要把真实 key 复制进文档、测试输出或补丁。
 - 会话、日志、记忆和备份可能含玩家私人信息；读取应出于明确任务需要，分享前脱敏。
+- 施工台账 `logs/build_ledger.jsonl` 与程序源码 `logs/programs/` 同样属于运行数据，不提交；
+  台账是 append-only 派生数据，删掉只会丢历史查询，不影响世界与会话。升级后回填一次
+  `python3 tools/backfill_build_ledger.py`（建议 bot 停止时跑），幂等可重复。
 - 不把开发机配置覆盖到服务器，也不把服务器配置/会话无条件拷回开发机。
 - `/home/jrj/...` 是参考部署路径；跨环境修改时使用当前仓库相对路径或先确认实际配置。
 
@@ -173,7 +176,8 @@ python3 tools/gen_skill_guides.py --check
 ### 改 Python / 工具 / 会话
 
 - 保持依赖方向和上下文不变量；
-- 更新 schema、profile、自测与模块文档；
+- 更新 schema、profile、自测与模块文档；台账（`viktor/ledger.py`）写入点与工具输出要保持
+  “模型无需额外输出”这一前提，不要为了记录给模型加参数或强制工具调用；
 - `python3 bot.py --test` 通过；若开发设备因上述部署目录断言中止，明确报告未覆盖的后续检查；
 - 服务器部署需在空闲时再平滑重启，开发设备不要尝试。
 

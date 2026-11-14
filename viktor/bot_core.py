@@ -10,7 +10,7 @@ import time
 
 import capabilities
 
-from . import models, paths
+from . import ledger, models, paths
 from .bridge import ScreenBridge
 from .bus import ServerBus
 from .constants import CREATIVE_MODES, MODE_NORMAL
@@ -34,7 +34,9 @@ from .schemas import (
     PIN_REGION_SCHEMA,
     READ_WIKI_PAGE_SCHEMA,
     READ_URL_SCHEMA,
-    LIST_SESSIONS_SCHEMA,
+    FIND_BUILDS_SCHEMA,
+    READ_BUILD_SCHEMA,
+    SEARCH_HISTORY_SCHEMA,
     READ_SESSION_SCHEMA,
     RUN_COMMAND_SCHEMA,
     SEARCH_WIKI_SCHEMA,
@@ -52,6 +54,7 @@ class BotCoreMixin:
         self.bridge = ScreenBridge(cfg["screen_session"])
         self.bus = ServerBus(self.bridge, paths.SERVER_LOG_PATH,
                              cfg.get("bus_reader_poll_sec", 0.05))
+        self.ledger = ledger.Ledger()  # 施工台账(写失败只记日志, 不影响工具)
         self.bus_enabled = False  # 启动握手(应对行为包未升级)后才置位
         self.pack_proto = 0       # 行为包协议版本(握手回包解析); v3 才有空间感知原语
         # bus 批量执行器: 同一批 ptc 查询一次性下发、按 id 收齐
@@ -101,8 +104,12 @@ class BotCoreMixin:
                              concurrency="parallel")
         capabilities.register("read_url", READ_URL_SCHEMA, self._tool_read_url,
                              concurrency="parallel")
-        capabilities.register("list_sessions", LIST_SESSIONS_SCHEMA,
-                             self._tool_list_sessions, concurrency="parallel")
+        capabilities.register("find_builds", FIND_BUILDS_SCHEMA,
+                             self._tool_find_builds, concurrency="parallel")
+        capabilities.register("read_build", READ_BUILD_SCHEMA,
+                             self._tool_read_build, concurrency="parallel")
+        capabilities.register("search_history", SEARCH_HISTORY_SCHEMA,
+                             self._tool_search_history, concurrency="parallel")
         capabilities.register("read_session", READ_SESSION_SCHEMA,
                              self._tool_read_session, concurrency="parallel")
         capabilities.set_ptc_limits(cfg.get("ptc_max_calls", 24),
@@ -238,6 +245,7 @@ class BotCoreMixin:
 
     def _end_session(self):
         self._unpin_all()  # 兜底: 会话结束时不留常加载区域
+        self.ledger.close_episode("会话结束")  # 台账: 尽力收尾, 缺了也不影响已记批次
         if self.mode != MODE_NORMAL:
             log(f"[模式] 会话结束, {MODES[self.mode].label} 自动复位到普通模式")
             self.mode = MODE_NORMAL

@@ -920,6 +920,15 @@ def compile_build(program: str, origin: tuple, facing: str, valid_blocks=None,
     ops, notes = run_program(program, origin, facing, snapshot)
     palette, cells, bounds = voxelize(ops, origin, facing, valid_blocks)
     payload = encode(palette, cells, bounds, origin, facing)
+    # 材料直方图: 台账/历史查询靠它回答“用的什么方块”, 不用事后从程序里猜
+    counts: dict = {}
+    for pi in cells.values():
+        entry = palette[pi] if 0 < pi < len(palette) else None
+        if not entry:
+            continue
+        name = str(entry.get("b") or "").replace("minecraft:", "", 1)
+        if name and name not in ("air", "cave_air", "void_air"):
+            counts[name] = counts.get(name, 0) + 1
     checks = {}
     if symmetry:
         checks["symmetry"] = check_symmetry(palette, cells, origin, facing, symmetry)
@@ -931,6 +940,7 @@ def compile_build(program: str, origin: tuple, facing: str, valid_blocks=None,
                                    bounds[5] - bounds[2] + 1),
         "payload_bytes": len(json.dumps(payload, ensure_ascii=False)),
         "notes": notes,
+        "materials": dict(sorted(counts.items(), key=lambda kv: -kv[1])[:16]),
         "snapshot": bool(snapshot),
         "snapshot_unloaded": (snapshot or {}).get("unloaded", 0),
         "checks": checks,
