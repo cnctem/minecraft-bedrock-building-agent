@@ -140,5 +140,17 @@
   "sandstone": ["砂岩"],
   "red_sandstone": ["红砂岩"],
   "stone": ["石头", "石块", "smooth_stone"],
-  "smooth_stone": ["平滑石头"]
+  "smooth_stone": ["平滑石头"],
+  "stone_bricks": ["stonebrick", "stonebricks", "石砖块"],
+  "chiseled_stone_bricks": ["stonebrick_chiseled", "錾制石砖块"],
+  "cracked_stone_bricks": ["stonebrick_cracked", "裂纹石砖块"],
+  "mossy_stone_bricks": ["stonebrick_mossy", "苔石砖块"],
+  "iron_chain": ["chain", "锁链", "铁锁链"],
+  "dandelion": ["yellow_flower", "黄花", "蒲公英花"],
+  "sugar_cane": ["reeds", "甘蔗杆", "甘蔗茎"],
+  "quartz_pillar": ["石英柱", "quartz_pillar_block"],
+  "smooth_quartz": ["平滑石英", "smooth_quartz_block"],
+  "stonecutter": ["stonecutter_block", "切石机"],
+  "leaf_litter": ["落叶", "枯叶"],
+  "bush": ["灌木丛"]
 }

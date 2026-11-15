@@ -14,20 +14,14 @@ class _LibBase:
 
     # Java 版名字 / 常见误写 → 基岩版 (ID, states)。states 为 None 表示无状态。
     _ALIAS = {
-        "stone_bricks": ("stonebrick", None),
+        # 1.21.132 起服务器 ID 已改成 Java 版名字(stone_bricks / quartz_pillar /
+        # iron_chain / dandelion / sugar_cane 都是真 ID), 所以这些只需留旧名反查。
+        "stonebrick": ("stone_bricks", None),
         "bricks": ("brick_block", None),
-        "coarse_dirt": ("dirt", {"dirt_type": "coarse"}),
         "dirt_path": ("grass_path", None),
-        "iron_chain": ("chain", None),
+        "chain": ("iron_chain", None),
         "oak_door": ("wooden_door", None),
-        "smooth_quartz": ("quartz_block", {"chisel_type": "smooth"}),
-        "smooth_quartz_block": ("quartz_block", {"chisel_type": "smooth"}),
-        "chiseled_quartz_block": ("quartz_block", {"chisel_type": "chiseled"}),
-        "quartz_pillar": ("quartz_block", {"chisel_type": "lines"}),
-        "chiseled_stone_bricks": ("stonebrick", {"stone_brick_type": "chiseled"}),
-        "cracked_stone_bricks": ("stonebrick", {"stone_brick_type": "cracked"}),
-        "mossy_stone_bricks": ("stonebrick", {"stone_brick_type": "mossy"}),
-        "stone_brick_wall": ("cobblestone_wall", {"wall_block_type": "stone_brick"}),
+        "smooth_quartz_block": ("smooth_quartz", None),
         "stonebrick_stairs": ("stone_brick_stairs", None),
         "stonebrick_slab": ("stone_brick_slab", None),
         "cobblestone_stairs": ("stone_stairs", None),
@@ -49,9 +43,9 @@ class _LibBase:
         "potted_red_mushroom": ("flower_pot", None),
         "red_banner": ("red_wool", None), "blue_banner": ("blue_wool", None),
         "white_banner": ("white_wool", None),
-        "dandelion": ("yellow_flower", None),
-        "sugar_cane": ("reeds", None),
-        "stone_brick": ("stonebrick", None),
+        "yellow_flower": ("dandelion", None),
+        "reeds": ("sugar_cane", None),
+        "stone_brick": ("stone_bricks", None),
         "grass": ("short_grass", None),
         "wooden_slab": ("oak_slab", None),
         "log": ("oak_log", None),
@@ -115,7 +109,7 @@ class _LibBase:
         special = {
             "brick_block": "brick_stairs", "quartz_block": "quartz_stairs",
             "purpur_block": "purpur_stairs", "deepslate": "cobbled_deepslate_stairs",
-            "stonebrick": "stone_brick_stairs", "mud_bricks": "mud_brick_stairs",
+            "stone_bricks": "stone_brick_stairs", "mud_bricks": "mud_brick_stairs",
             "tuff_bricks": "tuff_brick_stairs", "deepslate_bricks": "deepslate_brick_stairs",
             "deepslate_tiles": "deepslate_tile_stairs",
         }

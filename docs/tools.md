@@ -92,13 +92,23 @@ handler 由 `BotCore` 注册；每个模式实际看到的子集由 `viktor/prof
 4. `tools/build_items.py` 合成 `data/items.json`：`id → {中文名, 英文名, 分类, 别名}`；
 5. `data/item_aliases.json` 手工补充同义词、Java 名与口语别名。
 
-基岩版 lang key 新旧混杂，生成器使用族规则和通用旋转反查；未命中中文的条目退化为英文可读名称。
+基岩版 lang key 新旧混杂（淡灰在 lang 里叫 `silver`、淡蓝有时是驼峰、郁金香/蒲公英是三段键
+`tile.red_flower.tulipWhite` / `tile.yellow_flower.dandelion`），生成器用“族规则 + 颜色写法轮换
++ 通用旋转”反查，少数与 id 完全无关的键列在 `EXACT_KEY`，最后再按英文名反查唯一键。
+未命中中文的条目退化为英文可读名称（`--check` 打印覆盖率，当前 98%，剩下基本是唱片/头颅）。
 查询支持中文、英文、ID 片段的子串匹配；不传参数返回分类总览。结果 ID 可直接用于 `give`、`fill`、`setblock`
 和建造程序。建造编译器优先用 `raw_ids.txt` 校验方块，因为物品表不包含 air/water 等非物品方块。
 
-服务器升级后，在**已部署服务器**上重新导出并更新 `raw_ids.txt`，然后运行：
+**服务器每次升级都要重导一遍**：BDS 改版本会改 ID（1.21.132 把 `stonebrick`→`stone_bricks`、
+`yellow_flower`→`dandelion`、`chain`→`iron_chain`、`stone_block_slab*`→`*_slab` 等），
+清单不刷新的话模型会照旧名施工、建造别名也会指向不存在的 ID。流程（挑无人时，控制台命令会进 `server.log`）：
 
 ```bash
+# 1) 控制台导出(行为包 console.log, 约 30 行; 只读不影响世界)
+screen -S mc -X stuff $'scriptevent viktor:ids\n'
+# 2) 把 logs/server.log 里新增的 "[VIKTOR-IDS] ITEMS/BLOCKS ..." 整理成 data/raw_ids.txt
+#    每行一条: "ITEM minecraft:xxx" / "BLOCK minecraft:xxx"
+# 3) 重建 + 看覆盖率
 python3 tools/build_items.py          # 重新生成
 python3 tools/build_items.py --check  # 查看译名覆盖率
 ```

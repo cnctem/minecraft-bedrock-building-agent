@@ -49,11 +49,16 @@
 
 1. **坐标**：Java 的绝对 `x/y/z` → 局部 `(u, v, w)`，世界坐标由 `origin` + `facing` 变换，
    四朝向自动旋转（`facing="front"` 跟着建造朝向走）。
-2. **方块 ID**：Java 名 → 基岩版 ID（`stone_bricks`→`stonebrick`、`bricks`→`brick_block`、
-   `dandelion`→`yellow_flower`…）。别名表在 `core._LibBase._ALIAS`，**一次维护，两处生效**
-   （沙箱预置代码 + 宿主侧），`api.fill` 这类原语也同样受益。
-3. **状态**：需要状态的变体（`cracked/mossy/chiseled`、`coarse_dirt`、`quartz chisel_type`…）
-   由别名表直接带出 states，模型不必记基岩版状态名。
+2. **方块 ID**：Java 名 → 服务器真实 ID。注意 BDS **1.21.132 起 ID 已统一成 Java 叫法**
+   （`stone_bricks`、`quartz_pillar`、`iron_chain`、`dandelion`、`sugar_cane` 都是真 ID，
+   原本的 `stonebrick`/`yellow_flower`/`chain`/`reeds` 已从 ID 表里消失），所以别名表现在
+   是“旧名 → 新 ID”的反查（`stonebrick`→`stone_bricks`、`chain`→`iron_chain`…），
+   旧教程/旧技能书里的写法仍然可用。表在 `core._LibBase._ALIAS`，**一次维护，两处生效**
+   （沙箱预置代码 + 宿主侧），`api.fill` 这类原语也同样受益。服务器再升级后用
+   `scriptevent viktor:ids` + `tools/build_items.py` 重导 ID 表，并核对别名表的目标 ID 是否还在。
+3. **状态**：仍需要状态的变体（`coarse_dirt`→`dirt{dirt_type}`、`red_sand`→`sand{sand_type}`、
+   门/楼梯的 `direction` 等）由别名表带出 states；而 `cracked/mossy/chiseled` 石砖、
+   `smooth_quartz`/`quartz_pillar` 在新版已是独立 ID，不再用 `stone_brick_type`/`chisel_type` 状态。
 4. **随机**：不用 `random`，全部走 `hash_mix/hash2/hash3/fbm2`（与原模组同一套整数散列），
    同坐标同 `seed` 永远同结果，可分块施工、可重跑。
 5. **错误**：原实现里“参数不合法就返回 0、方块凭空消失”的做法**一律改成抛错**，并附接口签名：

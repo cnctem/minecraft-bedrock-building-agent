@@ -467,7 +467,7 @@ def from_world(origin, facing, x, y, z):
 # 不需要支撑的方块(靠墙/靠顶/贴地生长等), 悬空检查跳过
 _ATTACHABLE = (
     "torch", "soul_torch", "lantern", "soul_lantern", "ladder", "lever", "button",
-    "sign", "chain", "rail", "vine", "glow_lichen", "hanging_roots", "flower", "tulip",
+    "sign", "iron_chain", "rail", "vine", "glow_lichen", "hanging_roots", "flower", "tulip",
     "orchid", "allium", "bluet", "daisy", "poppy", "sapling", "fern", "grass",
     "carpet", "pane", "candle", "flower_pot", "item_frame", "painting", "bell",
 )

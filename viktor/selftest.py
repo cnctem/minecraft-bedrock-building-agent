@@ -1875,6 +1875,14 @@ def self_test():
     assert "红石" in r and "comparator" in r, r
     r = capabilities.execute("find_items", "{}")
     assert "共" in r and "建筑" in r, r
+    # 版本漂移护栏: 这几条是 1.21.132 改名的关键 ID。服务器再升级后如果重导清单没做,
+    # 这里会先红(而不是等到模型现场把 stonebrick 写进建筑程序才发现)。
+    for q, want in (("石砖", "stone_bricks"), ("蒲公英", "dandelion"),
+                    ("铁链", "iron_chain"), ("甘蔗", "sugar_cane"),
+                    ("石英柱", "quartz_pillar"), ("淡灰色混凝土", "light_gray_concrete"),
+                    ("白色郁金香", "white_tulip")):
+        r = capabilities.execute("find_items", json.dumps({"query": q, "limit": 3}))
+        assert want in r, f"find_items({q}) 没命中 {want}\n{r}"
     print("物品速查自测 OK")
 
     # 技能书: 清单注记 + 正文/附件按需载入 + 去重
@@ -2367,15 +2375,18 @@ for u in range(0, W, 3):
     except B.BuildError as e:
         assert "接口: chinese_roof(" in str(e), e
 
-    # api.lib.help() 经由 print → notes 回传; 方块别名(Java 名)自动映射
+    # api.lib.help() 经由 print → notes 回传; 方块别名自动映射
+    # (1.21.132 起服务器 ID 即 Java 版名字, 旧名 stonebrick/yellow_flower 仍能映射)
     payload, st = B.compile_build(
         'print(api.lib.help("rose"))\n'
         'api.fill((0,0,0),(1,0,1),"stone_bricks")\n'
-        'api.set(2,0,0,"dandelion")\n',
+        'api.set(2,0,0,"dandelion")\n'
+        'api.set(3,0,0,"stonebrick")\n'
+        'api.set(4,0,0,"yellow_flower")\n',
         (0, 64, 0), "south", B.block_ids())
     assert any("rose_window" in n for n in st["notes"]), st["notes"]
-    kinds = [e["b"] for e in payload["p"]]
-    assert "minecraft:stonebrick" in kinds and "minecraft:yellow_flower" in kinds, kinds
+    kinds = sorted({e["b"] for e in payload["p"]})
+    assert kinds == ["minecraft:dandelion", "minecraft:stone_bricks"], kinds
     # 生成的函数文档不能落后于 registry(签名漂移会在这里暴露)
     doc = (L.source_paths()[0].parent.parent.parent
            / "skills/mc-architecture/references/functions-chinese.md")
@@ -2525,7 +2536,7 @@ api.set(6, 0, 0, "tall_grass")
     pal3, cel3, bnd3 = B.decode_payload(p3)
     assert len(cel3) == st3["cells"], (len(cel3), st3["cells"])
     front = R.ascii_view(pal3, cel3, bnd3, "front")
-    assert "stonebrick" in front and "oak_planks" in front, front
+    assert "stone_bricks" in front and "oak_planks" in front, front
     assert front.splitlines()[1] == "===" and front.splitlines()[2] == "###", front
     top = R.ascii_view(pal3, cel3, bnd3, "top")
     assert top.count("=") >= 3, top                            # 俯视看到顶层木板

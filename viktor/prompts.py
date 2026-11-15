@@ -94,7 +94,9 @@ CREATIVE_PROMPT = """
   例: `api.lib.chinese_roof(u1, w1, u2, w2, 檐口v, 高, "歇山", "deepslate_tiles", "polished_blackstone")`。
   不确定签名: 程序里 `print(api.lib.help("roof"))`(输出以 [程序输出] 回来); 参数写错会报错并附接口。
   具体该用哪个、比例多少: 载入技能书 mc-architecture / mc-build / mc-interior / mc-details / mc-terrain。
-- 方块 ID 用基岩版名(如 stonebrick 不是 stone_bricks); 不确定先 find_items。
+- 方块 ID 用基岩版名, **以 find_items 的返回为准**(服务器 1.21.132 已改成 Java 版叫法:
+  `stone_bricks`/`quartz_pillar`/`dandelion`/`iron_chain`; 旧教程里的 `stonebrick`/
+  `yellow_flower`/`chain` 已不在 ID 表里)。不确定先 find_items。
 - 多格方块(门/床/高草)引擎已支持, 写法见技能书 mc-build: 门/高草自动补两格;
   床只写一格(你给的格子是床头, 床尾在 direction 方向 0=北 1=东 2=南 3=西);
   高草必须放在草/土上, 否则引擎会自己把它删掉。
