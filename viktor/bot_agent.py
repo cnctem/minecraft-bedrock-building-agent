@@ -14,11 +14,15 @@ import capabilities
 
 from . import ledger, models
 from .constants import (Aborted, CONTEXT_WARN_START_PCT, CONTEXT_WARN_STEP_PCT, CREATIVE_MODES,
-                        RETRYABLE_HTTP, SMART_COMPACT_AUTO_PCT)
+                        IMAGE_NOTE, RETRYABLE_HTTP, SMART_COMPACT_AUTO_PCT)
 from .paths import log
 from .profiles import EFFORT_KEYS, LIMIT_DEFAULTS, LIMIT_KEYS, MODES, PROMPTS, TOOLS, Mode
 from .prompts import SMART_COMPACT_PROMPT
 from .session import Session
+
+# 联网工具的名字: DeepSeek 原生联网时它们在请求里以服务端工具声明(模型自己调, 服务端执行),
+# 本地不再作为函数工具暴露; 切到别家模型时才退回同名函数工具(实现见 websearch.py)。
+WEB_TOOL_NAMES = {"deepseek_web_search", "deepseek_read_url"}
 
 
 class BotAgentMixin:
@@ -219,7 +223,8 @@ class BotAgentMixin:
     def _allowed_tools(self, mode: str | None = None) -> set:
         """本模式暴露给模型的工具白名单。未列出的工具根本不会出现在工具表里。
         工具 profile 支持 None(全部)/{"only": 白名单}/{"except": 黑名单}。
-        不可切换的模式(如一次性)连 set_mode 都不暴露。"""
+        不可切换的模式(如一次性)连 set_mode 都不暴露。
+        联网工具按模型分路: DeepSeek 原生联网时它们以服务端工具声明, 不再作为函数工具暴露。"""
         m = self._mode_info(mode)
         spec = TOOLS[m.tools]
         names = set(capabilities.registered_names())
@@ -234,6 +239,8 @@ class BotAgentMixin:
         # 常加载仅创造模式支持
         if (mode or self._mode()) not in CREATIVE_MODES:
             allow.discard("pin_region")
+        if models.native_web_tools(self._model_spec()):
+            allow -= WEB_TOOL_NAMES
         return allow
 
     def _apply_mode_limits(self, params: dict):
@@ -360,8 +367,15 @@ class BotAgentMixin:
         if field:
             payload[field] = value
         if not params.get("no_tools"):  # 收尾发言用 no_tools 逼模型用正文总结
-            payload["tools"] = capabilities.tool_schemas(
+            tools = capabilities.tool_schemas(
                 allow=self._allowed_tools(), mode_choices=list(self._mode_next()))
+            # DeepSeek 原生联网: 服务端工具, 模型自己决定是否联网, 搜索/开页/抓取都在服务端跑,
+            # 客户端不执行任何工具(结果在 message.server_tool_calls 与 citations 里)。
+            # 这两项是 DeepSeek 扩展, 别家模型会在 tools 里直接 400, 所以按模型分路。
+            if models.native_web_tools(spec):
+                tools = tools + [{"type": "deepseek_web_search"},
+                                 {"type": "deepseek_read_url"}]
+            payload["tools"] = tools
         # 采样温度: 模型档案显式写了就用它(kimi 只接受 1), 否则用模式默认值
         temp = params.get("temperature")
         if spec.get("temperature") is not models.UNSET:
@@ -445,7 +459,10 @@ class BotAgentMixin:
         timeout = self._api_timeout()   # 读超时按模型可覆盖(kimi 慢但思考长, 60s 不够)
         data = None
         took = 0.0
-        for attempt in range(1, attempts + 1):
+        attempt = 0
+        image_fixes = 0
+        while attempt < attempts:
+            attempt += 1
             self._check_abort()  # 强制停止: 一次重试都不再多发
             self._rate_limit()  # 每次尝试(含重试)都遵守最小间隔
             req = urllib.request.Request(url, data=payload, headers=headers, method="POST")
@@ -459,6 +476,17 @@ class BotAgentMixin:
                 # 只取人能读的那一句, 便于日志排查与给玩家看的 [系统] 提示。
                 body = e.read().decode("utf-8", "replace")[:400]
                 detail = self._error_detail(body)
+                # 远程图片(玩家发的图片直链)由模型服务端下载: 地址不是图片或拉不下来时
+                # 整个请求会 400, 而那个图片块留在上下文里会让之后每次请求都 400 —— 就地移除再重发。
+                low = detail.lower()
+                bad_image = "image" in low or "only text content" in low
+                if (e.code == 400 and image_fixes < 2 and bad_image
+                        and self._drop_bad_images(messages)):
+                    image_fixes += 1
+                    attempt -= 1  # 这不是模型的错, 不占重试次数
+                    payload = self._build_payload(messages, params)
+                    log(f"[图片] 图片块导致 400, 已从上下文移除后重发: {self._clip(detail, 120)}")
+                    continue
                 if e.code not in RETRYABLE_HTTP or attempt >= attempts:
                     raise RuntimeError(f"HTTP {e.code}: {detail}") from None
                 delay = self._backoff_delay(
@@ -519,6 +547,46 @@ class BotAgentMixin:
                 if data.get(key):
                     return re.sub(r"\s+", " ", str(data[key]))
         return re.sub(r"\s+", " ", text)
+
+    @staticmethod
+    def _image_url_of(part) -> str:
+        """取一个内容块的图片地址(image_url / image 两种写法); 不是图片块返回空串。"""
+        if not isinstance(part, dict) or part.get("type") not in ("image_url", "image"):
+            return ""
+        info = part.get("image_url") or part.get("image") or {}
+        return str(info.get("url") or "") if isinstance(info, dict) else ""
+
+    def _drop_bad_images(self, messages: list[dict]) -> int:
+        """把引起 400 的图片块换成一行说明, 返回改动的块数。
+
+        两种触发:
+        - 远程图片由模型服务端下载(玩家消息里的图片直链), 地址不是图片/拉不下来时整个
+          请求 400: 把这类远程图片块去掉;
+        - 声明 DeepSeek 服务端联网工具时, tool 消息**只能放 text**, 图片会 400(恢复旧会话时
+          可能遇到): tool 消息里的图片块(含 data:)一并去掉, 图片本体改附在后面那条用户消息里。
+        messages 里的 dict 与会话里的是同一份对象, 所以会话上下文一并被修正, 不会每轮重复报错。"""
+        dropped = 0
+        for m in messages:
+            content = m.get("content")
+            if not isinstance(content, list):
+                continue
+            in_tool = m.get("role") == "tool"
+            fixed, changed = [], False
+            for part in content:
+                url = self._image_url_of(part)
+                is_image = bool(url) or (isinstance(part, dict)
+                                         and part.get("type") in ("image_url", "image"))
+                if is_image and (in_tool or not url.startswith("data:")):
+                    fixed.append({"type": "text", "text": (
+                        f"[图片] {url} 加载失败(不是有效图片或地址不可访问)" if url else "[图片]")
+                        + ", 已从上下文移除; 如实告诉玩家图片没读到, 不要描述画面。"})
+                    dropped += 1
+                    changed = True
+                else:
+                    fixed.append(part)
+            if changed:
+                m["content"] = fixed
+        return dropped
 
     def _api_timeout(self) -> float:
         """读超时(秒): 模型档案可覆盖(慢模型给更长), 否则用全局 api_timeout_sec。"""
@@ -611,6 +679,7 @@ class BotAgentMixin:
         “停止”(软停止)只在轮次开头与两次工具调用之间生效(安全点), 不打断工具内部等待。"""
         oneshot = self._oneshot()
         self._tls.spoken = []   # 本回合真正说出口的话(按顺序), 回合结束用来更新对话状态
+        self._tls.server_calls = None  # 本轮服务端联网工具的记录(有则随最终发言写回上下文)
         if not oneshot:
             self._maybe_compact_for_size()
         session = self._session()
@@ -671,6 +740,9 @@ class BotAgentMixin:
             if not calls or not self._model_spec().get("reasoning_content", True):
                 msg.pop("reasoning_content", None)
             if not calls:
+                # 服务端联网工具(deepseek_web_search/read_url)的调用记录: 接口要求原样回传,
+                # 否则读过的页面在下轮就不在上下文里(见 _finish_turn)。
+                self._tls.server_calls = msg.get("server_tool_calls")
                 # finish=length: 思考 token 与正文/工具调用共用 max_tokens, 复杂规划
                 # 会把额度烧在思考上, 导致正文为空、工具调用为空——玩家看到沉默。
                 if finish == "length" and budget_retries < 1:
@@ -714,6 +786,7 @@ class BotAgentMixin:
             messages.append(msg)
             silent = False
             pending_notes: list[str] = []
+            attached: list[dict] = []   # 本次工具轮取到的图片, 汇总后统一附在 tool 响应之后
             for tc in calls:
                 fname = tc["function"]["name"]
                 if fname == "stay_silent":
@@ -725,9 +798,10 @@ class BotAgentMixin:
                     result = "(已到安全点停止)"
                 else:
                     result = capabilities.execute(fname, tc["function"].get("arguments", "{}"))
-                # 工具顺带产出的图片(read_url): 作为 image_url 块和文字一起放进 tool 消息,
-                # 模型这一轮就能直接看到图(同 pi 的 ToolResultMessage 图片内容块)。
+                # 工具顺带产出的图片(渲染图)先攒起来, 等本轮 tool 响应
+                # 全部追加完再统一附上(见下)。
                 images = capabilities.take_images()
+                attached.extend(images)
                 log(f"[能力] {fname} -> {result}"
                     + (f" (+{len(images)} 张图片)" if images else ""))
                 if fname == "send_chat_message" or (fname == "ptc" and self._ptc_speaks(tc)):
@@ -736,15 +810,21 @@ class BotAgentMixin:
                         text = self._spoken_text(tc)
                         if text:
                             self._tls.spoken.append(text)
-                tool_msg = {"role": "tool", "tool_call_id": tc["id"],
-                            "content": result if not images else
-                            [{"type": "text", "text": result}] + images}
+                tool_msg = {"role": "tool", "tool_call_id": tc["id"], "content": result}
                 session.messages.append(tool_msg)
                 messages.append(tool_msg)
                 # 状态变更(切模式/更新记忆)先攒着, 等**全部** tool 响应追加完再统一写注记:
                 # 同一 assistant 消息带多条 tool_calls 时, 注记插在中间会拆散
                 # assistant(tool_calls)/tool 的相邻配对, API 直接 400。
                 pending_notes.extend(self._state_notes(result, before_mode))
+            # 图片不能放进 tool 消息: 声明 DeepSeek 服务端联网工具(deepseek_web_search /
+            # deepseek_read_url)时, 接口只接受 text 类型的 tool 内容。所以把本轮取到的图片
+            # 作为一条追加的用户消息附在 tool 响应之后, 由服务端自己下载 http URL。
+            if attached:
+                img_msg = {"role": "user",
+                           "content": [{"type": "text", "text": IMAGE_NOTE}] + attached}
+                session.messages.append(img_msg)
+                messages.append(img_msg)
             # 注记作为追加式系统消息写在所有 tool 响应之后, 只往日志尾部加,
             # 不改动 system 前缀 -> 缓存不失效, 历史也不会前后矛盾。
             for note in pending_notes:
@@ -786,13 +866,17 @@ class BotAgentMixin:
 
     def _finish_turn(self, reply: str, spoke: bool) -> bool:
         """把本回合结果写回上下文。若模型把回复写在了正文里(玩家看不到),
-        就在这里兜底播报——宁可多发一句, 也不能让玩家对着一片沉默。"""
+        就在这里兜底播报——宁可多发一句, 也不能让玩家对着一片沉默。
+        本轮若用过 DeepSeek 的服务端联网工具, 把 server_tool_calls 一并写回(接口要求
+        原样回传, 否则读过的页面在下轮就不在上下文里了)。"""
         if reply.strip() and not spoke:
             log(f"[注意] AI 未调用工具却在正文输出, 已兜底播报: {reply[:80]}")
             self.bridge.say_as_viktor(reply, self.cfg["reply_chunk_len"],
                                       self._reply_max_chunks())
             spoke = True
-        self.session.add_assistant(reply or ("(已通过工具发言)" if spoke else "(保持沉默)"))
+        self.session.add_assistant(reply or ("(已通过工具发言)" if spoke else "(保持沉默)"),
+                                   server_tool_calls=getattr(self._tls, "server_calls", None))
+        self._tls.server_calls = None
         self.session.replied_count += 1
         return spoke
 

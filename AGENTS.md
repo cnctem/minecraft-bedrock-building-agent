@@ -106,6 +106,17 @@ bot.py
 
 特别注意：建造事务工具只在 creative/creative_max；pin_region 只在 creative 家族可用。
 
+联网工具按模型分路：`models.native_web_tools()` 为真（DeepSeek）时 `deepseek_web_search` /
+`deepseek_read_url` 以**服务端工具**声明在 `tools` 里，搜索与抓取在服务端执行，客户端不跑任何
+handler；切到别家模型才作为函数工具暴露，由 `viktor/websearch.py` 调 DeepSeek 的
+`/v1/tools/search` 与 `/v1/tools/fetch`。改这两条路径要同时看 `bot_agent._build_payload` /
+`_allowed_tools`，并保证 `server_tool_calls` 原样回传（否则读过的页面下一轮就不在上下文里）。
+
+图片的主路径没有工具调用：玩家发的图片直链由 `bot_core._commit_to_context()` 直接附进那条用户消息
+（DeepSeek 服务端下载；别家模型由 `websearch.fetch_image()` 本地转 base64），渲染图以追加用户消息附在
+tool 响应之后（tool 消息只能放 text）。`view_image` 只是兜底（直链没自动附上时模型才调），
+别再往 tool 消息里塞图片。
+
 ### 2.4 行为包协议
 
 修改协议必须同步：行为包 JS、`constants.py` 路由/版本、`bus.py` 编解码、相关工具与文档。

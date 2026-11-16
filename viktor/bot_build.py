@@ -278,7 +278,7 @@ class BotBuildMixin:
                f"{len(cells)} 格, 包围盒 {bounds[3]-bounds[0]+1}×{bounds[4]-bounds[1]+1}×{bounds[5]-bounds[2]+1}",
                text]
         if shots:
-            out.append(f"已附 {shots} 张渲染图({', '.join(views[:shots])})在这条结果里: "
+            out.append(f"已附 {shots} 张渲染图({', '.join(views[:shots])})在上下文里(工具结果之后): "
                        "形状/比例/对称直接看图判断, 具体方块名看上面字符图的图例。")
         if pngs:
             out.append("PNG 存档: " + ", ".join(str(p) for p in pngs))
@@ -323,7 +323,7 @@ class BotBuildMixin:
                f"{vol} 格" + (f", 未加载 {data.get('unloaded')} 格" if data.get("unloaded") else ""),
                text]
         if shots:
-            out.append(f"已附 {shots} 张渲染图({', '.join(views[:shots])})在这条结果里, "
+            out.append(f"已附 {shots} 张渲染图({', '.join(views[:shots])})在上下文里(工具结果之后), "
                        "可以直接看图; 具体方块名看字符图图例。")
         if pngs:
             out.append("PNG 存档: " + ", ".join(str(p) for p in pngs))

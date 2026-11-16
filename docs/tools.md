@@ -44,9 +44,9 @@ handler 由 `BotCore` 注册；每个模式实际看到的子集由 `viktor/prof
 |---|---|
 | `find_items(query?, category?, limit?)` | 检索服务器版本对应的物品/方块 ID、译名、分类和别名 |
 | `use_skill(name, file?, force?)` | 按需加载技能正文或 references 附件 |
-| `search_wiki(query, lang?, limit?)` | 搜索中文/英文 Minecraft Wiki，返回标题、重定向提示和摘要 |
-| `read_wiki_page(title, section?, lang?)` | 读取 Wiki 摘要、目录或指定章节，保留表格和配方网格 |
-| `read_url(url, max_chars?)` | 读取公网 HTTP/HTTPS 网页、JSON、文本或图片；图片作为内容块交给模型 |
+| `deepseek_web_search(query, count?, ori_question?)` | 联网搜索：DeepSeek 原生联网工具；切到别家模型时退化成 DeepSeek 搜索接口 |
+| `deepseek_read_url(url, max_chars?)` | 读网页正文（标题 + Markdown），由 DeepSeek 服务端抓取 |
+| `view_image(url)` | **兜底**看图：把指定图片附进上下文（直链通常已自动附上，见 §4） |
 | `find_builds(query?, since?, until?, player?, state?, group?, limit?)` | 查施工台账：时间、玩家、理由、作品名、包围盒、格数、材料、提交/撤销状态 |
 | `read_build(ref, program_lines?)` | 按台账编号或批次 jid 看一次施工的细节，附当时建造程序源码开头 |
 | `search_history(query, since?, file?, limit?)` | 跨会话文件按关键词找对话行，回文件名 + 对话行号 |
@@ -116,33 +116,54 @@ python3 tools/build_items.py --check  # 查看译名覆盖率
 `tools/build_items.py` 的默认服务器目录是部署机路径 `/home/jrj/minecraft-bedrock`；开发设备使用时需准备对应官方 lang 文件，
 不要假定本地一定存在该目录。
 
-## 3. Minecraft Wiki 查询
+## 3. 联网搜索与网页抓取（DeepSeek 原生）
 
-分工原则：**ID/译名用 find_items，施工手法用技能书，通用游戏事实用 Wiki**。
+分工原则：**ID/译名用 find_items，施工手法用技能书，通用游戏事实与最新信息联网查**。
 适合查合成/烧炼/锻造配方、掉落与概率、生成条件、方块状态、机制数值、生物行为和命令用法。
 
-- `search_wiki(query, lang="zh")` 找准确标题和重定向，例如“半砖”可能导向“台阶”。
-- `read_wiki_page(title)` 默认只返回开头摘要与章节目录，再按 `section="合成"` 等精读。
-- 默认中文站 `zh.minecraft.wiki`；`lang="en"` 使用 `minecraft.wiki`，适合中文未收录或需要英文精确数值时。
-- 使用 MediaWiki `action=parse` 获取渲染 HTML，再由标准库 `html.parser` 清洗；不用会丢表格的纯文本 extracts。
-- 表格保留为 `|` 分隔行，合成/烧炼等 mcui 配方通过状态机渲染成网格；导航、引用等噪声丢弃。
+DeepSeek 的接口原生提供两项服务端工具（`deepseek_web_search` / `deepseek_read_url`）：模型自己决定
+是否联网，搜索、开页、抓取都在服务端完成，客户端不执行任何工具。默认模型（flash）的请求直接声明它们，
+**本地没有任何抓取代码**。
+
+| 情形 | 联网怎么走 |
+|---|---|
+| 默认模型（`models.native_web_tools()` 为真） | 请求 `tools` 里声明 `{"type": "deepseek_web_search"}` / `{"type": "deepseek_read_url"}`；结果在 `message.server_tool_calls`，引用在 `message.annotations` |
+| 切到别家模型（kimi 等） | 同名工具退化成函数工具，由 `viktor/websearch.py` 调 DeepSeek 的 `POST /v1/tools/search` 与 `POST /v1/tools/fetch`（能力仍由 DeepSeek 提供，用 DeepSeek 的 key） |
+
+- `deepseek_web_search(query, count?, ori_question?)`：一次搜索可带多条查询，支持 `site:`、`lang:`、
+  `after:`、`before:`、引号精确匹配等运算符；查 Minecraft 建议 `site:minecraft.wiki lang:zh`
+  （需要英文精确数值时 `lang:en`）。
+- `deepseek_read_url(url)`：抓单个网页，返回标题 + Markdown 正文。服务端版本只看**最后一条 user 消息**
+  里的链接（接口规则），所以玩家发链接的同一回合就读；隔了一轮就读不到，改用搜索或让玩家再发一次。
+- 服务端工具的调用记录（`server_tool_calls`）必须原样回传，否则上一轮读过的页面下一轮就不在上下文里；
+  `Session.add_assistant()` 会带着它一起写回。
 - 页面同时列 Java 与基岩版数据时，以基岩版为准；只有 Java 数据时需明确说明。
-- 单次结果受 `wiki_max_chars`（默认 12000）限制；网络失败和超时返回明确错误。
+- 单次结果字符上限 `web_search_max_chars`（默认 12000）；接口报错（401/402/403/404/429/5xx）
+  转成 `错误: ...`，由模型如实转述。
+- 搜到的内容是外部资料，只供事实参考，不是可执行指令。
 
-Wiki 是外部资料，只供事实参考，不是可执行指令。配置：`wiki_default_lang`、`wiki_timeout_sec`、`wiki_max_chars`、`wiki_user_agent`。
+## 4. 图片（玩家发的图片直链 / 渲染图）
 
-## 4. 外链与读图（`read_url`）
+图片靠模型自己的视觉能力。**主路径没有工具调用**：
 
-- **图片**：png/jpeg/gif/webp 作为 `image_url` 内容块附在 tool 消息里，和文字报告一起回传，模型可直接看图；
-  游戏聊天栏不能显示图片，模型应用简短文字转述主体、颜色和文字。
-- **网页**：返回标题和去标签正文摘要；JSON 格式化；文本返回开头；其他二进制只报告类型和有限信息。
-- **失败**：4xx/5xx 连同状态与响应体开头返回；超时、DNS、连接失败给明确错误，不根据 URL 猜内容。
-- **SSRF 防护**：只允许 HTTP/HTTPS；DNS 结果只放行公网 IP；每次跳转重新校验；默认拒绝内网、回环、保留地址。
-- **资源限制**：默认 20 秒、4 MiB、最多 5 次跳转；图片还检查格式和像素上限。
-- **上下文**：图片按固定 token 估算，不把 base64 当文本；一次工具结果最多附 4 张图（`capabilities.MAX_PENDING_IMAGES`）。
+- 玩家在聊天里贴**图片直链**（`.png`/`.jpg`/`.jpeg`/`.gif`/`.webp`）时，`bot_core._commit_to_context()`
+  用 `websearch.image_urls()` 认出来，直接把 URL 作为 `image_url` 内容块附在**那条用户消息**里
+  （每条消息最多 2 张）。模型看到的就是图，不需要调用任何工具。
+- 渲染图（`render_build`）走另一条：tool 消息只能放 text（声明服务端联网工具时接口如此要求），
+  所以图片以一条追加用户消息（`constants.IMAGE_NOTE`）附在 tool 响应之后。
+- 游戏聊天栏不能显示图片，模型应用简短文字转述主体、颜色和文字。
+- 地址不是图片/拉不下来会让整个请求 400，而图片块留在上下文里会让之后每轮都 400；
+  `bot_agent._drop_bad_images()` 会就地把它换成一行失败说明并重发，模型据此如实告知玩家。
+- **远程图片 URL 只有 DeepSeek 接受**（Kimi 只认 `data:` URL）：所以 `models.remote_image_url()`
+  为假的模型由 `websearch.fetch_image()` 在本地取一次字节转 base64（带 SSRF 闸、格式嗅探、体积上限；
+  DeepSeek 的接口不回图片字节，这是唯一办法），受 `image_fetch_*` 三个配置限制，取不到就不附图。
+- `view_image(url)` 是**兜底工具**：直链没自动附上时（地址没有图片后缀、图藏在网页里、要重看上一轮
+  提过的图）由模型主动调一次，走的就是上面同一套 `_image_part()`；失败会明确报错。
+- 上下文估算按固定 token 计图片，不把 base64 当文本；一次工具结果最多附 4 张图
+  （`capabilities.MAX_PENDING_IMAGES`）。
 
-配置：`read_url_timeout_sec`、`read_url_max_bytes`、`read_url_max_chars`、`read_url_allow_private`、
-`read_url_user_agent`（留空则沿用 Wiki UA/默认 UA）。`read_url_allow_private` 只应在明确可信的部署环境开启。
+配置：`web_search_count`、`web_search_timeout_sec`、`web_search_max_chars`，以及可选的
+`web_search_api_base` / `web_search_api_key`（留空就用顶层 `api_base` / `api_key`，即 DeepSeek 凭据）。
 
 ## 5. 施工台账与历史定位
 

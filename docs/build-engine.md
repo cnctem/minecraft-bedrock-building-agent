@@ -226,7 +226,8 @@ ID 再按 `data/raw_ids.txt`（优先）或物品表校验。
 - 字符图适合检查体块、立面、屋顶和楼层关系，并保留精确方块名（图例）；超宽/超高会整数降采样。
 - PNG 由标准库 `zlib` + `struct` 生成，输出到 `logs/renders/` 留档。
 - **图片直接给模型**（`render_attach_png`，默认开）：前 `render_attach_max`（默认 2）个视角同时以
-  `image_url` 内容块附在那条 tool 消息里，模型能真的看到图。给模型的那份按 `render.model_scale`
+  `image_url` 内容块附在 tool 响应之后的一条用户消息里（tool 消息只能放 text：声明 DeepSeek
+  服务端联网工具时接口有此限制），模型能真的看到图。给模型的那份按 `render.model_scale`
   用 1~2 像素/格重编码（视觉编码器本来就会重采样，再大只多花钱）。
   实测（flash/kimi 均可读图）：同一道「左右是否对称」判断，只给字符图时 flash 思考 token 632~4982、
   耗时 6~35 秒；加一张正面图后稳定 300~380 token、约 3 秒，结论一致。字符图与图片互补：

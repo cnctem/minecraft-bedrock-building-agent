@@ -3,8 +3,9 @@
 不连真服务器; 日志/会话/记忆全部指向 /tmp, 不污染生产文件。
 依赖方向: selftest → Bot(viktor 包) + capabilities; 仅 --test 时由入口导入。
 """
-import json
+import base64
 import http.server
+import json
 import threading
 import time
 from datetime import datetime, timedelta
@@ -12,17 +13,19 @@ from pathlib import Path
 
 import capabilities
 
-from . import Bot, history, ledger, paths, render, webfetch, wiki
+from . import Bot, history, ledger, models, paths, render, websearch
+from .bot_agent import WEB_TOOL_NAMES
 from .bridge import ScreenBridge
 from .config import load_config
 from .constants import (
     CREATIVE_MODES,
+    IMAGE_NOTE,
     MODE_CREATIVE,
     MODE_CREATIVE_MAX,
     MODE_NORMAL,
     MODE_ONESHOT,
 )
-from .profiles import MODES
+from .profiles import MODES, TOOLS
 from .session import Session, memory_note
 
 
@@ -1915,52 +1918,169 @@ def self_test():
     assert "没有名为" in r, r
     print("技能书自测 OK")
 
-    # wiki: HTML 清洗(丢 infobox/保留表格与配方网格) + 章节切分(离线, 不联网)
-    _w = (
-        '<div class="mw-parser-output">'
-        '<table class="infobox"><tr><td>硬度</td><td>3</td></tr></table>'
-        '<p>钻石（Diamond）是<b>稀有</b>物品。</p>'
-        '<h2>获取</h2><p>挖掘钻石矿石获得。</p>'
-        '<table class="wikitable"><tr><th>材料</th><th>配方</th></tr><tr><td>钻石块</td>'
-        '<td><span class="mcui mcui-Crafting_Table">'
-        '<span class="mcui-row"><span class="invslot"></span>'
-        '<span class="invslot"><span class="invslot-item" title="钻石块"></span></span></span>'
-        '<span class="mcui-output"><span class="invslot">'
-        '<span class="invslot-item" title="钻石"></span>'
-        '<span class="invslot-stacksize">9</span></span></span>'
-        '<span class="searchaux">[[|]]</span></span></td></tr></table>'
-        '<h2>数据值</h2><p>ID 为 diamond。</p></div>')
-    _t = wiki.html_to_text(_w)
-    assert "硬度" not in _t, "infobox 应被丢弃"
-    assert "钻石（Diamond）是稀有物品。" in _t, _t
-    assert "[[|]]" not in _t, "searchaux 应被丢弃"
-    assert "【配方】" in _t and "[钻石块]" in _t and "→ 钻石 x9" in _t, _t
-    assert [h[2] for h in wiki._headings(_t)] == ["获取", "数据值"], wiki._headings(_t)
-    _sec, _name = wiki._slice_section(_t, "获取")
-    assert _name == "获取" and "挖掘钻石矿石" in _sec and "数据值" not in _sec, _sec
-    assert wiki.first_paragraph("| x |\n\n钻石（Diamond）是稀有物品。", min_len=10) \
-        == "钻石（Diamond）是稀有物品。"
-    # 工具已注册且对模型可见
-    assert {"search_wiki", "read_wiki_page"} <= capabilities.registered_names()
-    assert {"search_wiki", "read_wiki_page"} <= bot2._allowed_tools(), "应全模式可用"
-    print("wiki 清洗/章节/注册自测 OK")
+    # 联网: 搜索/抓取走 DeepSeek 的 Search & Fetch 接口(离线自测: 打桩 _post, 不联网)
+    _results = [
+        {"rerank_score": 2.4, "title": "钻石镐", "url": "https://minecraft.wiki/w/Diamond_Pickaxe",
+         "snippet": "短摘要", "summary": "长摘要" * 50, "site_name": "Minecraft Wiki",
+         "date": "2026-06-01T00:00:00+00:00", "authority": 4},
+        {"rerank_score": 0.8, "title": "无站点", "url": "https://example.com/a",
+         "snippet": "", "summary": "", "site_name": None, "date": None, "authority": -1},
+    ]
+    assert websearch.normalize_url("example.com/a.png。") == "https://example.com/a.png"
+    _txt = websearch.format_results("钻石镐 合成", _results, max_chars=4000)
+    assert "2 条结果" in _txt and "Minecraft Wiki" in _txt and "权威 4" in _txt, _txt
+    assert "相关度 2.4" in _txt and "URL: https://example.com/a" in _txt, _txt
+    assert "权威 -1" not in _txt, "未知权威不该显示"
+    # 结果超长要截断, 不能把上下文撑爆
+    _long = websearch.format_results("q", _results * 20, max_chars=600)
+    assert len(_long) < 900 and "已截断" in _long, len(_long)
 
-    # read_url: 图片/网页/404 + SSRF 拦截 + 图片进 tool 消息(本地临时 HTTP 服务, 不联网)
-    _png = Path("/tmp/viktor-url-test.png")
-    render.write_png(_png, [[(200, 60, 60, 255)] * 12 for _ in range(6)])
-    _png_bytes = _png.read_bytes()
-    _html = ("<html><head><title>测试页</title></head>"
-             "<body><p>hello 世界</p><script>bad()</script></body></html>").encode()
+    _calls = []
 
-    class _UrlHandler(http.server.BaseHTTPRequestHandler):
+    def _fake_post(cfg, path, payload, timeout=None):
+        _calls.append((path, payload))
+        if path.endswith("/search"):
+            return {"results": _results}
+        return {"title": "Diamond", "content": "# Diamond\n\n钻石是稀有物品。"}
+
+    _orig_ws_post = websearch._post
+    websearch._post = _fake_post
+    try:
+        r = capabilities.execute("deepseek_web_search",
+                                 json.dumps({"query": "钻石", "count": 5}, ensure_ascii=False))
+        assert "2 条结果" in r and _calls[-1][0] == "/v1/tools/search", (r, _calls)
+        assert _calls[-1][1]["query"] == "钻石" and _calls[-1][1]["count"] == 5, _calls[-1]
+        # ori_question 缺省时自动带玩家原话(帮助搜索接口理解意图)
+        assert _calls[-1][1].get("ori_question"), _calls[-1]
+        r = capabilities.execute("deepseek_read_url",
+                                 json.dumps({"url": "minecraft.wiki/w/Diamond"}))
+        assert "Diamond" in r and "钻石是稀有物品" in r, r
+        assert _calls[-1][0] == "/v1/tools/fetch", _calls[-1]
+        assert _calls[-1][1]["url"] == "https://minecraft.wiki/w/Diamond", _calls[-1]
+    finally:
+        websearch._post = _orig_ws_post
+
+    # 失败路径: 接口报错要变成「错误: ...」并带上状态码与原因(模型据此如实转述)
+    def _fail_post(cfg, path, payload, timeout=None):
+        raise websearch.SearchError(
+            websearch._error_message(402, '{"error":{"message":"Insufficient Balance"}}'))
+
+    websearch._post = _fail_post
+    try:
+        r = capabilities.execute("deepseek_web_search", json.dumps({"query": "x"}))
+        assert r.startswith("错误:") and "402" in r and "余额不足" in r, r
+        r = capabilities.execute("deepseek_read_url", json.dumps({"url": "https://a/b"}))
+        assert r.startswith("错误:") and "余额不足" in r, r
+    finally:
+        websearch._post = _orig_ws_post
+    assert capabilities.execute("deepseek_web_search", json.dumps({"query": "  "})).startswith("错误:")
+    assert capabilities.execute("deepseek_read_url",
+                                json.dumps({"url": "file:///etc/passwd"})).startswith("错误:")
+    assert "请求过于频繁" in websearch._error_message(429, "")
+    print("联网搜索/抓取(DeepSeek 接口)自测 OK")
+
+    # 联网工具按模型分路: DeepSeek 用服务端工具, 别家模型退回同名函数工具
+    bot2.mode = MODE_NORMAL
+    assert WEB_TOOL_NAMES <= capabilities.registered_names()
+    assert not (WEB_TOOL_NAMES & bot2._allowed_tools()), "flash 原生联网, 不应再暴露同名函数工具"
+    _fp = json.loads(bot2._build_payload([], bot2._mode_params()))
+    _types = [t.get("type") for t in _fp["tools"]]
+    assert _types.count("deepseek_web_search") == 1 and _types.count("deepseek_read_url") == 1, _types
+    assert not any(t.get("function", {}).get("name") in WEB_TOOL_NAMES
+                   for t in _fp["tools"] if t.get("type") == "function"), "不应重复声明"
+    # kimi 没有服务端联网工具: 改用同名函数工具(仍由 DeepSeek 的接口提供能力)
+    bot2.model_alias = "kimi"
+    try:
+        assert WEB_TOOL_NAMES <= bot2._allowed_tools()
+        _kp = json.loads(bot2._build_payload([], bot2._mode_params()))
+        assert not any(t.get("type") == "deepseek_web_search" for t in _kp["tools"]), _kp["tools"]
+        _names = [t["function"]["name"] for t in _kp["tools"] if t.get("type") == "function"]
+        assert WEB_TOOL_NAMES <= set(_names), _names
+        # 一次性对话固定用 flash(原生联网), 所以按函数工具口径要出现在它自己的白名单里
+        assert WEB_TOOL_NAMES <= TOOLS["oneshot"]["only"], "一次性白名单里也要有"
+    finally:
+        bot2.model_alias = "flash"
+    print("联网工具按模型分路自测 OK")
+
+    # 玩家发图片直链: 不靠工具, 直接把 URL 作为 image_url 附在那条用户消息里(服务端下载)
+    assert websearch.image_urls("看 https://a.com/x.png 和 https://b.com/y.JPG?w=2") == \
+        ["https://a.com/x.png", "https://b.com/y.JPG?w=2"]
+    assert websearch.image_urls("https://a.com/page.html") == [], "普通网页不算图片直链"
+    assert websearch.image_urls("https://a.com/x.png https://b.com/y.png https://c.com/z.png") == \
+        ["https://a.com/x.png", "https://b.com/y.png"], "默认最多 2 张"
+    assert websearch.image_urls("看这个 https://a.com/x.png。") == ["https://a.com/x.png"], \
+        "聊天里的尾部标点要去掉"
+    assert "view_image" in capabilities.registered_names(), "兜底看图工具应在"
+    assert "view_image" in bot2._allowed_tools(MODE_ONESHOT), "兜底看图全模式可用"
+    assert models.remote_image_url(bot2._model_spec()) is True, "DeepSeek 支持 http 图片地址"
+    assert models.remote_image_url({"api_base": "https://api.kimi.com/coding/v1"}) is False, \
+        "Kimi 只认 data: URL"
+    # 进上下文: flash 附图; kimi 不附(否则必然 400)
+    if not bot2.session:
+        bot2.players.add("T")
+        bot2._start_session()
+    _before = len(bot2.session.messages)
+    _msgs = bot2._commit_to_context([("P", "看看这张 https://example.com/logo.png 像什么")])
+    _content = _msgs[0]["content"]
+    assert isinstance(_content, list) and _content[0]["type"] == "text", _content
+    assert _content[0]["text"] == "P: 看看这张 https://example.com/logo.png 像什么", _content
+    assert _content[1] == {"type": "image_url",
+                           "image_url": {"url": "https://example.com/logo.png"}}, _content
+    assert bot2.session.messages[-1] is _msgs[0], "附图的用户消息要原样进会话"
+    _orig_fi = websearch.fetch_image
+    websearch.fetch_image = lambda url, **kw: (_ for _ in ()).throw(
+        websearch.SearchError("取图失败(自测打桩)"))
+    bot2.model_alias = "kimi"
+    try:
+        _km = bot2._commit_to_context([("P", "看看 https://example.com/logo.png")])
+        assert isinstance(_km[0]["content"], str), "取不到图就不附图, 别把请求打成 400"
+    finally:
+        bot2.model_alias = "flash"
+        websearch.fetch_image = _orig_fi
+    assert len(bot2.session.messages) == _before + 2
+    # 图片不把上下文估算顶爆(base64 不算文本 token)
+    _est = Session._est_tokens([{"role": "tool", "tool_call_id": "x", "content": [
+        {"type": "text", "text": "hi"},
+        {"type": "image_url", "image_url": {"url": "data:image/png;base64," + "A" * 200000}}]}])
+    assert _est < 5000, _est
+    # 服务端拉不到图时整个请求会 400: 就地移除图片块后重发(会话上下文一并修好)
+    _bad = [{"role": "tool", "tool_call_id": "z", "content": [
+        {"type": "text", "text": "看图"},
+        {"type": "image_url", "image_url": {"url": "https://example.com/nope.png"}}]},
+        {"role": "user", "content": [
+            {"type": "text", "text": "旧会话里 tool 消息带的 data: 图片"},
+            {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}}]},
+        {"role": "tool", "tool_call_id": "y", "content": [
+            {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}}]}]
+    # 远程图片(哪里都不行) + tool 消息里的任何图片(声明服务端联网工具时只许 text)都移除;
+    # user 消息里的 data: 图片保留
+    assert bot2._drop_bad_images(_bad) == 2, _bad
+    assert _bad[0]["content"][1]["type"] == "text" and "加载失败" in _bad[0]["content"][1]["text"]
+    assert _bad[1]["content"][1]["type"] == "image_url", "user 消息里的 data: 图片不应被移除"
+    assert _bad[2]["content"][0]["type"] == "text", "tool 消息里的图片要移除"
+    assert bot2._drop_bad_images(_bad) == 0, "已修过的不再重复计数"
+    # 本地取图(只给不认 http 图片地址的模型): 文件头认格式 + SSRF 闸 + 体积上限
+    _png_path = Path("/tmp/viktor-img-test.png")
+    render.write_png(_png_path, [[(200, 60, 60, 255)] * 8 for _ in range(4)])
+    _png_bytes = _png_path.read_bytes()
+    assert websearch.sniff_image_mime(_png_bytes) == "image/png"
+    assert websearch.sniff_image_mime(b"<html>no</html>") == ""
+    for _u, _hint in (("file:///etc/passwd", "http"), ("http://127.0.0.1/a.png", "内网")):
+        try:
+            websearch.fetch_image(_u)
+            assert False, f"{_u} 应被拒"
+        except websearch.SearchError as _e:
+            assert _hint in str(_e), _e
+
+    class _ImgHandler(http.server.BaseHTTPRequestHandler):
         def do_GET(self):
-            if self.path == "/logo.png":
-                body, code, ctype = _png_bytes, 200, "image/png"
+            if self.path == "/ok.png":
+                body, ctype = _png_bytes, "image/png"
             elif self.path == "/page.html":
-                body, code, ctype = _html, 200, "text/html; charset=utf-8"
+                body, ctype = b"<html>not an image</html>", "text/html"
             else:
-                body, code, ctype = b"<title>Not Found</title>no such file", 404, "text/html"
-            self.send_response(code)
+                body, ctype = _png_bytes * 200, "image/png"
+            self.send_response(200)
             self.send_header("Content-Type", ctype)
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
@@ -1969,72 +2089,77 @@ def self_test():
         def log_message(self, *a):
             pass
 
-    _srv = http.server.HTTPServer(("127.0.0.1", 0), _UrlHandler)
-    threading.Thread(target=_srv.serve_forever, daemon=True).start()
-    _base = f"http://127.0.0.1:{_srv.server_address[1]}"
+    _srv2 = http.server.HTTPServer(("127.0.0.1", 0), _ImgHandler)
+    threading.Thread(target=_srv2.serve_forever, daemon=True).start()
+    _base2 = f"http://127.0.0.1:{_srv2.server_address[1]}"
     try:
-        _txt, _img = webfetch.read(_base + "/logo.png", allow_private=True)
-        assert "200" in _txt and "PNG" in _txt and "12×6" in _txt, _txt
-        assert _img and _img[0] == "image/png" and _img[1], _img
-        _t404, _i404 = webfetch.read(_base + "/nope.png", allow_private=True)
-        assert "404" in _t404 and "Not Found" in _t404 and _i404 is None, _t404
-        _tpage, _ipage = webfetch.read(_base + "/page.html", allow_private=True)
-        assert "测试页" in _tpage and "hello 世界" in _tpage and "bad()" not in _tpage, _tpage
-        # 默认拒绝内网(SSRF): 只回错误, 不给图
-        _tpriv, _ipriv = webfetch.read(_base + "/logo.png")
-        assert _ipriv is None and "内网" in _tpriv, _tpriv
-        assert "只支持 http/https" in webfetch.read("file:///etc/passwd")[0]
-        # 浏览器/聊天里的常见写法: 裸域名补 https://
-        assert webfetch.normalize_url("example.com/a.png。") == "https://example.com/a.png"
-        # 工具已注册, 且普通/一次性模式都能用
-        assert "read_url" in capabilities.registered_names()
-        assert {"read_url"} <= bot2._allowed_tools() and "read_url" in bot2._allowed_tools(MODE_ONESHOT)
-        # handler: 图片通过 capabilities 旁路登记(不串进文字结果)
-        orig_allow = bot2.cfg.get("read_url_allow_private", False)
-        bot2.cfg["read_url_allow_private"] = True
+        _mime, _b64 = websearch.fetch_image(_base2 + "/ok.png", allow_private=True)
+        assert _mime == "image/png" and base64.b64decode(_b64) == _png_bytes, _mime
         try:
-            capabilities.take_images()
-            _rep = bot2._tool_read_url({"url": _base + "/logo.png"})
-            _imgs = capabilities.take_images()
-            assert "已附在这条工具结果里" in _rep and len(_imgs) == 1, (_rep, _imgs)
-            assert _imgs[0]["type"] == "image_url" and _imgs[0]["image_url"]["url"].startswith("data:image/png;base64,")
-            assert capabilities.take_images() == [], "取走后应清空"
-            # 端到端: 模型调 read_url 后, tool 消息里带 image_url 块
-            if not bot2.session:
-                bot2.players.add("T")
-                bot2._start_session()
-            bot2.abort.clear()
-            bot2.soft_abort.clear()
-            _canned = iter([
-                {"role": "assistant", "content": None, "reasoning_content": "",
-                 "tool_calls": [{"id": "u1", "type": "function",
-                                 "function": {"name": "read_url",
-                                              "arguments": json.dumps({"url": _base + "/logo.png"})}}]},
-                {"role": "assistant", "content": "", "tool_calls": None},
-            ])
-            _orig_post_u = bot2._post
-            bot2._post = lambda messages, params: (next(_canned), "stop")
-            try:
-                bot2.call_api()
-            finally:
-                bot2._post = _orig_post_u
-            _tm = [m for m in bot2.session.messages
-                   if m.get("role") == "tool" and m.get("tool_call_id") == "u1"]
-            assert _tm and isinstance(_tm[0]["content"], list), _tm
-            assert any(p.get("type") == "image_url" for p in _tm[0]["content"]), _tm
-            assert _tm[0]["content"][0]["type"] == "text"
+            websearch.fetch_image(_base2 + "/page.html", allow_private=True)
+            assert False, "非图片应报错"
+        except websearch.SearchError as _e:
+            assert "不是有效图片" in str(_e), _e
+        try:
+            websearch.fetch_image(_base2 + "/big.png", allow_private=True, max_bytes=1024)
+            assert False, "超限应报错"
+        except websearch.SearchError as _e:
+            assert "上限" in str(_e), _e
+        # view_image 兜底: flash 只附 URL(服务端下载); kimi 本地取字节 -> data: URL
+        capabilities.take_images()
+        _r = capabilities.execute("view_image", json.dumps({"url": "https://example.com/logo.png"}))
+        _im = capabilities.take_images()
+        assert "已附在上下文里" in _r and _im[0]["image_url"]["url"] == \
+            "https://example.com/logo.png", (_r, _im)
+        assert capabilities.execute("view_image",
+                                    json.dumps({"url": "file:///etc/passwd"})).startswith("错误:")
+        websearch.fetch_image = lambda url, **kw: (_ for _ in ()).throw(
+            websearch.SearchError("取不到"))
+        bot2.model_alias = "kimi"
+        try:
+            _r = capabilities.execute("view_image", json.dumps({"url": "https://e.com/a.png"}))
+            assert _r.startswith("错误:") and "读不到" in _r, _r
         finally:
-            bot2.cfg["read_url_allow_private"] = orig_allow
-            capabilities.take_images()
-        # 图片不把上下文估算顶爆(base64 不算文本 token)
-        _est = Session._est_tokens([{"role": "tool", "tool_call_id": "x", "content": [
-            {"type": "text", "text": "hi"},
-            {"type": "image_url", "image_url": {"url": "data:image/png;base64," + "A" * 200000}}]}])
-        assert _est < 5000, _est
+            bot2.model_alias = "flash"
+            websearch.fetch_image = _orig_fi
+        assert capabilities.take_images() == [], "取走后应清空"
+        # kimi: 本地取字节 -> data: URL 附进用户消息(DeepSeek 接口不回图片字节)
+        websearch.fetch_image = lambda url, **kw: ("image/png", "AAAA")
+        bot2.model_alias = "kimi"
+        try:
+            _km = bot2._commit_to_context([("P", "看看 https://example.com/a.png")])
+            assert _km[0]["content"][1]["image_url"]["url"] == "data:image/png;base64,AAAA", _km
+        finally:
+            bot2.model_alias = "flash"
+            websearch.fetch_image = _orig_fi
     finally:
-        _srv.shutdown()
-        _srv.server_close()
-    print("read_url 读图/404/安全自测 OK")
+        _srv2.shutdown()
+        _srv2.server_close()
+    print("本地取图(SSRF/格式/上限)/kimi 读图自测 OK")
+
+    # 服务端联网工具的记录要原样回传: 搜索/读页的 server_tool_calls 进上下文
+    _stc = [{"index": 0, "reasoning_content": "", "calls": [
+        {"index": 0, "id": "srvtoolu_1", "type": "deepseek_read_url", "kind": "read_link",
+         "action": {"type": "read_link", "url": "https://example.com/a"},
+         "status": "completed",
+         "page": {"url": "https://example.com/a", "title": "A", "published_at": None},
+         "signature": "sig"}]}]
+    _s2 = Session(777)
+    _s2.add_assistant("看过了", server_tool_calls=_stc)
+    assert _s2.messages[0]["server_tool_calls"] == _stc
+    assert _s2.build_request_messages()[-1].get("server_tool_calls") == _stc, \
+        "回传时不能丢 server_tool_calls"
+    assert Session.compact(_s2.messages)[0] == [], "压缩只保留对话记录, 不含联网过程"
+    # 工具附上的图片消息不是对话记录: 压缩时丢弃(图片很大), 摘要输入里标成系统附图
+    _s3 = Session(778)
+    _s3.add_user("P: 看看这张图")
+    _s3.messages.append({"role": "user", "content": [
+        {"type": "text", "text": IMAGE_NOTE},
+        {"type": "image_url", "image_url": {"url": "https://example.com/logo.png"}}]})
+    _kept, _st = Session.compact(_s3.messages)
+    assert [m["content"] for m in _kept] == ["P: 看看这张图"], _kept
+    assert "系统附上的图片" in Session.transcript(_s3.messages)
+    print("server_tool_calls 回传/图片消息压缩自测 OK")
 
     # 施工台账 + 会话历史: 写入时机/查询/定位读, 全部只碰 /tmp
     from datetime import datetime as _dt, timedelta as _td

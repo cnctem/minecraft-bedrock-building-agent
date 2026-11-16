@@ -121,19 +121,28 @@ BDS 重启后 screen 日志设置会失效，必须重新执行 run.sh 或重启
 
 备份依赖系统 `7z`，通过 `save hold → 7z → save resume` 完成。不要直接复制正在写入的 `worlds/`。
 
-## 7. Wiki 与 URL
+## 7. 联网搜索与抓取
 
 | 键 | 说明 |
 |---|---|
-| `wiki_default_lang` | 默认 zh，可选 en |
-| `wiki_timeout_sec` | Wiki 请求超时，默认 15 秒 |
-| `wiki_max_chars` | 单次 Wiki 正文结果上限，默认 12000 |
-| `wiki_user_agent` | Wiki 请求 UA，也可供 read_url 沿用 |
-| `read_url_timeout_sec` | URL 请求超时，默认 20 秒 |
-| `read_url_max_bytes` | 下载体积上限，默认 4194304（4 MiB） |
-| `read_url_max_chars` | 网页/文本摘要默认上限，示例 1500 |
-| `read_url_allow_private` | 是否允许内网/回环地址；默认 false，非必要不要打开 |
-| `read_url_user_agent` | URL 请求 UA；留空使用默认/继承口径 |
+| `web_search_count` | 单次搜索返回条数，默认 8（工具侧上限 20） |
+| `web_search_timeout_sec` | Search/Fetch 请求超时，默认 30 秒 |
+| `web_search_max_chars` | 单次结果（搜索列表 / 网页正文）返回上限，默认 12000 |
+| `web_search_api_base` | 可选：搜索/抓取接口 Base URL，留空用顶层 `api_base`（DeepSeek） |
+| `web_search_api_key` | 可选：搜索/抓取接口 key，留空用顶层 `api_key` |
+| `image_fetch_timeout_sec` | 本地取图超时，默认 15 秒（只给不认 http 图片地址的模型用） |
+| `image_fetch_max_bytes` | 本地取图体积上限，默认 4194304（4 MiB），超过就不附图 |
+| `image_fetch_allow_private` | 本地取图是否允许内网/回环地址；默认 false，非必要不要打开 |
+
+默认模型走 DeepSeek 原生联网（请求 `tools` 里的 `deepseek_web_search` / `deepseek_read_url`，
+服务端执行），**不读这些键**；它们只在切到别家模型、同名工具退化成函数工具时使用。
+模型是否原生联网由 `models.native_web_tools()` 判定（Base URL 是 DeepSeek 即为真，
+也可在模型档案里显式写 `web_tools: true/false`）。
+
+玩家发的图片直链是否直接附给模型，由 `models.remote_image_url()` 判定（DeepSeek 支持 http 图片地址，
+Kimi 只认 `data:` URL），同样可在模型档案里写 `remote_image_url: true/false` 覆盖。
+为真的模型只附 URL（服务端下载）；为假的模型由 `websearch.fetch_image()` 在本地取一次字节转 base64
+（DeepSeek 的接口不回图片字节，这是唯一办法），受上面三个 `image_fetch_*` 限制，取不到就不附图。
 
 ## 8. 环境变量与命令行
 

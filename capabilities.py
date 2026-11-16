@@ -114,7 +114,7 @@ BUS_BATCH_MAX = 8         # 一次下发给服务端的 bus 请求上限(保护�
 # - bus: 服务端请求总线, 同批合并成一次下发;
 # - serial: 有副作用/有顺序依赖/非线程安全, 逐个按数组顺序执行; 它天然是屏障——
 #   前后不会与它并发, 保证"先写后读"这类顺序语义不被并行打乱。
-# 由此, HTTP 查询(wiki)与只读查询默认并行; MC 指令/改状态/写记忆在执行端排队。
+# 由此, HTTP 查询(联网搜索/读网页)与只读查询默认并行; MC 指令/改状态/写记忆在执行端排队。
 _CONCURRENCY: dict[str, str] = {
     "update_memory": "serial",
     "stay_silent": "serial",
@@ -178,21 +178,26 @@ def _blocked_tools() -> set:
 
 # ---------- 工具产出的图片 ----------
 # handler 只能返回字符串(execute 会 str()), 图片走这条旁路: handler 调 add_image(),
-# bot_agent 执行完一次工具调用后 take_images(), 把图片块和文字一起放进 tool 消息
-# (OpenAI 的 image_url 内容块; 与 pi 的 ImageContent 是同一套思路)。
+# bot_agent 执行完一次工具调用后 take_images(), 把图片块作为一条追加的用户消息附在
+# tool 响应之后(tool 消息只能放 text; 见 constants.IMAGE_NOTE)。
 MAX_PENDING_IMAGES = 4          # 一次工具结果最多附几张, 防止模型一口气刷爆上下文
 _IMAGES_LOCK = threading.Lock()
 _PENDING_IMAGES: list[dict] = []
 
 
-def add_image(data_b64: str, mime: str) -> bool:
-    """登记一张要附给模型的图片(base64)。超过上限返回 False(只保留文字)。"""
+def add_image_block(part: dict) -> bool:
+    """登记一个现成的 image_url 内容块(URL 或 data:)。超过上限返回 False(只保留文字)。"""
     with _IMAGES_LOCK:
         if len(_PENDING_IMAGES) >= MAX_PENDING_IMAGES:
             return False
-        _PENDING_IMAGES.append({"type": "image_url",
-                                "image_url": {"url": f"data:{mime};base64,{data_b64}"}})
+        _PENDING_IMAGES.append(part)
         return True
+
+
+def add_image(data_b64: str, mime: str) -> bool:
+    """登记一张要附给模型的图片(base64)。超过上限返回 False(只保留文字)。"""
+    return add_image_block({"type": "image_url",
+                            "image_url": {"url": f"data:{mime};base64,{data_b64}"}})
 
 
 def take_images() -> list[dict]:

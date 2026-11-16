@@ -10,7 +10,7 @@ import time
 
 import capabilities
 
-from . import ledger, models, paths
+from . import ledger, models, paths, websearch
 from .bridge import ScreenBridge
 from .bus import ServerBus
 from .constants import CREATIVE_MODES, MODE_NORMAL
@@ -32,16 +32,16 @@ from .schemas import (
     GET_SLICE_SCHEMA,
     INSPECT_REGION_SCHEMA,
     PIN_REGION_SCHEMA,
-    READ_WIKI_PAGE_SCHEMA,
     READ_URL_SCHEMA,
     FIND_BUILDS_SCHEMA,
     READ_BUILD_SCHEMA,
     SEARCH_HISTORY_SCHEMA,
     READ_SESSION_SCHEMA,
     RUN_COMMAND_SCHEMA,
-    SEARCH_WIKI_SCHEMA,
     SEND_CHAT_SCHEMA,
     SET_MODE_SCHEMA,
+    VIEW_IMAGE_SCHEMA,
+    WEB_SEARCH_SCHEMA,
 )
 from .session import OneShotContext, Session, memory_note
 
@@ -98,12 +98,15 @@ class BotCoreMixin:
                              self._tool_render_region, concurrency="bus")
         capabilities.register("pin_region", PIN_REGION_SCHEMA, self._tool_pin_region,
                              concurrency="serial")
-        capabilities.register("search_wiki", SEARCH_WIKI_SCHEMA, self._tool_search_wiki,
-                             concurrency="parallel")
-        capabilities.register("read_wiki_page", READ_WIKI_PAGE_SCHEMA, self._tool_read_wiki_page,
-                             concurrency="parallel")
-        capabilities.register("read_url", READ_URL_SCHEMA, self._tool_read_url,
-                             concurrency="parallel")
+        # 联网: DeepSeek 原生联网时这两个名字以服务端工具声明(见 _build_payload),
+        # 本地不注册 handler; 切到别家模型时才作为函数工具暴露, 走 DeepSeek 的搜索/抓取接口。
+        capabilities.register("deepseek_web_search", WEB_SEARCH_SCHEMA,
+                             self._tool_web_search, concurrency="parallel")
+        capabilities.register("deepseek_read_url", READ_URL_SCHEMA,
+                             self._tool_read_url, concurrency="parallel")
+        # 兜底: 图片直链通常由 _commit_to_context 自动附上; 这个工具只给"没自动附上"的场合用。
+        capabilities.register("view_image", VIEW_IMAGE_SCHEMA,
+                             self._tool_view_image, concurrency="parallel")
         capabilities.register("find_builds", FIND_BUILDS_SCHEMA,
                              self._tool_find_builds, concurrency="parallel")
         capabilities.register("read_build", READ_BUILD_SCHEMA,
@@ -301,13 +304,46 @@ class BotCoreMixin:
             self.cv.notify()
 
     def _commit_to_context(self, msgs: list[tuple[str, str]]) -> list[dict]:
-        """把一批玩家消息按顺序写入会话上下文, 返回对应的 user 消息(供当前请求追加)。"""
+        """把一批玩家消息按顺序写入会话上下文, 返回对应的 user 消息(供当前请求追加)。
+
+        玩家贴的**图片直链**(.png/.jpg/.jpeg/.gif/.webp)直接作为 image_url 内容块附在那条
+        用户消息里, 分两条路:
+        - DeepSeek(models.remote_image_url 为真): 只附 URL, 由模型服务端自己下载(原生视觉);
+        - 别家模型(Kimi 只认 data: URL): 本地取一次字节转 base64 —— DeepSeek 的接口不回图片
+          字节, 这是唯一能把它给 Kimi 看的办法; 取不到就不附图, 模型会如实说看不到。
+        服务端拉不到图会让整个请求 400, bot_agent._drop_bad_images() 会就地移除并告知模型。"""
         out = []
         for player, content in msgs:
             text = f"{player}: {content}"
-            self.session.add_user(text)
-            out.append({"role": "user", "content": text})
+            parts = [p for p in (self._image_part(u) for u in websearch.image_urls(content)) if p]
+            if parts:
+                msg = {"role": "user",
+                       "content": [{"type": "text", "text": text}] + parts}
+                self.session.messages.append(msg)
+            else:
+                self.session.add_user(text)
+                msg = {"role": "user", "content": text}
+            out.append(msg)
         return out
+
+    def _image_part(self, url: str) -> dict | None:
+        """把一个图片地址变成 image_url 内容块; 取不到返回 None。
+
+        - DeepSeek(models.remote_image_url 为真): 只附 URL, 由模型服务端自己下载(原生视觉);
+        - 别家模型(Kimi 只认 data: URL): 本地取一次字节转 base64 —— DeepSeek 的接口不回
+          图片字节, 这是唯一能把它给 Kimi 看的办法。本地取图带 SSRF 闸与体积上限。"""
+        if models.remote_image_url(self._model_spec()):
+            return {"type": "image_url", "image_url": {"url": url}}
+        try:
+            mime, b64 = websearch.fetch_image(
+                url,
+                timeout=float(self.cfg.get("image_fetch_timeout_sec", 15)),
+                max_bytes=int(self.cfg.get("image_fetch_max_bytes", 4 * 1024 * 1024)),
+                allow_private=bool(self.cfg.get("image_fetch_allow_private", False)))
+        except websearch.SearchError as e:
+            log(f"[图片] {url} 本地取图失败, 不附图: {e}")
+            return None
+        return {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{b64}"}}
 
     def _take_pending_mid_task(self) -> list[tuple[str, str]]:
         """安全点: 取走任务进行中到达的新消息, 交给当前 Agent 循环即时纳入。"""

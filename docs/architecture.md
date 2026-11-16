@@ -67,8 +67,7 @@ bot.py（入口） → viktor.selftest（--test）
 | `viktor/prompts.py` / `viktor/schemas.py` / `viktor/constants.py` | 提示词 / 工具 schema / 正则、控制词与协议常量 |
 | `viktor/history.py` | 施工台账查询（作品聚合）与会话历史的定位读取 |
 | `viktor/ledger.py` | 施工台账：写 episode/批次事件、聚合、历史回填 |
-| `viktor/wiki.py` | Minecraft Wiki 搜索、页面解析与配方/表格文本化 |
-| `viktor/webfetch.py` | URL 读取、SSRF 防护、网页正文与图片处理 |
+| `viktor/websearch.py` | DeepSeek Search & Fetch 接口的薄客户端（默认模型不用它：走服务端联网工具） |
 | `viktor/selftest.py` | 标准库自测入口 |
 | `capabilities.py` | 能力注册表、ptc 调度、记忆、技能书、物品速查 |
 | `behavior_pack/viktor_bridge/` | BDS 行为包唯一源码，负责聊天桥、空间查询与建造执行 |

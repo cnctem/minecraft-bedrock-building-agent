@@ -11,6 +11,7 @@ from pathlib import Path
 import capabilities
 
 from . import paths
+from .constants import IMAGE_NOTE_TAG
 from .paths import log
 from .prompts import SYSTEM_PROMPT
 
@@ -27,8 +28,9 @@ def _clip_chars(text: str, limit: int) -> str:
     return text if len(text) <= limit else text[:limit] + "…"
 
 
-# tool 消息的 content 可能是字符串, 也可能是 [{type:text}, {type:image_url}] 块数组
-# (read_url 读到的图片)。图片按 provider 的计费口径粗估成固定 token, 绝不数 base64。
+# 消息的 content 可能是字符串, 也可能是 [{type:text}, {type:image_url}] 块数组
+# (工具附上的图片以追加用户消息的形式存在, 旧会话的 tool 消息里也可能还有)。
+# 图片按 provider 的计费口径粗估成固定 token, 绝不数 base64。
 IMAGE_TOKEN_EST = 1200
 
 
@@ -47,12 +49,27 @@ class Session:
     def add_user(self, content: str):
         self.messages.append({"role": "user", "content": content})
 
-    def add_assistant(self, content: str):
-        self.messages.append({"role": "assistant", "content": content})
+    def add_assistant(self, content: str, server_tool_calls: list | None = None):
+        """写回一条 assistant 消息。server_tool_calls 是 DeepSeek 服务端联网工具的调用记录
+        (搜索/读页), 接口要求原样回传才能让读过的页面继续留在上下文里。"""
+        msg = {"role": "assistant", "content": content}
+        if server_tool_calls:
+            msg["server_tool_calls"] = server_tool_calls
+        self.messages.append(msg)
 
     def add_system(self, content: str):
         """追加一条系统注记(长期记忆/模式切换等)。只追加, 不改前缀。"""
         self.messages.append({"role": "system", "content": content})
+
+    @staticmethod
+    def _text_of(content) -> str:
+        """只取内容块里的文本(丢掉图片块), 用于压缩/摘要。"""
+        if isinstance(content, str):
+            return content
+        if not isinstance(content, list):
+            return ""
+        return "\n".join(str(p.get("text") or "") for p in content
+                          if isinstance(p, dict) and p.get("type") == "text").strip()
 
     @staticmethod
     def _content_text(content) -> str:
@@ -206,6 +223,16 @@ class Session:
             m = messages[i]
             role = m.get("role")
             if role == "user":
+                # 带图片的用户消息: 图片本体很大(data: 可达几百 KB), 压缩只留文字。
+                # 工具附图那条系统消息(IMAGE_NOTE)整条丢弃; 玩家消息保留文字部分。
+                content = m.get("content")
+                if isinstance(content, list):
+                    text = Session._text_of(content)
+                    i += 1
+                    if text and not text.startswith(IMAGE_NOTE_TAG):
+                        out.append({"role": "user", "content": text})
+                        kept_user += 1
+                    continue
                 out.append(m)
                 kept_user += 1
                 i += 1
@@ -282,7 +309,15 @@ class Session:
             if role == "system":
                 continue
             if role == "user":
-                lines.append("玩家: " + (m.get("content") or ""))
+                content = m.get("content")
+                if isinstance(content, list):
+                    text = Session._text_of(content)
+                    if text.startswith(IMAGE_NOTE_TAG):
+                        lines.append("系统附上的图片(略)")
+                        continue
+                    lines.append("玩家: " + text)
+                    continue
+                lines.append("玩家: " + (content or ""))
                 continue
             if role == "tool":
                 lines.append("结果: " + _clip_chars(cls._content_text(m.get("content")),

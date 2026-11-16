@@ -12,7 +12,11 @@
 思考强度映射: 模式只产出三档硬编码值 low/high/max(见 profiles.EFFORT_KEYS),
 模型档案用 effort_param + effort_map 决定"发哪个字段、值映射成什么"。
 映射到 None 表示该档不传这个字段。
+
+联网能力: DeepSeek 的接口原生支持联网工具(deepseek_web_search / deepseek_read_url), 由
+native_web_tools() 判定; 别家模型没有这类工具, 退回同名函数工具(实现见 websearch.py)。
 """
+import urllib.parse
 
 DEFAULT_MODEL = "flash"  # 普通「清空」与进服自动开新会话用的模型
 
@@ -36,7 +40,7 @@ _DEFAULT_BEHAVIOR = {
     "effort_param": "effort",
     "effort_map": {"low": "low", "high": "high", "max": "max"},
     "reasoning_content": True,  # 带 tool_calls 的 assistant 要不要回传思考链
-    "vision": True,             # 能不能收图片内容块(render_build/render_region/read_url 会附)
+    "vision": True,             # 能不能收图片内容块(渲染图 / 玩家发的图片直链会附)
     "temperature": _UNSET,      # _UNSET = 按模式默认; None = 一律不传; 数字 = 固定值
 }
 
@@ -130,6 +134,34 @@ def describe(cfg: dict, alias: str | None = None) -> str:
     """一行说明: 别名/显示名/模型 ID, 用于系统提示与日志。"""
     s = spec(cfg, alias)
     return f"{s['alias']}({s.get('label') or s.get('model')})"
+
+
+def _is_deepseek_host(spec_dict: dict) -> bool:
+    """Base URL 是不是 DeepSeek 的接口(DeepSeek 扩展能力都按这个判定)。"""
+    host = (urllib.parse.urlsplit(str(spec_dict.get("api_base") or "")).hostname or "").lower()
+    return host == "deepseek.com" or host.endswith(".deepseek.com")
+
+
+def remote_image_url(spec_dict: dict) -> bool:
+    """能不能直接收 http(s) 图片地址(由模型服务端下载, 本地不取字节)。
+
+    DeepSeek 支持(见 Vision 指南的 External image URL); 实测 Kimi 只认 data: URL,
+    传 http 地址直接 400。显式写了 remote_image_url(true/false) 就听配置。"""
+    if isinstance(spec_dict.get("remote_image_url"), bool):
+        return bool(spec_dict["remote_image_url"])
+    return _is_deepseek_host(spec_dict)
+
+
+def native_web_tools(spec_dict: dict) -> bool:
+    """该模型是否原生支持 DeepSeek 的服务端联网工具(deepseek_web_search / deepseek_read_url)。
+
+    这类工具是 DeepSeek 的扩展: 声明在 tools 里, 模型自己决定何时联网, 搜索、开页与抓取
+    都在服务端完成, 客户端不执行任何工具。显式写了 web_tools(true/false) 就听配置;
+    否则看 Base URL 是不是 DeepSeek 的接口 —— 切到别家模型(kimi 等)时自动退回同名
+    函数工具(仍由 DeepSeek 的 Search/Fetch 接口提供联网能力)。"""
+    if isinstance(spec_dict.get("web_tools"), bool):
+        return bool(spec_dict["web_tools"])
+    return _is_deepseek_host(spec_dict)
 
 
 def effort_of(spec_dict: dict, effort: str) -> tuple[str | None, str | None]:

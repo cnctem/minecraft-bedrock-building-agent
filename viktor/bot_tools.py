@@ -12,7 +12,7 @@ from pathlib import Path
 
 import capabilities
 
-from . import build, history, paths, webfetch, wiki
+from . import build, history, paths, websearch
 from .bus import BusArgError, Req
 from .constants import (
     BUS_TIMEOUT_TEXT,
@@ -615,55 +615,55 @@ class BotToolsMixin:
             return err
         return self._bus_call("find_blocks", args or {})
 
-    # ---------- Minecraft Wiki 查询(HTTP, 实时抓取) ----------
-    # 定位是施工辅助: 查事实与数值(配方/掉落/生成/机制/数据值)。ID 用 find_items,
-    # 施工手法用技能书。两个工具都是纯查询, 在 ptc 里默认并行。
+    # ---------- 联网: 搜索 / 读网页 / 看图 ----------
+    # DeepSeek 的接口原生提供联网工具(服务端搜索 + 服务端抓取): 默认模型的请求直接声明
+    # deepseek_web_search / deepseek_read_url, 搜索、开页、抓取全在服务端跑, 本地一行代码都不执行
+    # (见 bot_agent._build_payload)。切到别家模型(kimi 等)时, 同名工具退化成这里的调用 ——
+    # 仍由 DeepSeek 的 Search & Fetch 接口提供能力(websearch.py), 只是改由本地发起。
+    # 玩家发的图片直链由 bot_core._commit_to_context 直接附在用户消息里(服务端下载, 本地不取字节),
+    # 所以这里没有"看图"工具。
 
-    def _wiki_lang(self, args: dict) -> str:
-        lang = (args.get("lang") or self.cfg.get("wiki_default_lang", "zh")).strip().lower()
-        return lang if lang in wiki.WIKI_SITES else "zh"
-
-    def _tool_search_wiki(self, args: dict) -> str:
-        return wiki.search(
-            args.get("query", ""),
-            lang=self._wiki_lang(args),
-            limit=args.get("limit", 8),
-            timeout=self.cfg.get("wiki_timeout_sec", 15),
-            user_agent=self.cfg.get("wiki_user_agent", ""),
+    def _tool_web_search(self, args: dict) -> str:
+        return websearch.search(
+            self.cfg,
+            str(args.get("query") or ""),
+            count=args.get("count", self.cfg.get("web_search_count", websearch.DEFAULT_COUNT)),
+            ori_question=str(args.get("ori_question") or self._search_context()),
+            max_chars=int(self.cfg.get("web_search_max_chars", websearch.DEFAULT_MAX_CHARS)),
         )
 
-    def _tool_read_wiki_page(self, args: dict) -> str:
-        return wiki.read_page(
-            args.get("title", ""),
-            section=args.get("section") or "",
-            lang=self._wiki_lang(args),
-            max_chars=self.cfg.get("wiki_max_chars", 12000),
-            timeout=self.cfg.get("wiki_timeout_sec", 15),
-            user_agent=self.cfg.get("wiki_user_agent", ""),
-        )
-
-    # ---------- 外链/读图: 玩家发来的 URL ----------
-    # 图片不走文字描述, 而是由 capabilities.add_image() 旁路登记, bot_agent 把 image_url
-    # 内容块和报告一起放进 tool 消息 —— 模型直接看图。
+    def _search_context(self) -> str:
+        """玩家最近一句话(截 128 字)作为 ori_question, 帮助搜索接口理解意图。"""
+        for m in reversed(getattr(self._session(), "messages", None) or []):
+            content = m.get("content")
+            if m.get("role") != "user" or not isinstance(content, str):
+                continue  # 内容块数组是系统附的图片消息, 不是玩家原话
+            return content.split(":", 1)[-1].strip()[:128]
+        return ""
 
     def _tool_read_url(self, args: dict) -> str:
-        report, image = webfetch.read(
+        return websearch.fetch(
+            self.cfg,
             str(args.get("url") or ""),
-            timeout=float(self.cfg.get("read_url_timeout_sec", webfetch.DEFAULT_TIMEOUT)),
-            max_bytes=int(self.cfg.get("read_url_max_bytes", webfetch.DEFAULT_MAX_BYTES)),
-            max_chars=int(args.get("max_chars") or self.cfg.get("read_url_max_chars",
-                                                          webfetch.DEFAULT_MAX_CHARS)),
-            allow_private=bool(self.cfg.get("read_url_allow_private", False)),
-            user_agent=str(self.cfg.get("read_url_user_agent")
-                           or self.cfg.get("wiki_user_agent") or ""),
+            max_chars=int(args.get("max_chars")
+                          or self.cfg.get("web_search_max_chars", websearch.DEFAULT_MAX_CHARS)),
         )
-        if image is not None:
-            mime, b64 = image
-            if capabilities.add_image(b64, mime):
-                report += "\n[图片] 已附在这条工具结果里。"
-            else:
-                report += "\n[图片] 本次附带的图片太多, 这张没有附上; 需要就分批读取。"
-        return report
+
+    def _tool_view_image(self, args: dict) -> str:
+        """兜底: 把指定图片附进上下文。直链通常已自动附上, 这里只处理"没自动附上"的场合。"""
+        url = websearch.normalize_url(str(args.get("url") or ""))
+        if not url:
+            return "错误: 需要图片地址。"
+        if not url.lower().startswith(("http://", "https://")):
+            return "错误: 只支持 http/https 图片地址。"
+        part = self._image_part(url)
+        if part is None:
+            return (f"错误: 读不到 {url} 这张图(地址不是有效图片或无法访问); "
+                    "如实告诉玩家图片没加载出来, 不要描述画面。")
+        if not capabilities.add_image_block(part):
+            return "错误: 本次附带的图片太多, 这张没有附上; 需要就分批看图。"
+        return (f"[图片] {url} 已附在上下文里(系统在工具结果之后补一条消息), 直接看图。"
+                "游戏聊天栏显示不了图片, 用一两句话把主体/颜色/文字转述给玩家。")
 
     # ---------- 施工台账 / 会话历史(只读查询, 不恢复会话) ----------
 
