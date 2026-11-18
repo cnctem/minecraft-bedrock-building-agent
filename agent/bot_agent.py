@@ -88,7 +88,7 @@ class BotAgentMixin:
             return f"{sec // 60} 分钟前"
         return f"{sec / 3600:.1f} 小时前"
 
-    # ---------- 对话状态(判断“该不该接话”的依据) ----------
+    # ---------- 最近发言事实(不附带接话规则) ----------
 
     def _describe_dialog(self, player: str, now: float) -> str:
         entry = self._dialog.get(player)
@@ -97,16 +97,10 @@ class BotAgentMixin:
         ts, asked = entry
         age = now - ts
         q = "那次有提问" if asked else "那次没提问"
-        win = self.dialog_window_sec
-        if age > win:
-            span = f"{int(win // 60)} 分钟" if win >= 60 else f"{int(win)} 秒"
-            return (f"- 你对 {player} 最后一次发言: {self._fmt_ago(age)}, {q}"
-                    f"(已超出 {span}的对话窗口)")
         return f"- 你对 {player} 最后一次发言: {self._fmt_ago(age)}, {q}"
 
     def _dialog_note(self, batch: list[tuple[str, str]]) -> str:
-        """回合开头的「对话状态」注记: 玩家不带称呼时该不该接话, 靠这份事实记录判断,
-        而不是靠模型自己从长上下文里猜多久以前说过话。只追加、不改旧消息 -> 前缀缓存不受影响。"""
+        """追加时间、在线玩家和最近发言事实，接话偏好由上下文与长期记忆表达。"""
         now = time.time()
         senders = list(dict.fromkeys(p for p, _ in batch))
         online = sorted(self.players)
@@ -118,21 +112,15 @@ class BotAgentMixin:
                  + (f": {', '.join(online[:8])}" if online else "")]
         for p in senders:
             lines.append(self._describe_dialog(p, now))
-        # 顺带列出最近跟其他人聊过谁, 方便判断“这句话是不是在对别人说”
+        # 顺带列出最近跟其他人聊过谁，供模型参考。
         others = [p for p, _ in sorted(self._dialog.items(), key=lambda kv: -kv[1][0])
                   if p not in senders][:2]
         for p in others:
-            entry = self._dialog.get(p)
-            if entry and now - entry[0] <= self.dialog_window_sec:
-                lines.append(self._describe_dialog(p, now))
-        if not any((self._dialog.get(p) and now - self._dialog[p][0] <= self.dialog_window_sec)
-                   for p in senders):
-            lines.append("- 你和说话的玩家之间没有正在进行的对话: 没明确叫你时保持沉默。")
+            lines.append(self._describe_dialog(p, now))
         return "\n".join(lines)
 
     def _update_dialog(self, audience: set[str], spoken: list[str], spoke: bool) -> None:
-        """回合结束后更新对话状态。说过话 -> 记下对谁说过、结尾是否提问;
-        保持沉默 -> 与这批玩家的连续对话就此断开(不能拿几分钟前的话当“还在聊”)。"""
+        """记录实际发言；沉默不会抹去已有事实，也不改变后续接话资格。"""
         if self._oneshot():
             return
         now = time.time()
@@ -142,16 +130,11 @@ class BotAgentMixin:
             asks = any(self._asks_question(t) for t in spoken)
             for p in (who or set(self.players)):
                 self._dialog[p] = (now, asks)
-        else:
-            for p in who:
-                self._dialog.pop(p, None)
-        # 太久远的记录顺手清掉, 防止随在线玩家数无限增长
-        keep = max(self.dialog_window_sec * 4, 900)
-        self._dialog = {p: v for p, v in self._dialog.items() if now - v[0] <= keep}
+        # 清理陈旧的辅助记录以控制体积；完整历史仍在会话中，不据此判定是否接话。
+        self._dialog = {p: v for p, v in self._dialog.items() if now - v[0] <= 900}
 
     def _seed_dialog_from(self, msgs: list[dict], at: float) -> None:
-        """恢复会话时从历史里找回最近一次“对谁说过话”, 免得重启后把正在对话误判成冷启动。
-        会话里没有逐条时间戳, 用落盘文件的 mtime 近似; 太久之前的记录自然会超出窗口。"""
+        """恢复最近发言的对象和提问事实，时间用落盘文件的 mtime 近似。"""
         speaker, text = "", ""
         for m in msgs:
             role = m.get("role")

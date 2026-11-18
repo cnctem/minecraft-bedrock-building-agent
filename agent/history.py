@@ -209,8 +209,8 @@ def _speech(messages: list[dict]) -> list[str]:
     return out
 
 
-def _dialogue(messages: list[dict]) -> list[str]:
-    """压缩后的消息 → 逐行对话(玩家消息已带 "玩家名: " 前缀, agent发言加 "agent: ")。"""
+def _dialogue(messages: list[dict], agent_name: str = "agent") -> list[str]:
+    """压缩后的消息 → 逐行对话，助手发言使用会话记录中的名称。"""
     lines: list[str] = []
     for m in messages:
         role = m.get("role")
@@ -219,7 +219,7 @@ def _dialogue(messages: list[dict]) -> list[str]:
             if text:
                 lines.append(text)
         elif role == "assistant":
-            lines.extend("agent: " + text for text in _speech([m]))
+            lines.extend(f"{agent_name}: " + text for text in _speech([m]))
     return lines
 
 
@@ -909,7 +909,7 @@ def search_history(query: str, since: str = "", file: str = "",
             meta, messages = _load(path)
         except (HistoryError, OSError):
             continue
-        lines = _dialogue(messages)
+        lines = _dialogue(messages, str(meta.get("agent_name") or "agent"))
         for idx, text in enumerate(lines, 1):
             if needle not in text.casefold():
                 continue
@@ -958,7 +958,7 @@ def read_session(name: str, contains: str = "", around=None, window: int = 3,
     if not messages:
         return f"[会话] {path.name}\n[内容] 文件里没有对话消息(只有元信息或已损坏)。"
     kept, stats = Session.compact(messages)
-    lines = _dialogue(kept)
+    lines = _dialogue(kept, str(meta.get("agent_name") or "agent"))
     header = [
         f"[会话] {path.name} · "
         f"开始 {meta.get('started') or ledger.fmt_ts(_file_start(path, meta))} · "

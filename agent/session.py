@@ -13,7 +13,7 @@ import capabilities
 from . import paths
 from .constants import IMAGE_NOTE_TAG
 from .paths import log
-from .prompts import SYSTEM_PROMPT
+from .prompts import build_system_prompt
 
 
 def memory_note() -> str:
@@ -38,8 +38,10 @@ class Session:
     """一次会话: 从有人进服到服务器清零。上下文平时 append-only 以保证缓存命中;
     唯一的重写路径是 compact()(压缩): 只留玩家消息与游戏内发言, 有损、会打破前缀缓存。"""
 
-    def __init__(self, session_id: int):
+    def __init__(self, session_id: int, *, agent_name: str = "agent"):
         self.id = session_id
+        self.agent_name = agent_name
+        self.system_prompt = build_system_prompt(agent_name)
         self.started = datetime.now()
         self.messages: list[dict] = []  # 不含 system
         self.replied_count = 0
@@ -380,11 +382,11 @@ class Session:
         return ""
 
     def build_request_messages(self) -> list[dict]:
-        """全局常量 system 前缀 + append-only 日志, 不做任何裁剪。
+        """实例固定的 system 前缀 + append-only 日志, 不做任何裁剪。
         模式行为与动态数值都在日志里的系统注记中, 所以切模式/更新记忆只追加尾部,
         前缀不变。裁剪会破坏缓存前缀, 且从 assistant(tool_calls)/tool 中间切开会产生
         孤立 tool 消息, 导致 API 400。"""
-        return [{"role": "system", "content": SYSTEM_PROMPT}] \
+        return [{"role": "system", "content": self.system_prompt}] \
             + self._sanitize(self.messages)
 
     def has_conversation(self) -> bool:
@@ -402,9 +404,10 @@ class Session:
         directory.mkdir(parents=True, exist_ok=True)
         name = self.started.strftime(f"{tag}-%Y%m%d-%H%M%S") + f"-s{self.id}.jsonl"
         with open(directory / name, "w", encoding="utf-8") as f:
-            # 首行元信息不属于消息，记录会话编号和开始时间。
+            # 首行元信息不属于消息，记录会话编号、发言名称和开始时间。
             # 读会话时按 "_meta" 键跳过这一行(见 bot_control.resume_session)。
             f.write(json.dumps({"_meta": {"session": self.id,
+                                          "agent_name": self.agent_name,
                                           "started": self.started.isoformat(timespec="seconds")}},
                                ensure_ascii=False) + "\n")
             for m in self.messages:
@@ -415,10 +418,10 @@ class Session:
 class OneShotContext:
     """一次一次性对话的独立上下文。与主对话完全隔离, 可多个并发。"""
 
-    def __init__(self, oid: int, player: str, content: str):
+    def __init__(self, oid: int, player: str, content: str, *, agent_name: str = "agent"):
         self.id = oid
         self.player = player
         self.content = content
         self.abort = threading.Event()       # 单独中止这一个(目前只有全局 "1 强制停止" 会置位)
         self.soft_abort = threading.Event()
-        self.session = Session(oid)          # ephemeral: 结束后落盘到 logs/oneshot/, 不进主会话
+        self.session = Session(oid, agent_name=agent_name)  # 隔离上下文，结束后落盘到 logs/oneshot/

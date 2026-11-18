@@ -300,7 +300,7 @@ class BotControlMixin:
             log(f"=== 会话 #{old.id} 结束(压缩留档: 保留玩家消息 {stats['kept_user']} 条、"
                 f"发言 {stats['kept_speech']} 条, 移除 {stats['dropped']} 条过程记录) ===")
         self.session_counter += 1
-        self.session = Session(self.session_counter)
+        self.session = Session(self.session_counter, agent_name=self.agent_name)
         self.session.messages = msgs
         self._context_warn_level = 0  # 压缩后上下文变短, 占用提醒档位复位
         self._smart_compact_auto_failed = False  # 刚压过, 重新允许自动智能压缩
@@ -340,9 +340,9 @@ class BotControlMixin:
                 continue
             m.setdefault("reasoning_content", "")
         self.session_counter += 1
-        self.session = Session(self.session_counter)
+        self.session = Session(self.session_counter, agent_name=self.agent_name)
         self.session.messages = msgs
-        # 重启后别把“正在对话”误判成冷启动: 从历史里找回最近一次对谁说过话(时间用 mtime 近似)
+        # 从历史里找回最近发言对象和提问事实，时间用 mtime 近似。
         self._seed_dialog_from(msgs, p.stat().st_mtime)
         for m in reversed(msgs):
             if m.get("role") == "system" and (m.get("content") or "").startswith("# 当前模式: "):
@@ -463,7 +463,7 @@ class BotControlMixin:
         with self._oneshot_lock:
             self._oneshot_counter += 1
             oid = self._oneshot_counter
-            ctx = OneShotContext(oid, name, body)
+            ctx = OneShotContext(oid, name, body, agent_name=self.agent_name)
             self._active_oneshots[oid] = ctx
         self._tls.oneshot = True
         self._tls.abort = ctx.abort

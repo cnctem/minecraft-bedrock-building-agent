@@ -13,8 +13,9 @@ from .paths import log
 class ScreenBridge:
     """通过 screen 与服务器控制台交互。"""
 
-    def __init__(self, session: str):
+    def __init__(self, session: str, agent_name: str = "agent"):
         self.session = session
+        self.agent_name = agent_name
 
     def send_command(self, cmd: str):
         # screen 的 stuff 会解释反斜杠转义, 先把字面反斜杠转义掉, 末尾 \r 表示回车
@@ -39,9 +40,9 @@ class ScreenBridge:
         self.send_command("list")
 
     def say_as_agent(self, text: str, max_len: int, max_chunks: int, system: bool = False):
-        # 系统回执不带 <agent> 前缀(与 [正文]/[工具] 对齐), 让玩家一眼区分“系统”与“AI 发言”
+        # 系统回执使用独立标签，模型发言使用配置的名称。
         text = self._clean_chat(text)
-        prefix = "§7[系统]§f " if system else "§e<agent>§f "
+        prefix = "§7[系统]§f " if system else f"§e<{self.agent_name}>§f "
         # 日志标签与游戏内前缀保持一致: 系统消息记 [系统], 而不是笼统混作 [发言]
         self._emit(text, max_len, max_chunks, prefix, "系统" if system else "发言")
 

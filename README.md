@@ -1,52 +1,107 @@
-# mc-ai-bot
+# Minecraft Bedrock Building Agent
 
-使用 DeepSeek 模型与 API 服务，在 Minecraft 基岩版服务器中完成**感知 → 规划 → 执行 → 校验 → 修复**的 Agent 闭环。
+使用 **DeepSeek** 驱动的 Minecraft 基岩版建造 Agent，让玩家通过游戏内对话完成建筑设计、施工与修复。
 
-玩家直接在游戏里提出需求，agent 通过工具读取现场、查询资料、编写受限 Python 建造程序，
-预览差异与渲染图后提交，依据校验结果修复，也可以撤销施工。运行时仅依赖 **Python 3.11+ 标准库**。
+Agent 读取真实世界中的地形与方块，结合需求和参考图片规划建筑，编写受限 Python 建造程序，
+预览差异与渲染图后提交施工，再根据实际校验结果修正，形成 **感知 → 规划 → 执行 → 校验 → 修复** 的闭环。
+
+Python 端仅依赖 **Python 3.11+ 标准库**；世界查询与建造由配套行为包执行。
+
+## 建造工作流
+
+| 阶段 | Agent 的工作 |
+|---|---|
+| 感知 | 查询玩家位置、地形高度、方块状态与区域切面，读取施工现场 |
+| 规划 | 按需加载建筑技能、查询资料，结合文字与图片确定风格、尺寸和分段方案 |
+| 执行 | 编写建造程序，检查预览差异与渲染图，再提交到世界 |
+| 校验 | 重新读取施工区域，区分方块不匹配与区域未加载 |
+| 修复 | 根据校验结果调整程序、补齐遗漏并复检，或撤销建造操作 |
+
+建造引擎使用 **preview → commit → verify → undo** 流程：预览不写世界，提交时重新计算差异，
+写入后自动校验，并保存施工前的数据供撤销。细节见[建造引擎](docs/build-engine.md)。
 
 ## 能力
 
-- 自然对话、任务中插话、软停止与强制停止。
-- 普通、创造、创造 max，以及隔离的一次性对话。
-- 长期记忆、append-only 上下文、自动智能压缩与会话恢复。
-- DeepSeek 原生联网搜索、网页读取与视觉；支持玩家图片直链和建造渲染图。
-- 玩家、方块、地形、切面及区域感知，按需加载的 9 本技能书与 216 个建筑函数。
-- 事务式建造、机器校验、修复、撤销，以及自动记录的施工台账。
+- **现场感知与视觉反馈**：查询玩家、方块、地形及区域，支持玩家图片直链、字符图与 PNG 建造渲染。
+- **建筑知识与几何构件**：按需加载 9 本技能书，调用 216 个建筑函数，覆盖建筑风格、结构、室内、景观与细节。
+- **DeepSeek 联网与推理**：使用原生联网搜索、网页读取与视觉能力，为设计和施工补充资料。
+- **可交互的任务执行**：施工中可插话调整需求，支持软停止、强制停止与分批继续。
+- **持续协作**：长期记忆、自动智能压缩、会话恢复，以及自动记录的施工台账。
+
+普通、创造、创造 max 和隔离的一次性任务分别管理工具权限与执行预算，见[运行模式](docs/modes.md)。
 
 ## 快速开始
 
-离线自测无需 API key、私人配置或 Minecraft：
+### 1. 离线自测
+
+在项目根目录执行，无需 API key、私人配置或 Minecraft 服务器：
 
 ```bash
 python3 bot.py --test
 ```
 
-部署需要 Linux、Python 3.11+、screen 和已运行的 Bedrock Dedicated Server。
-配置 DeepSeek 连接及 BDS screen 会话：
+### 2. 准备服务器与行为包
+
+部署需要 **Linux、Python 3.11+、screen、DeepSeek API key**，以及运行在 screen 中的
+**Bedrock Dedicated Server（BDS）**。
+
+按[行为包安装说明](behavior_pack/README.md)安装 `behavior_pack/agent_bridge`，
+在世界中启用行为包和所需的脚本实验能力。当前参考 BDS 版本为 **1.21.132.3**，
+行为包依赖 `@minecraft/server = 2.5.0-beta`；具体版本要求与验证方式以安装文档为准。
+
+### 3. 配置 DeepSeek 与聊天桥
+
+复制完整配置示例：
 
 ```bash
 cp config.example.json config.json
 ```
 
-填写 `api_key`；`api_base` 默认 `https://api.deepseek.com`，`model` 默认 `deepseek-flash`。
-`screen_session` 指向 BDS 会话，默认 `mc`。完整参数见[配置参考](docs/configuration.md)。
+编辑 `config.json`，核对以下字段：
 
-按[行为包说明](behavior_pack/README.md)安装 `behavior_pack/agent_bridge`，启用脚本实验能力后启动：
+| 字段 | 说明 |
+|---|---|
+| `api_key` | 填写你的 DeepSeek API key |
+| `api_base` | DeepSeek 服务地址，默认 `https://api.deepseek.com` |
+| `model` | 模型 ID，默认 `deepseek-flash` |
+| `agent_name` | Agent 的名字，默认 `agent`，可改为 `小筑` 等名称 |
+| `screen_session` | 已运行 BDS 的 screen 会话名，默认 `mc` |
+
+其余参数可先保留示例值，完整说明见[配置参考](docs/configuration.md)。
+
+### 4. 启动 Agent
+
+确认 BDS 与行为包已就绪后执行：
 
 ```bash
 ./run.sh
 
 # 或在独立 screen 会话中启动：
-screen -dmS agent bash -c 'cd /path/to/mc-ai-bot && exec ./run.sh'
+screen -dmS agent bash -c 'cd /path/to/project && exec ./run.sh'
 ```
 
-BDS screen 重建后需要重新启动 Agent，应用日志设置。
-启动、空闲重启和恢复步骤见[运行文档](docs/operations.md)。
+将 `/path/to/project` 替换为项目的实际路径。启动日志会报告行为包协议握手结果；
+握手成功后，进入游戏即可与 agent 对话。
+BDS screen 重建后需要重新启动 Agent 以应用日志设置；空闲重启、会话恢复与排查见[运行文档](docs/operations.md)。
 
 ## 游戏内使用
 
-直接与 agent 聊天，例如“agent，在我旁边设计并建造一座石桥”。
+在游戏聊天栏直接提出需求。以下示例使用默认名称 `agent`：
+
+```text
+agent，进入创造模式，在我旁边设计并建造一座中式凉亭。
+agent，把屋顶改成深色，保留现在的柱子和地基。
+agent，检查刚才的建筑，修复漏放和放错的方块。
+agent，撤销最近一次施工。
+```
+
+`agent_name` 同时用于模型身份和游戏内发言前缀，不要求必须点名才回应。
+是否接话由模型结合聊天内容、上下文和长期记忆判断；有特定接话偏好时，可在 `memory.md` 中维护。
+
+建造引擎仅在 Agent 的创造模式中开放；普通模式用于日常对话与查询。
+复杂建筑可分阶段施工，在 Agent 汇报阶段进度后回复“继续”，或补充新的要求。
+
+常用控制词：
 
 | 输入 | 作用 |
 |---|---|
@@ -61,7 +116,7 @@ BDS screen 重建后需要重新启动 Agent，应用日志设置。
 | `正文开` / `正文关` | 显示或隐藏模型正文 |
 | `工具开` / `工具关` | 显示或隐藏工具调用摘要 |
 
-控制词需要完全匹配，由程序处理。
+控制词需要完全匹配，由程序处理。一次性任务适合坐标、方块等明确查询，不开放建造引擎。
 
 ## 项目结构
 
@@ -88,4 +143,4 @@ run.sh / restart.sh            启动与空闲重启辅助
 
 ## 许可证
 
-[MIT](LICENSE) · Copyright (c) 2026 mc-ai-bot contributors
+[MIT License](LICENSE)

@@ -13,6 +13,7 @@ import capabilities
 from . import images, ledger, paths
 from .bridge import ScreenBridge
 from .bus import ServerBus
+from .config import get_agent_name
 from .constants import CREATIVE_MODES, MODE_NORMAL
 from .paths import log
 from .profiles import MODES
@@ -49,7 +50,8 @@ class BotCoreMixin:
 
     def __init__(self, cfg: dict):
         self.cfg = cfg
-        self.bridge = ScreenBridge(cfg["screen_session"])
+        self.agent_name = get_agent_name(cfg)
+        self.bridge = ScreenBridge(cfg["screen_session"], self.agent_name)
         self.bus = ServerBus(self.bridge, paths.SERVER_LOG_PATH,
                              cfg.get("bus_reader_poll_sec", 0.05))
         self.ledger = ledger.Ledger()  # 施工台账(写失败只记日志, 不影响工具)
@@ -142,10 +144,9 @@ class BotCoreMixin:
         self._smart_compact_running = False
         # 本会话自动智能压缩失败过: 不再自动重试(否则每轮都会白调一次模型)
         self._smart_compact_auto_failed = False
-        # 「对话状态」: 玩家 -> (上次对他发言的时间, 那一轮里是否提过问)。只由主 worker 读写,
-        # 用来判断玩家不带称呼的话是不是接你的话(见 prompts 的「该不该接话」)。
+        # 「对话状态」只记录发言事实，供模型参考，不决定接话资格。
+        # 玩家 -> (上次对他发言的时间, 那一轮里是否提过问)，由主 worker 读写。
         self._dialog: dict[str, tuple[float, bool]] = {}
-        self.dialog_window_sec = float(cfg.get("chat_dialog_window_sec", 180))
 
     def _busy(self) -> bool:
         """「停止状态」判定, 与「清空」/「压缩」/「恢复会话」的可执行条件一致:
@@ -210,7 +211,7 @@ class BotCoreMixin:
 
     def _start_session(self):
         self.session_counter += 1
-        self.session = Session(self.session_counter)
+        self.session = Session(self.session_counter, agent_name=self.agent_name)
         # 长期记忆作为第一条系统注记追加进日志(而不是写进固定的 system 前缀),
         # 之后每次 update_memory 再追加新注记, 前缀始终稳定。
         self.session.add_system(memory_note())

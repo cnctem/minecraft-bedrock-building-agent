@@ -633,7 +633,7 @@ def _self_test():
                 if m.get("content") == "A: 任务")
     assert (bot2.session.messages[_idx - 1].get("content") or "").startswith("# 对话状态"), \
         bot2.session.messages[_idx - 1:_idx + 1]
-    # 这一回合保持沉默: 与 A 的连续对话应断开
+    # 这一回合没有实际发言，不生成对 A 的发言记录。
     assert "A" not in bot2._dialog, bot2._dialog
     bot2.running = False
     with bot2.cv:
@@ -1685,7 +1685,7 @@ def _self_test():
     bot2.pending.clear()
     print("静默消息自测 OK")
 
-    # ===== 对话状态 / 接话判定自测 =====
+    # ===== 对话状态事实自测 =====
     # 提问识别: 问号或疑问语气收尾才算; 陈述句不算(决定"对方的短回答是不是答案")
     for q in ("要几层？", "你要用石砖吗", "从哪边开始建呢", "可以吗。", "用这个怎么样!"):
         assert bot2._asks_question(q), q
@@ -1703,37 +1703,38 @@ def _self_test():
     assert bot2._spoken_text(_tc_ptc) == "还要加屋顶吗", bot2._spoken_text(_tc_ptc)
     _saved_players = set(bot2.players)
     bot2.players = {"Tester", "Bob"}
-    # 冷启动: 注记明确说没在对话中, 并提示保持沉默
+    # 没有历史发言时只报告事实，不附带沉默或唤醒规则。
     bot2._dialog.clear()
     _note = bot2._dialog_note([("Tester", "有人吗")])
     assert _note.startswith("# 对话状态"), _note
-    assert "还没对 Tester 说过话" in _note and "保持沉默" in _note, _note
+    assert "还没对 Tester 说过话" in _note and "保持沉默" not in _note, _note
     assert "当前在线 2 人" in _note and "Bob" in _note and "Tester" in _note, _note
-    # 刚说过话且是提问: 注记给出时间与"是提问", 不再提示冷启动
+    # 刚说过话且是提问: 注记给出时间与提问事实。
     _now = time.time()
     bot2._dialog["Tester"] = (_now - 12, True)
     _note = bot2._dialog_note([("Tester", "3层")])
     assert "12 秒前" in _note and "那次有提问" in _note, _note
     assert "没有正在进行的对话" not in _note, _note
-    # 超出窗口: 标注超时, 并提示重新按冷启动(沉默)判断
-    bot2._dialog["Tester"] = (_now - bot2.dialog_window_sec - 60, False)
+    # 较早的发言仍是事实，不标记对话超时，也不要求重新唤醒。
+    bot2._dialog["Tester"] = (_now - 3600, False)
     _note = bot2._dialog_note([("Tester", "那算了")])
-    assert "已超出" in _note and "那次没提问" in _note, _note
-    assert "没有正在进行的对话" in _note, _note
-    # 回合成败: 说过话 -> 记下对谁、结尾是否提问; 保持沉默 -> 与该玩家的对话断开
+    assert "那次没提问" in _note and "对话窗口" not in _note, _note
+    assert "保持沉默" not in _note, _note
+    # 只更新实际发言；沉默不抹去最近发言事实。
     bot2._dialog.clear()
     bot2._update_dialog({"Tester"}, ["好的"], True)
     assert "Tester" in bot2._dialog and bot2._dialog["Tester"][1] is False
     # 一轮里先提问、后报进度: 仍算"提过问"(对方随后的短回答就是答案)
     bot2._update_dialog({"Tester"}, ["要几层？", "我先开工了"], True)
     assert bot2._dialog["Tester"][1] is True, bot2._dialog
+    _before_silence = bot2._dialog["Tester"]
     bot2._update_dialog({"Tester"}, [], False)
-    assert "Tester" not in bot2._dialog, bot2._dialog
+    assert bot2._dialog["Tester"] == _before_silence, bot2._dialog
     # 沉默消息(0 前缀)不走模型, 不应改变对话状态
     bot2._dialog["Tester"] = (time.time(), True)
     bot2.process_line("[2026-10-10 18:56:00:000 INFO] [Scripting] [AGENT-CHAT] Tester: 0 别理我")
     assert bot2._dialog["Tester"][1] is True, bot2._dialog
-    # 重启恢复: 从历史找回最近一次发言对象与“提过问”, 不把正在聊的玩家当冷启动
+    # 重启恢复: 从历史找回最近一次发言对象与提问事实。
     bot2._dialog.clear()
     bot2._seed_dialog_from([
         {"role": "user", "content": "Tester: 帮我建个塔"},
@@ -2014,7 +2015,7 @@ def _self_test():
                              "arguments": json.dumps(args, ensure_ascii=False)}}
 
     _rows = [
-        {"_meta": {"session": 9999, "model": "flash", "started": "2026-03-04T05:06:07"}},
+        {"_meta": {"session": 9999, "started": "2026-03-04T05:06:07"}},
         {"role": "system", "content": "# 你的长期记忆\n\n- 测试"},
         {"role": "user", "content": "Tester: 帮我看看上次的桥"},
         {"role": "assistant", "content": None, "reasoning_content": "",
@@ -2701,6 +2702,73 @@ api.set(6, 0, 0, "tall_grass")
 
 
 
+def _test_agent_identity():
+    """名称跨会话生命周期保持一致；接话偏好由记忆提供。"""
+    from .config import get_agent_name
+    from .prompts import SYSTEM_PROMPT
+
+    cfg = load_config()
+    cfg.pop("agent_name", None)
+    assert get_agent_name(cfg) == "agent"
+    assert get_agent_name({"agent_name": " 小筑 "}) == "小筑"
+    for bad in ("", " ", None, 123, [], "x" * 33, "小\n筑", "小\t筑", "§a小筑", "<小筑>"):
+        try:
+            Bot({**cfg, "agent_name": bad})
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("无效名称应在初始化时被拒绝")
+
+    named = Bot({**cfg, "agent_name": "小筑"})
+    named.players.add("Tester")
+    memory_path = TEST_DIR / "identity-memory.md"
+    preference = "只回应明确叫我的消息。"
+    memory_path.write_text(preference, encoding="utf-8")
+    with patch.object(capabilities, "MEMORY_PATH", memory_path):
+        named._start_session()
+        named.session.add_user("Tester: 帮我设计一座桥")
+        request = named.session.build_request_messages()
+        prefix = request[0]
+        assert '"小筑"' in prefix["content"]
+        assert preference not in prefix["content"] and preference in request[1]["content"]
+        assert "必须明确叫你" not in SYSTEM_PROMPT and "默认 3 分钟" not in SYSTEM_PROMPT
+        named._compact_session()
+        assert named.session.build_request_messages()[0] == prefix
+        named.session.messages.extend([
+            {"role": "assistant", "content": None, "reasoning_content": "", "tool_calls": [
+                {"id": "identity1", "type": "function", "function": {
+                    "name": "send_chat_message", "arguments": '{"text":"好的，我来设计。"}'}}]},
+            {"role": "tool", "tool_call_id": "identity1", "content": "已发送"},
+        ])
+        dump = named.session.dump()
+        assert json.loads(dump.read_text().splitlines()[0])["_meta"]["agent_name"] == "小筑"
+        assert "小筑: 好的，我来设计。" in history.read_session(dump.name)
+        assert "小筑: 好的，我来设计。" in history.search_history("好的，我来设计。")
+
+        restored = Bot({**cfg, "agent_name": "石匠"})
+        restored.resume_session(str(dump))
+        assert '"石匠"' in restored.session.build_request_messages()[0]["content"]
+        assert named.session.build_request_messages()[0] == prefix, "实例间不能互相改写身份"
+
+        seen = []
+        def oneshot_reply():
+            seen.append(named._session().build_request_messages())
+            return "已回复", True
+        named._oneshot_active = 1
+        with patch.object(named, "call_api", oneshot_reply):
+            named._run_oneshot("Tester", "坐标在哪")
+        assert seen[0][0] == prefix and preference in seen[0][1]["content"]
+
+    commands = []
+    with patch.object(named.bridge, "send_command", commands.append), patch("agent.bridge.time.sleep"):
+        named.bridge.say_as_agent("建好了", 120, 3)
+        named.bridge.say_as_agent("已清空", 120, 3, system=True)
+    payloads = [json.loads(cmd.split(" ", 2)[2])["rawtext"][0]["text"] for cmd in commands]
+    assert "<小筑>" in payloads[0] and "[系统]" not in payloads[0]
+    assert "[系统]" in payloads[1] and "<小筑>" not in payloads[1]
+    print("Agent 名称/会话隔离/记忆偏好自测 OK")
+
+
 def _test_restart_and_protocol():
     from . import runtime
     from .constants import PACK_PROTOCOL, PACK_PROTO_BUILD, PACK_PROTO_SPATIAL
@@ -2811,4 +2879,5 @@ def self_test():
         stack.enter_context(patch("urllib.request.urlopen",
                                  side_effect=AssertionError("offline self-test attempted network I/O")))
         _test_restart_and_protocol()
+        _test_agent_identity()
         _self_test()

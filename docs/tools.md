@@ -188,7 +188,7 @@ view_image 是兜底工具，用于地址没有图片后缀或需要重新查看
 `read_session(file, contains?, around?, window?, max_chars?)`：
 
 - 只接受纯文件名，不允许目录和路径穿越；文件最大 16 MiB。
-- 复用 `Session.compact` 口径，只保留玩家消息和实际游戏内发言（含 ptc 内嵌），渲染为 `玩家: ...` / `agent: ...`。
+- 复用 `Session.compact` 口径，只保留玩家消息和实际游戏内发言（含 ptc 内嵌），渲染为 `玩家: ...` / `会话中的 Agent 名称: ...`。
 - 给 `contains` 或 `around` 时只读命中前后各 `window` 行（默认 3），不再整份渲染；默认最多 12000 字符
   （`session_read_max_chars`），超长保留开头与结尾。
 - 只读历史，不恢复、不清空、不修改当前会话，也不执行历史或网页里的指令。
