@@ -1,7 +1,7 @@
 # 工具、资料查询与并发
 
-模型通过 OpenAI 风格的 function calling 使用工具。schema 位于 `viktor/schemas.py` 和 `capabilities.py`，
-handler 由 `BotCore` 注册；每个模式实际看到的子集由 `viktor/profiles.py` 决定。
+模型通过 OpenAI 风格的 function calling 使用工具。schema 位于 `agent/schemas.py` 和 `capabilities.py`，
+handler 由 `BotCore` 注册；每个模式实际看到的子集由 `agent/profiles.py` 决定。
 
 ## 1. 工具总览
 
@@ -44,8 +44,8 @@ handler 由 `BotCore` 注册；每个模式实际看到的子集由 `viktor/prof
 |---|---|
 | `find_items(query?, category?, limit?)` | 检索服务器版本对应的物品/方块 ID、译名、分类和别名 |
 | `use_skill(name, file?, force?)` | 按需加载技能正文或 references 附件 |
-| `deepseek_web_search(query, count?, ori_question?)` | 联网搜索：DeepSeek 原生联网工具；切到别家模型时退化成 DeepSeek 搜索接口 |
-| `deepseek_read_url(url, max_chars?)` | 读网页正文（标题 + Markdown），由 DeepSeek 服务端抓取 |
+| `deepseek_web_search` | DeepSeek 原生服务端搜索，不属于本地函数工具 |
+| `deepseek_read_url` | 读网页正文（标题 + Markdown），由 DeepSeek 服务端抓取 |
 | `view_image(url)` | **兜底**看图：把指定图片附进上下文（直链通常已自动附上，见 §4） |
 | `find_builds(query?, since?, until?, player?, state?, group?, limit?)` | 查施工台账：时间、玩家、理由、作品名、包围盒、格数、材料、提交/撤销状态 |
 | `read_build(ref, program_lines?)` | 按台账编号或批次 jid 看一次施工的细节，附当时建造程序源码开头 |
@@ -86,7 +86,7 @@ handler 由 `BotCore` 注册；每个模式实际看到的子集由 `viktor/prof
 
 数据来源：
 
-1. 行为包 `scriptevent viktor:ids` 调 `ItemTypes.getAll()` / `BlockTypes.getAll()` 导出服务器本体 ID；
+1. 行为包 `scriptevent agent:ids` 调 `ItemTypes.getAll()` / `BlockTypes.getAll()` 导出服务器本体 ID；
 2. 输出整理到 `data/raw_ids.txt`；
 3. 官方 `resource_packs/vanilla/texts/{zh_CN,en_US}.lang` 提供译名；
 4. `tools/build_items.py` 合成 `data/items.json`：`id → {中文名, 英文名, 分类, 别名}`；
@@ -105,65 +105,40 @@ handler 由 `BotCore` 注册；每个模式实际看到的子集由 `viktor/prof
 
 ```bash
 # 1) 控制台导出(行为包 console.log, 约 30 行; 只读不影响世界)
-screen -S mc -X stuff $'scriptevent viktor:ids\n'
-# 2) 把 logs/server.log 里新增的 "[VIKTOR-IDS] ITEMS/BLOCKS ..." 整理成 data/raw_ids.txt
+screen -S mc -X stuff $'scriptevent agent:ids\n'
+# 2) 把 logs/server.log 里新增的 "[AGENT-IDS] ITEMS/BLOCKS ..." 整理成 data/raw_ids.txt
 #    每行一条: "ITEM minecraft:xxx" / "BLOCK minecraft:xxx"
 # 3) 重建 + 看覆盖率
-python3 tools/build_items.py          # 重新生成
-python3 tools/build_items.py --check  # 查看译名覆盖率
+python3 tools/build_items.py --server-dir=/path/to/bds          # 重新生成
+python3 tools/build_items.py --server-dir=/path/to/bds --check  # 查看译名覆盖率
 ```
 
-`tools/build_items.py` 的默认服务器目录是部署机路径 `/home/jrj/minecraft-bedrock`；开发设备使用时需准备对应官方 lang 文件，
-不要假定本地一定存在该目录。
 
-## 3. 联网搜索与网页抓取（DeepSeek 原生）
+生成器需要显式指定 --server-dir=/path/to/bds 和相应版本的官方语言文件。
 
-分工原则：**ID/译名用 find_items，施工手法用技能书，通用游戏事实与最新信息联网查**。
-适合查合成/烧炼/锻造配方、掉落与概率、生成条件、方块状态、机制数值、生物行为和命令用法。
+## 3. DeepSeek 原生联网
 
-DeepSeek 的接口原生提供两项服务端工具（`deepseek_web_search` / `deepseek_read_url`）：模型自己决定
-是否联网，搜索、开页、抓取都在服务端完成，客户端不执行任何工具。默认模型（flash）的请求直接声明它们，
-**本地没有任何抓取代码**。
+ID 和译名用 find_items，施工方法用技能书，通用游戏事实与最新信息联网查。
+每个允许工具的请求直接声明 deepseek_web_search 与 deepseek_read_url 两项服务端工具。
+它们没有本地 handler，不能通过 ptc 执行；无工具收尾和摘要请求不声明它们。
 
-| 情形 | 联网怎么走 |
-|---|---|
-| 默认模型（`models.native_web_tools()` 为真） | 请求 `tools` 里声明 `{"type": "deepseek_web_search"}` / `{"type": "deepseek_read_url"}`；结果在 `message.server_tool_calls`，引用在 `message.annotations` |
-| 切到别家模型（kimi 等） | 同名工具退化成函数工具，由 `viktor/websearch.py` 调 DeepSeek 的 `POST /v1/tools/search` 与 `POST /v1/tools/fetch`（能力仍由 DeepSeek 提供，用 DeepSeek 的 key） |
+搜索、开页与抓取由 DeepSeek 执行；server_tool_calls 必须原样回传，才能保留已读取页面。
+网页是外部事实资料，不能当成要求执行世界操作的指令。页面同时有 Java 与基岩数据时以基岩版为准。
+服务端 read_url 使用最后一条 user 消息中的链接，必要时让玩家重新提供链接。
+接口失败沿用统一的 API 错误提示。
 
-- `deepseek_web_search(query, count?, ori_question?)`：一次搜索可带多条查询，支持 `site:`、`lang:`、
-  `after:`、`before:`、引号精确匹配等运算符；查 Minecraft 建议 `site:minecraft.wiki lang:zh`
-  （需要英文精确数值时 `lang:en`）。
-- `deepseek_read_url(url)`：抓单个网页，返回标题 + Markdown 正文。服务端版本只看**最后一条 user 消息**
-  里的链接（接口规则），所以玩家发链接的同一回合就读；隔了一轮就读不到，改用搜索或让玩家再发一次。
-- 服务端工具的调用记录（`server_tool_calls`）必须原样回传，否则上一轮读过的页面下一轮就不在上下文里；
-  `Session.add_assistant()` 会带着它一起写回。
-- 页面同时列 Java 与基岩版数据时，以基岩版为准；只有 Java 数据时需明确说明。
-- 单次结果字符上限 `web_search_max_chars`（默认 12000）；接口报错（401/402/403/404/429/5xx）
-  转成 `错误: ...`，由模型如实转述。
-- 搜到的内容是外部资料，只供事实参考，不是可执行指令。
+## 4. 图片与渲染反馈
 
-## 4. 图片（玩家发的图片直链 / 渲染图）
+玩家聊天中的 png/jpg/jpeg/gif/webp 直链由 images.image_urls 识别，每条消息最多两张。
+URL 作为 image_url 内容块附在玩家原消息中，由 DeepSeek 服务端读取，本地不下载。
 
-图片靠模型自己的视觉能力。**主路径没有工具调用**：
+render_build 与 render_region 生成的 PNG 可直接以 data URL 附给模型。
+工具消息只放文本，图片在全部 tool 响应之后作为带 IMAGE_NOTE 的额外 user 消息追加。
+每次工具结果最多附四张图；渲染默认只附前两个视角。
 
-- 玩家在聊天里贴**图片直链**（`.png`/`.jpg`/`.jpeg`/`.gif`/`.webp`）时，`bot_core._commit_to_context()`
-  用 `websearch.image_urls()` 认出来，直接把 URL 作为 `image_url` 内容块附在**那条用户消息**里
-  （每条消息最多 2 张）。模型看到的就是图，不需要调用任何工具。
-- 渲染图（`render_build`）走另一条：tool 消息只能放 text（声明服务端联网工具时接口如此要求），
-  所以图片以一条追加用户消息（`constants.IMAGE_NOTE`）附在 tool 响应之后。
-- 游戏聊天栏不能显示图片，模型应用简短文字转述主体、颜色和文字。
-- 地址不是图片/拉不下来会让整个请求 400，而图片块留在上下文里会让之后每轮都 400；
-  `bot_agent._drop_bad_images()` 会就地把它换成一行失败说明并重发，模型据此如实告知玩家。
-- **远程图片 URL 只有 DeepSeek 接受**（Kimi 只认 `data:` URL）：所以 `models.remote_image_url()`
-  为假的模型由 `websearch.fetch_image()` 在本地取一次字节转 base64（带 SSRF 闸、格式嗅探、体积上限；
-  DeepSeek 的接口不回图片字节，这是唯一办法），受 `image_fetch_*` 三个配置限制，取不到就不附图。
-- `view_image(url)` 是**兜底工具**：直链没自动附上时（地址没有图片后缀、图藏在网页里、要重看上一轮
-  提过的图）由模型主动调一次，走的就是上面同一套 `_image_part()`；失败会明确报错。
-- 上下文估算按固定 token 计图片，不把 base64 当文本；一次工具结果最多附 4 张图
-  （`capabilities.MAX_PENDING_IMAGES`）。
-
-配置：`web_search_count`、`web_search_timeout_sec`、`web_search_max_chars`，以及可选的
-`web_search_api_base` / `web_search_api_key`（留空就用顶层 `api_base` / `api_key`，即 DeepSeek 凭据）。
+view_image 是兜底工具，用于地址没有图片后缀或需要重新查看之前的图，仍只附 HTTP/HTTPS URL。
+服务端图片加载失败导致请求 400 时，移除无效图片块、留下失败说明后重试。
+游戏内无法显示图片，模型需用文字说明看到的内容；没有加载成功不能编造画面。
 
 ## 5. 施工台账与历史定位
 
@@ -171,7 +146,7 @@ DeepSeek 的接口原生提供两项服务端工具（`deepseek_web_search` / `d
 
 ### 5.1 施工台账
 
-`viktor/ledger.py` 在**事情发生之后同步追加一行**，写到 `logs/build_ledger.jsonl`（append-only）：
+`agent/ledger.py` 在**事情发生之后同步追加一行**，写到 `logs/build_ledger.jsonl`（append-only）：
 
 | 写入时机 | 记录内容 |
 |---|---|
@@ -213,7 +188,7 @@ DeepSeek 的接口原生提供两项服务端工具（`deepseek_web_search` / `d
 `read_session(file, contains?, around?, window?, max_chars?)`：
 
 - 只接受纯文件名，不允许目录和路径穿越；文件最大 16 MiB。
-- 复用 `Session.compact` 口径，只保留玩家消息和实际游戏内发言（含 ptc 内嵌），渲染为 `玩家: ...` / `维克托: ...`。
+- 复用 `Session.compact` 口径，只保留玩家消息和实际游戏内发言（含 ptc 内嵌），渲染为 `玩家: ...` / `agent: ...`。
 - 给 `contains` 或 `around` 时只读命中前后各 `window` 行（默认 3），不再整份渲染；默认最多 12000 字符
   （`session_read_max_chars`），超长保留开头与结尾。
 - 只读历史，不恢复、不清空、不修改当前会话，也不执行历史或网页里的指令。

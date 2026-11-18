@@ -9,7 +9,7 @@ class _LibBase:
         return (min(int(a), int(b)), max(int(a), int(b)))
 
     def jround(self, value):
-        # Java Math.round semantics (half-up), unlike Python's bankers rounding.
+        # Round halves toward positive infinity for deterministic voxel coordinates.
         return math.floor(float(value) + 0.5)
 
     # Java 版名字 / 常见误写 → 基岩版 (ID, states)。states 为 None 表示无状态。
@@ -154,7 +154,7 @@ class _LibBase:
         return default if value is None else value
 
     def hash_mix(self, key, seed):
-        # Java-compatible signed 32-bit integer hash; no random module needed.
+        # Deterministic signed 32-bit integer hash; no random module needed.
         mask = 0xffffffff
         h = (int(key) * -1640531535 + int(seed) * -2048144777) & mask
         h ^= h >> 16

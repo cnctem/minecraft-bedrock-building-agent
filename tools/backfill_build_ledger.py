@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""回填施工台账(viktor/ledger.py) —— 一次性把历史会话变成可查询的记录。
+"""回填施工台账(agent/ledger.py) —— 一次性把历史会话变成可查询的记录。
 
 台账是运行时自动写的(切创造/预览/提交/撤销各写一行), 这个脚本只负责把**台账上线之前**
 的历史补进去: 扫 logs/sessions 与 logs/oneshot 的 JSONL, 必要时用 logs/bot.log 里的
@@ -22,7 +22,7 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
 
-from viktor import build, ledger, paths  # noqa: E402
+from agent import build, ledger, paths  # noqa: E402
 
 
 def main() -> int:

@@ -2,7 +2,7 @@
 """从游戏自带的 ID 清单 + 官方语言文件, 生成物品/方块速查表 data/items.json。
 
 数据来源(全部来自服务器本体, 版本精确, 无需手工维护):
-  - `scriptevent viktor:ids` 导出的 ID 清单(见 data/raw_ids.txt, 由行为包 viktor_bridge 提供)
+  - `scriptevent agent:ids` 导出的 ID 清单(见 data/raw_ids.txt, 由行为包 agent_bridge 提供)
   - resource_packs/vanilla/texts/{zh_CN,en_US}.lang 官方译名
 
 用法:
@@ -17,7 +17,7 @@
   - 三段键: tile.red_flower.tulipWhite / tile.yellow_flower.dandelion / tile.monster_egg.brick;
   - 键名与 id 完全无关: 列入 EXACT_KEY(逐个维护), 仍查不到时按英文名反查唯一键。
 
-服务器升级后必须重导: `scriptevent viktor:ids` → 整理 data/raw_ids.txt(BDS 会改 ID 名)。
+服务器升级后必须重导: `scriptevent agent:ids` → 整理 data/raw_ids.txt(BDS 会改 ID 名)。
 """
 import json
 import re
@@ -27,7 +27,7 @@ from pathlib import Path
 BASE = Path(__file__).resolve().parent.parent
 DEFAULT_RAW = BASE / "data" / "raw_ids.txt"
 DEFAULT_OUT = BASE / "data" / "items.json"
-DEFAULT_SERVER = Path("/home/jrj/minecraft-bedrock")
+DEFAULT_SERVER = None
 ALIASES = BASE / "data" / "item_aliases.json"
 
 COLORS = ["white", "orange", "magenta", "light_blue", "yellow", "lime", "pink",
@@ -438,6 +438,9 @@ def main():
             server = Path(a.split("=", 1)[1])
         elif a.startswith("--out="):
             out = Path(a.split("=", 1)[1])
+
+    if server is None:
+        raise SystemExit("请指定 --server-dir=/path/to/bds，需包含该版本的官方语言文件")
 
     items, blocks = set(), set()
     for line in raw.read_text(encoding="utf-8").splitlines():

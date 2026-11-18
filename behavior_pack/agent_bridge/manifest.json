@@ -1,8 +1,8 @@
 {
   "format_version": 2,
   "header": {
-    "name": "Viktor Bridge",
-    "description": "\u628a\u73a9\u5bb6\u804a\u5929\u901a\u8fc7 console.log \u6865\u63a5\u7ed9 mc-ai-bot",
+    "name": "Agent Bridge",
+    "description": "把玩家聊天通过 console.log 桥接给 mc-ai-bot",
     "uuid": "2c6a2552-7f38-4494-8811-f082a8769065",
     "version": [
       1,
@@ -32,10 +32,6 @@
     {
       "module_name": "@minecraft/server",
       "version": "2.5.0-beta"
-    },
-    {
-      "module_name": "@minecraft/server-ui",
-      "version": "2.1.0-beta"
     }
   ]
 }

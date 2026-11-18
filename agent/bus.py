@@ -1,4 +1,4 @@
-"""ServerBus: 服务端请求总线(协议 v2)。同批 id 化请求一次下发, 回包按 id 路由。
+"""ServerBus: 服务端请求总线(协议 v5)。同批 id 化请求一次下发, 回包按 id 路由。
 
 依赖方向: bus → constants(BUS_ROUTE_RE); 不 import bot_*。
 """
@@ -57,7 +57,7 @@ class ServerBus:
     """服务端请求总线: 同一批 id 化请求一次下发, 回包按 id 路由。
 
     背景: bedrock_server 每 ~0.8-1.0s 才把 stdin 积压行整批读走, 逐个下发要逐个等;
-    一批一起下发只付一次轮询延迟。回包靠 [VIKTOR-*] r<id> 前缀路由(见行为包协议 v2)。
+    一批一起下发只付一次轮询延迟。回包靠 [AGENT-*] r<id> 前缀路由(见行为包协议 v5)。
     """
 
     def __init__(self, bridge, log_path: Path, reader_poll: float = 0.05):
@@ -181,4 +181,3 @@ class ServerBus:
             except Exception:
                 pass
             time.sleep(self.reader_poll)
-

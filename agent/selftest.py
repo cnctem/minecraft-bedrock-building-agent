@@ -1,11 +1,12 @@
 """全量自测: python3 bot.py --test。
 
 不连真服务器; 日志/会话/记忆全部指向 /tmp, 不污染生产文件。
-依赖方向: selftest → Bot(viktor 包) + capabilities; 仅 --test 时由入口导入。
+依赖方向: selftest → Bot(agent 包) + capabilities; 仅 --test 时由入口导入。
 """
-import base64
-import http.server
 import json
+from contextlib import ExitStack
+from tempfile import TemporaryDirectory
+from unittest.mock import patch
 import threading
 import time
 from datetime import datetime, timedelta
@@ -13,7 +14,7 @@ from pathlib import Path
 
 import capabilities
 
-from . import Bot, history, ledger, models, paths, render, websearch
+from . import Bot, history, images, ledger, paths, render
 from .bot_agent import WEB_TOOL_NAMES
 from .bridge import ScreenBridge
 from .config import load_config
@@ -29,17 +30,17 @@ from .profiles import MODES, TOOLS
 from .session import Session, memory_note
 
 
-def self_test():
+def _self_test():
     # 自测全程写临时日志, 不污染 logs/bot.log(假记录会把真实故障排查看歪)
-    paths.LOG_PATH = Path("/tmp/viktor-botlog-test.log")
+    paths.LOG_PATH = Path(str(TEST_DIR / "agent-botlog-test.log"))
     paths.LOG_PATH.write_text("", encoding="utf-8")
-    paths.SERVER_LOG_PATH = Path("/tmp/viktor-bot-serverlog-test.log")
+    paths.SERVER_LOG_PATH = Path(str(TEST_DIR / "agent-bot-serverlog-test.log"))
     paths.SERVER_LOG_PATH.write_text("", encoding="utf-8")
     # 清空=完整初始化会落盘会话, 自测也指到临时目录
-    paths.SESSION_DIR = Path("/tmp/viktor-sessions-test")
-    paths.ONESHOT_DIR = Path("/tmp/viktor-oneshot-test")
-    paths.LEDGER_PATH = Path("/tmp/viktor-ledger-test.jsonl")
-    paths.PROGRAM_DIR = Path("/tmp/viktor-programs-test")
+    paths.SESSION_DIR = Path(str(TEST_DIR / "agent-sessions-test"))
+    paths.ONESHOT_DIR = Path(str(TEST_DIR / "agent-oneshot-test"))
+    paths.LEDGER_PATH = Path(str(TEST_DIR / "agent-ledger-test.jsonl"))
+    paths.PROGRAM_DIR = Path(str(TEST_DIR / "agent-programs-test"))
     for _p in (paths.LEDGER_PATH,):
         try:
             _p.unlink()
@@ -49,7 +50,7 @@ def self_test():
     _sh.rmtree(paths.PROGRAM_DIR, ignore_errors=True)
     # 长期记忆也用临时文件: 真实 memory.md 会越长越占上下文, 让"压缩预算"这类用例
     # 随真实数据漂移(记忆一长, 压缩后仍超限 → 退化成清空 → 测试误报)。
-    _mem_tmp = Path("/tmp/viktor-memory-test.md")
+    _mem_tmp = Path(str(TEST_DIR / "agent-memory-test.md"))
     _mem_tmp.write_text("# 测试记忆\n- 无\n", encoding="utf-8")
     _mem_orig = capabilities.MEMORY_PATH
     capabilities.MEMORY_PATH = _mem_tmp
@@ -57,7 +58,7 @@ def self_test():
     samples = [
         "[2026-10-10 14:20:00:000 INFO] Player connected: TestPlayer, xuid: 12345",
         "[2026-10-10 14:20:05:000 INFO] <TestPlayer> 大家好",
-        "[2026-10-10 14:20:10:000 INFO] <TestPlayer> 维克托,介绍一下你自己",
+        "[2026-10-10 14:20:10:000 INFO] <TestPlayer> agent,介绍一下你自己",
         "[2026-10-10 14:20:15:000 INFO] <TestPlayer> 再见",
         "[2026-10-10 14:20:30:000 INFO] Player disconnected: TestPlayer, xuid: 12345, pfid: abc",
     ]
@@ -65,13 +66,13 @@ def self_test():
         bot.process_line(s)
     # 新会话生命周期: 离服(→0)不结束会话; 下次 0→1 进服才完整初始化
     # 覆盖播报, 避免自测真的往游戏里发 tellraw
-    bot.bridge.say_as_viktor = lambda text, *a, **k: None
+    bot.bridge.say_as_agent = lambda text, *a, **k: None
     assert bot.session is not None, "离服后会话应保持"
     assert bot.players == set(), "离服后玩家列表应为空"
     # 所有聊天都应入队, 是否回复由 Agent 判断
     got = [(p, c) for p, c in bot.pending]
     want = [("TestPlayer", "大家好"),
-            ("TestPlayer", "维克托,介绍一下你自己"),
+            ("TestPlayer", "agent,介绍一下你自己"),
             ("TestPlayer", "再见")]
     assert got == want, got
     sid = bot.session.id
@@ -97,18 +98,23 @@ def self_test():
     print("self-test OK:", json.dumps(got, ensure_ascii=False))
 
     # 能力测试: 记忆更新(用临时文件)
-    tmp = Path("/tmp/viktor-memory-test.md")
-    orig_path, orig_backup = capabilities.MEMORY_PATH, capabilities.MEMORY_BACKUP_DIR
+    tmp = Path(str(TEST_DIR / "agent-memory-test.md"))
+    orig_path = capabilities.MEMORY_PATH
     capabilities.MEMORY_PATH = tmp
-    capabilities.MEMORY_BACKUP_DIR = Path("/tmp/viktor-memory-backup-test")
     try:
         r = capabilities.execute("update_memory",
                                  json.dumps({"content": "# 记忆\n- 玩家喜欢石英"}, ensure_ascii=False))
         assert "已更新" in r, r
         assert capabilities.read_memory().startswith("# 记忆")
         capabilities.execute("update_memory", json.dumps({"content": "# 记忆 v2"}))
-        backups = list(capabilities.MEMORY_BACKUP_DIR.glob("memory-*.md"))
-        assert backups, "重写前应产生备份"
+        with patch("capabilities.os.replace", side_effect=OSError("simulated write failure")):
+            try:
+                capabilities.update_memory("# 未提交")
+                raise AssertionError("替换失败应保留旧记忆并抛出异常")
+            except OSError:
+                pass
+        assert capabilities.read_memory() == "# 记忆 v2"
+        assert not list(tmp.parent.glob(".memory-*")), "失败后应清理临时文件"
         r = capabilities.execute("不存在的能力", "{}")
         assert "未知能力" in r, r
         # system prompt 注入检查
@@ -147,17 +153,17 @@ def self_test():
         assert s3.messages == []
         print("上下文截断自测 OK")
     finally:
-        capabilities.MEMORY_PATH, capabilities.MEMORY_BACKUP_DIR = orig_path, orig_backup
+        capabilities.MEMORY_PATH = orig_path
         tmp.unlink(missing_ok=True)
 
     # 能力测试: 控制词“强制停止”立即中止、“停止”到安全点停止、“不停止/不清空”反悔(不走模型)
     sent = []
-    orig_say = bot2.bridge.say_as_viktor
-    bot2.bridge.say_as_viktor = lambda text, *a, **k: sent.append(text)
+    orig_say = bot2.bridge.say_as_agent
+    bot2.bridge.say_as_agent = lambda text, *a, **k: sent.append(text)
     bot2.players.add("Stopper")
     bot2.agent_busy = True
     bot2.abort.clear()
-    bot2.process_line("[2026-10-10 18:40:00:000 INFO] [Scripting] [VIKTOR-CHAT] Stopper: 强制停止")
+    bot2.process_line("[2026-10-10 18:40:00:000 INFO] [Scripting] [AGENT-CHAT] Stopper: 强制停止")
     assert bot2.abort.is_set(), "强制停止应置位中止标志"
     assert sent == ["已强制停止当前任务。"], sent
     assert not bot2.pending, "强制停止应清空待处理队列"
@@ -167,40 +173,40 @@ def self_test():
     bot2.agent_busy = False
     bot2.abort.clear()
     sent.clear()
-    bot2.process_line("[2026-10-10 18:40:05:000 INFO] [Scripting] [VIKTOR-CHAT] Stopper: 强制停止")
+    bot2.process_line("[2026-10-10 18:40:05:000 INFO] [Scripting] [AGENT-CHAT] Stopper: 强制停止")
     assert sent == ["当前没有正在执行的任务。"], sent
     assert not bot2.abort.is_set()
     # “停止”软停止: 置 soft_abort 而不动 abort, 安全点生效
     bot2.agent_busy = True
-    bot2.process_line("[2026-10-10 18:40:06:000 INFO] [Scripting] [VIKTOR-CHAT] Stopper: 停止")
+    bot2.process_line("[2026-10-10 18:40:06:000 INFO] [Scripting] [AGENT-CHAT] Stopper: 停止")
     assert bot2.soft_abort.is_set() and not bot2.abort.is_set(), "停止应只置软停止标志"
     assert "做完就停" in sent[-1], sent
     reply, spoke = bot2.call_api()
     assert "安全点" in reply and not spoke, reply
     # “不停止”: 撤销未生效的软停止, 任务继续
-    bot2.process_line("[2026-10-10 18:40:07:000 INFO] [Scripting] [VIKTOR-CHAT] Stopper: 不停止")
+    bot2.process_line("[2026-10-10 18:40:07:000 INFO] [Scripting] [AGENT-CHAT] Stopper: 不停止")
     assert not bot2.soft_abort.is_set(), "不停止应清除未生效的软停止"
     assert "已撤销" in sent[-1] and "停止" in sent[-1], sent
     # 没有未生效指令时
-    bot2.process_line("[2026-10-10 18:40:09:000 INFO] [Scripting] [VIKTOR-CHAT] Stopper: 不停止")
+    bot2.process_line("[2026-10-10 18:40:09:000 INFO] [Scripting] [AGENT-CHAT] Stopper: 不停止")
     assert sent[-1] == "当前没有尚未生效的停止指令。", sent
     bot2.agent_busy = False
     bot2.soft_abort.clear()
-    bot2.process_line("[2026-10-10 18:40:10:000 INFO] [Scripting] [VIKTOR-CHAT] Stopper: 维克托, 停止")
+    bot2.process_line("[2026-10-10 18:40:10:000 INFO] [Scripting] [AGENT-CHAT] Stopper: agent, 停止")
     assert any(p == "Stopper" for p, _ in bot2.pending), "非完全匹配应走正常流程"
     bot2.pending.clear()
-    bot2.bridge.say_as_viktor = orig_say
+    bot2.bridge.say_as_agent = orig_say
     print("停止词自测 OK")
 
     # 能力测试: “清空”只在停止状态下生效; 任务进行中清空无效(不中止、不清、不进上下文)
-    bot2.bridge.say_as_viktor = lambda text, *a, **k: sent.append(text)
+    bot2.bridge.say_as_agent = lambda text, *a, **k: sent.append(text)
     bot2.session.add_user("AAA: 先前的闲聊")
     bot2.mode = MODE_CREATIVE
     old_sid = bot2.session.id
     bot2.agent_busy = True
     bot2.abort.clear()
     sent.clear()
-    bot2.process_line("[2026-10-10 18:41:00:000 INFO] [Scripting] [VIKTOR-CHAT] 路人甲: 清空")
+    bot2.process_line("[2026-10-10 18:41:00:000 INFO] [Scripting] [AGENT-CHAT] 路人甲: 清空")
     assert not bot2.abort.is_set(), "任务进行中清空不应中止任务"
     assert bot2.session.id == old_sid and bot2.session.messages, "任务进行中不应清空"
     assert sent and "清空无效" in sent[0], sent
@@ -209,14 +215,14 @@ def self_test():
     bot2.session.add_user("AAA: 又聊了两句")
     old_sid = bot2.session.id
     sent.clear()
-    bot2.process_line("[2026-10-10 18:41:02:000 INFO] [Scripting] [VIKTOR-CHAT] 路人甲: 清空")
+    bot2.process_line("[2026-10-10 18:41:02:000 INFO] [Scripting] [AGENT-CHAT] 路人甲: 清空")
     msgs = bot2.session.messages
     assert msgs and all(m["role"] == "system" for m in msgs), "空闲清空后应只剩系统注记"
     assert msgs[0]["content"].startswith("# 你的长期记忆"), msgs[0]["content"][:40]
     assert "可用技能书" in "".join(m["content"] for m in msgs[1:]), "应含技能书清单注记"
     assert bot2.session.id != old_sid, "空闲清空也应开新会话"
     assert "已清空" in sent[0], sent
-    bot2.process_line("[2026-10-10 18:41:05:000 INFO] [Scripting] [VIKTOR-CHAT] 路人甲: 清空一下")
+    bot2.process_line("[2026-10-10 18:41:05:000 INFO] [Scripting] [AGENT-CHAT] 路人甲: 清空一下")
     assert any(p == "路人甲" for p, _ in bot2.pending), "非完全匹配应走正常流程"
     bot2.pending.clear()
     # 超预算兜底: 压缩后仍超(玩家消息本身就超预算) → 整段清空, 复用完整初始化
@@ -230,7 +236,7 @@ def self_test():
     assert bot2.session.id != old_sid and bot2.mode == MODE_NORMAL, "超长清空也应完整初始化"
     bot2.cfg["context_window_tokens"] = 1048576
     assert not bot2._maybe_compact_for_size(), "未超预算不应清空/压缩"
-    bot2.bridge.say_as_viktor = orig_say
+    bot2.bridge.say_as_agent = orig_say
     print("清空词自测 OK")
 
     # ===== 压缩(compact)自测 =====
@@ -290,8 +296,8 @@ def self_test():
     assert [m["content"] for m in kept_b] == ["A: 在吗"] and stats_b["kept_speech"] == 0, kept_b
 
     # 「压缩」控制词: 空闲生效(旧会话落盘 compact-*, 模式不变, loaded_skills 清空)
-    orig_say_c = bot2.bridge.say_as_viktor
-    bot2.bridge.say_as_viktor = lambda text, *a, **k: sent.append(text)
+    orig_say_c = bot2.bridge.say_as_agent
+    bot2.bridge.say_as_agent = lambda text, *a, **k: sent.append(text)
     bot2.agent_busy = False
     bot2.pending.clear()
     bot2.mode = MODE_CREATIVE
@@ -309,7 +315,7 @@ def self_test():
     bot2.session.loaded_skills.add("mc-commands/")
     old_sid = bot2.session.id
     sent.clear()
-    bot2.process_line("[2026-10-10 18:42:00:000 INFO] [Scripting] [VIKTOR-CHAT] 路人甲: 压缩")
+    bot2.process_line("[2026-10-10 18:42:00:000 INFO] [Scripting] [AGENT-CHAT] 路人甲: 压缩")
     assert bot2.session.id != old_sid, "压缩应换新会话"
     assert bot2.mode == MODE_CREATIVE, "压缩不应复位模式"
     assert not bot2.session.loaded_skills, "压缩后技能正文已丢, 应允许重新载入"
@@ -326,19 +332,19 @@ def self_test():
     bot2.agent_busy = True
     sid_busy = bot2.session.id
     sent.clear()
-    bot2.process_line("[2026-10-10 18:42:01:000 INFO] [Scripting] [VIKTOR-CHAT] 路人甲: 压缩")
+    bot2.process_line("[2026-10-10 18:42:01:000 INFO] [Scripting] [AGENT-CHAT] 路人甲: 压缩")
     assert bot2.session.id == sid_busy and sent and "压缩无效" in sent[0], sent
     bot2.agent_busy = False
     # 非完全匹配 → 走普通聊天
     bot2.pending.clear()
-    bot2.process_line("[2026-10-10 18:42:02:000 INFO] [Scripting] [VIKTOR-CHAT] 路人甲: 压缩一下")
+    bot2.process_line("[2026-10-10 18:42:02:000 INFO] [Scripting] [AGENT-CHAT] 路人甲: 压缩一下")
     assert any(p == "路人甲" for p, _ in bot2.pending), bot2.pending
     bot2.pending.clear()
     bot2.mode = MODE_NORMAL
 
     # 与真实 memory.md 的体积解耦: 自动压缩的预算是写死的 4096, 真实记忆变长会把预算占满,
     # 让“压缩”退化成“清空”(测试会误报)。这里换成一条很短的假记忆。
-    _mtmp = paths.BASE_DIR / "logs" / "selftest-memory.md"
+    _mtmp = TEST_DIR / "selftest-memory.md"
     _mtmp.parent.mkdir(parents=True, exist_ok=True)
     _mtmp.write_text("# 测试记忆\n- 无\n", encoding="utf-8")
     _orig_mem_path = capabilities.MEMORY_PATH
@@ -418,13 +424,13 @@ def self_test():
     assert bot2.session.messages[-1]["content"].startswith("# 上下文已压缩")
     # 压缩后的上下文仍严格配对、可直接继续追加
     assert len(bot2.session.build_request_messages()) == len(bot2.session.messages) + 1
-    bot2.bridge.say_as_viktor = orig_say_c
+    bot2.bridge.say_as_agent = orig_say_c
     print("压缩自测 OK")
 
     # 上下文占用提醒: 70% 起, 每跨 10% 一档提一次(同档不重复); 压缩/新会话后复位
     war = []
-    orig_say_w = bot2.bridge.say_as_viktor
-    bot2.bridge.say_as_viktor = lambda text, *a, **k: war.append(text)
+    orig_say_w = bot2.bridge.say_as_agent
+    bot2.bridge.say_as_agent = lambda text, *a, **k: war.append(text)
     bot2.cfg["context_window_tokens"] = 1_000_000
     bot2._context_warn_level = 0
     bot2._maybe_warn_context_size(699_000)      # 69% -> 不提醒
@@ -448,7 +454,7 @@ def self_test():
     assert bot2._context_warn_level == 0
     bot2._maybe_warn_context_size(705_000)
     assert len(war) == 4, war
-    bot2.bridge.say_as_viktor = orig_say_w
+    bot2.bridge.say_as_agent = orig_say_w
     print("上下文占用提醒自测 OK")
 
     # ===== 智能压缩(摘要式压缩, 类比 coding agent 的 /compact)自测 =====
@@ -490,8 +496,8 @@ def self_test():
         bot2.session.add_assistant("预览好了, 等你确认")
 
     smsay = []
-    orig_say_sm = bot2.bridge.say_as_viktor
-    bot2.bridge.say_as_viktor = lambda text, *a, **k: smsay.append(text)
+    orig_say_sm = bot2.bridge.say_as_agent
+    bot2.bridge.say_as_agent = lambda text, *a, **k: smsay.append(text)
     bot2.mode = MODE_NORMAL
     bot2.agent_busy = False
     bot2.pending.clear()
@@ -511,7 +517,7 @@ def self_test():
     orig_post_sm = bot2._post
     bot2._post = fake_post_summary
     try:
-        bot2.process_line("[2026-10-10 18:43:00:000 INFO] [Scripting] [VIKTOR-CHAT] 路人甲: 智能压缩")
+        bot2.process_line("[2026-10-10 18:43:00:000 INFO] [Scripting] [AGENT-CHAT] 路人甲: 智能压缩")
         deadline = time.time() + 5
         while bot2._smart_compact_running and time.time() < deadline:
             time.sleep(0.02)
@@ -541,7 +547,7 @@ def self_test():
     sid_busy = bot2.session.id
     smsay.clear()
     sm_calls.clear()
-    bot2.process_line("[2026-10-10 18:43:01:000 INFO] [Scripting] [VIKTOR-CHAT] 路人甲: 智能压缩")
+    bot2.process_line("[2026-10-10 18:43:01:000 INFO] [Scripting] [AGENT-CHAT] 路人甲: 智能压缩")
     assert bot2.session.id == sid_busy and not sm_calls, "忙时不应请求摘要"
     assert smsay and "智能压缩无效" in smsay[0], smsay
     bot2.agent_busy = False
@@ -556,7 +562,7 @@ def self_test():
     orig_post_sm = bot2._post
     bot2._post = fail_post_summary
     try:
-        bot2.process_line("[2026-10-10 18:43:02:000 INFO] [Scripting] [VIKTOR-CHAT] 路人甲: 智能压缩")
+        bot2.process_line("[2026-10-10 18:43:02:000 INFO] [Scripting] [AGENT-CHAT] 路人甲: 智能压缩")
         deadline = time.time() + 5
         while bot2._smart_compact_running and time.time() < deadline:
             time.sleep(0.02)
@@ -594,77 +600,16 @@ def self_test():
         bot2._input_token_budget = orig_budget
         bot2.cfg["context_window_tokens"] = 1048576
         bot2.agent_busy = False
-    bot2.bridge.say_as_viktor = orig_say_sm
+    bot2.bridge.say_as_agent = orig_say_sm
     print("智能压缩自测 OK")
 
-    # ===== 状态 / 备份控制词自测 =====
-    # 两个工具已下线: 模型侧不可见, 改由程序控制词提供
-    tnames = set(capabilities.registered_names())
-    assert not ({"get_server_status", "backup_world"} & tnames), sorted(tnames)
-    assert not ({"get_server_status", "backup_world"} & bot2._allowed_tools()), "工具白名单不应含已下线工具"
-
-    # 「状态」: ≤2 条 [系统]、任务进行中也可查、不进队列/上下文
-    orig_say_st = bot2.bridge.say_as_viktor
-    stsay = []
-    bot2.bridge.say_as_viktor = lambda text, *a, **k: stsay.append(text)
-    bot2.agent_busy = True
-    bot2.pending.clear()
-    bot2.process_line("[2026-10-10 18:44:00:000 INFO] [Scripting] [VIKTOR-CHAT] Tester: 状态")
-    bot2.agent_busy = False
-    assert 1 <= len(stsay) <= 2 and any("在线玩家" in x for x in stsay), stsay
-    assert not bot2.pending, "「状态」不应进队列/上下文"
-    # 非完全匹配 → 普通聊天
-    stsay.clear()
-    bot2.process_line("[2026-10-10 18:44:01:000 INFO] [Scripting] [VIKTOR-CHAT] Tester: 状态一下")
-    assert bot2.pending == [("Tester", "状态一下")], bot2.pending
-    bot2.pending.clear()
-    bot2.bridge.say_as_viktor = orig_say_st
-    print("状态词自测 OK")
-
-    # 「备份」守卫: 忙时拒绝(不启动); 备份中重复触发提示; 备份中「强制停止」无法中止
-    orig_say_bk = bot2.bridge.say_as_viktor
-    bksay = []
-    bot2.bridge.say_as_viktor = lambda text, *a, **k: bksay.append(text)
-    bot2._backup_running = False
-    bot2.agent_busy = True
-    bot2.process_line("[2026-10-10 18:45:00:000 INFO] [Scripting] [VIKTOR-CHAT] Tester: 备份")
-    assert not bot2._backup_running and bksay and "备份无效" in bksay[0], bksay
-    bot2.agent_busy = False
-    bot2._backup_running = True
-    bksay.clear()
-    bot2.process_line("[2026-10-10 18:45:01:000 INFO] [Scripting] [VIKTOR-CHAT] Tester: 备份")
-    assert bksay and "正在进行中" in bksay[0], bksay
-    bot2.abort.clear()
-    bksay.clear()
-    bot2.process_line("[2026-10-10 18:45:02:000 INFO] [Scripting] [VIKTOR-CHAT] Tester: 强制停止")
-    assert not bot2.abort.is_set() and bksay and "无法中止" in bksay[0], (bot2.abort.is_set(), bksay)
-    # 备份期间一次性对话被拒
-    bksay.clear()
-    bot2._spawn_oneshot("Tester", "随便做点什么")
-    assert bksay and "备份正在进行中" in bksay[0], bksay
-    assert not bot2._active_oneshots and bot2._oneshot_active == 0
-    bot2._backup_running = False
-
-    # 备份执行: 打桩, 成功 → 开始+完成两条 [系统]; 失败 → 备份失败: …
-    orig_bk_locked = bot2._backup_world_locked
-    bksay.clear()
-    bot2._backup_world_locked = lambda args: "备份完成: /tmp/x.7z (1MB, 用时 1 秒)。世界写入已恢复。"
-    bot2._run_backup()
-    assert len(bksay) == 2 and "请稍候" in bksay[0] and "备份完成" in bksay[1], bksay
-    assert not bot2._backup_running, "备份结束应复位 _backup_running"
-    bksay.clear()
-    bot2._backup_world_locked = lambda args: "系统里找不到 7z 命令, 无法备份。"
-    bot2._run_backup()
-    assert bksay and bksay[-1].startswith("备份失败: "), bksay
-    bot2._backup_world_locked = orig_bk_locked
-
-    # 备份期间 worker 不开新任务: 消息排队, 备份结束(notify)后继续处理
+    # 智能压缩期间 worker 不开新任务，完成后继续处理队列。
     import threading as _th2
     import time as _time
     bot2.session = Session(2001)
     bot2.session.add_system(memory_note())
     bot2.running = True
-    bot2._backup_running = True
+    bot2._smart_compact_running = True
     bot2.pending.clear()
     bot2.pending.append(("A", "任务"))
     orig_post_hold = bot2._post
@@ -676,12 +621,12 @@ def self_test():
     wt = _th2.Thread(target=bot2._worker, daemon=True)
     wt.start()
     _time.sleep(0.4)
-    assert bot2.pending == [("A", "任务")], "备份期间不应开新任务"
-    bot2._backup_running = False
+    assert bot2.pending == [("A", "任务")], "智能压缩期间不应开新任务"
+    bot2._smart_compact_running = False
     with bot2.cv:
         bot2.cv.notify_all()
     _time.sleep(0.6)
-    assert not bot2.pending, "备份结束后应继续处理积压消息"
+    assert not bot2.pending, "智能压缩结束后应继续处理积压消息"
     assert any(m.get("content") == "A: 任务" for m in bot2.session.messages), bot2.session.messages
     # 回合开头先写「对话状态」注记, 再写玩家消息(顺序错了模型会把注记当成旧历史)
     _idx = next(i for i, m in enumerate(bot2.session.messages)
@@ -695,13 +640,10 @@ def self_test():
         bot2.cv.notify_all()
     wt.join(timeout=2)
     bot2._post = orig_post_hold
-    bot2.bridge.say_as_viktor = orig_say_bk
-    print("备份词自测 OK")
-
-
+    bot2.bridge.say_as_agent = orig_say_sm
 
     # 能力测试: 玩家进出记录查询(用临时日志)
-    tmp_log = Path("/tmp/viktor-serverlog-test.log")
+    tmp_log = Path(str(TEST_DIR / "agent-serverlog-test.log"))
     orig_log = capabilities.SERVER_LOG
     capabilities.SERVER_LOG = tmp_log
     try:
@@ -723,7 +665,7 @@ def self_test():
     # 能力测试: 指令执行(不再有玩家白名单判定, 只保留危险指令黑名单)
     r = bot2._tool_run_command({"command": "/stop"})
     assert "禁止列表" in r, r
-    # 能力测试: 服务端查询走请求总线(协议 v2)。
+    # 能力测试: 服务端查询走请求总线(协议 v5)。
     # 假应答: 从下发命令里取请求 id, 同步拼回带同一个 id 的行; bus 读线程按 id 路由。
     import re as _re
     bot2.bus_enabled = True
@@ -732,7 +674,7 @@ def self_test():
 
     def _fake_send_commands(cmds):
         for cmd in cmds:
-            m = _re.search(r"viktor:(\w+)(?: (r\d+))?", cmd)
+            m = _re.search(r"agent:(\w+)(?: (r\d+))?", cmd)
             if not m:
                 continue
             fn = _responders.get(m.group(1))
@@ -745,17 +687,17 @@ def self_test():
     bot2.bridge.send_commands = _fake_send_commands
 
     _responders["pos"] = lambda cmd, rid: [
-        f"[2026-10-10 18:29:00:000 INFO] [Scripting] [VIKTOR-POS] {rid} "
+        f"[2026-10-10 18:29:00:000 INFO] [Scripting] [AGENT-POS] {rid} "
         "kirin9000S 660 67 -268 minecraft:overworld",
-        f"[2026-10-10 18:29:00:000 INFO] [Scripting] [VIKTOR-POS] {rid} DONE",
+        f"[2026-10-10 18:29:00:000 INFO] [Scripting] [AGENT-POS] {rid} DONE",
     ]
     r = bot2._tool_get_position({"player": "kirin9000S"})
     assert "kirin9000S 的坐标" in r and "660" in r, r
     print(r)
 
     _responders["pos"] = lambda cmd, rid: [
-        f"[2026-10-10 18:29:01:000 INFO] [Scripting] [VIKTOR-POS] {rid} (无玩家在线)",
-        f"[2026-10-10 18:29:01:000 INFO] [Scripting] [VIKTOR-POS] {rid} DONE",
+        f"[2026-10-10 18:29:01:000 INFO] [Scripting] [AGENT-POS] {rid} (无玩家在线)",
+        f"[2026-10-10 18:29:01:000 INFO] [Scripting] [AGENT-POS] {rid} DONE",
     ]
     r = bot2._tool_get_position({"player": "Ghost"})
     assert "没有玩家在线" in r, r
@@ -763,10 +705,10 @@ def self_test():
 
     # 能力测试: 手持物品解析(按 id 路由)
     _responders["inv"] = lambda cmd, rid: [
-        f"[2026-10-10 18:30:00:000 INFO] [Scripting] [VIKTOR-INV] {rid} TestPlayer 0 diamond 3",
-        f"[2026-10-10 18:30:00:000 INFO] [Scripting] [VIKTOR-INV] {rid} TestPlayer 5 iron_pickaxe 1",
-        f"[2026-10-10 18:30:00:000 INFO] [Scripting] [VIKTOR-INV] {rid} TestPlayer DONE 5",
-        f"[2026-10-10 18:30:00:000 INFO] [Scripting] [VIKTOR-INV] {rid} DONE",
+        f"[2026-10-10 18:30:00:000 INFO] [Scripting] [AGENT-INV] {rid} TestPlayer 0 diamond 3",
+        f"[2026-10-10 18:30:00:000 INFO] [Scripting] [AGENT-INV] {rid} TestPlayer 5 iron_pickaxe 1",
+        f"[2026-10-10 18:30:00:000 INFO] [Scripting] [AGENT-INV] {rid} TestPlayer DONE 5",
+        f"[2026-10-10 18:30:00:000 INFO] [Scripting] [AGENT-INV] {rid} DONE",
     ]
     r = bot2._tool_get_hand({"player": "TestPlayer"})
     assert "iron_pickaxe x1" in r, r
@@ -774,7 +716,7 @@ def self_test():
 
     # 能力测试: 读坐标方块
     _responders["block"] = lambda cmd, rid: [
-        f"[2026-10-10 18:31:00:000 INFO] [Scripting] [VIKTOR-BLOCK] {rid} "
+        f"[2026-10-10 18:31:00:000 INFO] [Scripting] [AGENT-BLOCK] {rid} "
         "660 66 -269 minecraft:overworld minecraft:grass_block",
     ]
     r = bot2._tool_get_block({"x": 660, "y": 66, "z": -269})
@@ -782,7 +724,7 @@ def self_test():
     print(r)
 
     _responders["block"] = lambda cmd, rid: [
-        f"[2026-10-10 18:31:01:000 INFO] [Scripting] [VIKTOR-BLOCK] {rid} "
+        f"[2026-10-10 18:31:01:000 INFO] [Scripting] [AGENT-BLOCK] {rid} "
         "(区块未加载或超出世界高度: 73 73 1)",
     ]
     r = bot2._tool_get_block({"x": 73, "y": 73, "z": 1})
@@ -791,9 +733,9 @@ def self_test():
 
     # id 路由: 别人的回包(不同 id)不会被认领
     _responders["block"] = lambda cmd, rid: [
-        "[2026-10-10 18:31:02:000 INFO] [Scripting] [VIKTOR-BLOCK] r999999 "
+        "[2026-10-10 18:31:02:000 INFO] [Scripting] [AGENT-BLOCK] r999999 "
         "999 99 999 minecraft:overworld minecraft:bedrock",
-        f"[2026-10-10 18:31:03:000 INFO] [Scripting] [VIKTOR-BLOCK] {rid} "
+        f"[2026-10-10 18:31:03:000 INFO] [Scripting] [AGENT-BLOCK] {rid} "
         "12 34 56 minecraft:overworld minecraft:obsidian",
     ]
     r = bot2._tool_get_block({"x": 12, "y": 34, "z": 56})
@@ -801,8 +743,8 @@ def self_test():
     print(r)
     assert "需要整数坐标" in bot2._tool_get_block({"x": "a", "y": 1, "z": 2})
 
-    # 能力测试: 空间感知原语 v3(分帧 JSON payload)
-    bot2.pack_proto = 3
+    # 能力测试: 空间感知分帧查询(分帧 JSON payload)
+    bot2.pack_proto = 5
 
     def _frames(tag, rid, obj, size=48, reverse=False):
         """把 payload 切成 `#i/n` 帧(故意切很小以验证重组), 末帧后跟 DONE。"""
@@ -816,7 +758,7 @@ def self_test():
         return rows
 
     # 高度图: 默认摘要省 token; 完整高度/顶面分布按需显式请求
-    _responders["heightmap"] = lambda cmd, rid: _frames("VIKTOR-MAP", rid, {
+    _responders["heightmap"] = lambda cmd, rid: _frames("AGENT-MAP", rid, {
         "ok": True, "dim": "minecraft:overworld", "from": [10, 20], "to": [11, 21],
         "w": 2, "h": 2, "yMin": -64, "yMax": 320,
         "palette": ["grass_block", "water"], "heights": [64, 65, 62, 66],
@@ -840,7 +782,7 @@ def self_test():
     assert len(heights) < len(full), (len(heights), len(full))
 
     # 大区域默认摘要的长度不随格数膨胀, 完整网格才按列数增长
-    _responders["heightmap"] = lambda cmd, rid: _frames("VIKTOR-MAP", rid, {
+    _responders["heightmap"] = lambda cmd, rid: _frames("AGENT-MAP", rid, {
         "ok": True, "dim": "minecraft:overworld", "from": [0, 0], "to": [31, 31],
         "w": 32, "h": 32, "palette": ["grass_block", "water"],
         "heights": [64 + i % 7 for i in range(1024)],
@@ -854,7 +796,7 @@ def self_test():
     assert len(summary) * 4 < len(big_grid), (len(summary), len(big_grid))
 
     # 全部未加载/空列时即使请求 full 也不输出无意义的大片 ---
-    _responders["heightmap"] = lambda cmd, rid: _frames("VIKTOR-MAP", rid, {
+    _responders["heightmap"] = lambda cmd, rid: _frames("AGENT-MAP", rid, {
         "ok": True, "dim": "minecraft:overworld", "from": [0, 0], "to": [1, 1],
         "w": 2, "h": 2, "palette": [], "heights": [-1, -1, -1, -1],
         "types": [255, 255, 255, 255], "low": -1, "high": -1,
@@ -867,14 +809,14 @@ def self_test():
 
     # 缺帧: 明确报“回包不完整”, 不能拿半截 JSON 当结果
     _responders["heightmap"] = lambda cmd, rid: [
-        f"[2026-10-10 18:32:00:000 INFO] [Scripting] [VIKTOR-MAP] {rid} #1/2 {{\"ok\":true,",
-        f"[2026-10-10 18:32:00:000 INFO] [Scripting] [VIKTOR-MAP] {rid} DONE",
+        f"[2026-10-10 18:32:00:000 INFO] [Scripting] [AGENT-MAP] {rid} #1/2 {{\"ok\":true,",
+        f"[2026-10-10 18:32:00:000 INFO] [Scripting] [AGENT-MAP] {rid} DONE",
     ]
     r = bot2._tool_get_heightmap({"x1": 0, "z1": 0, "x2": 1, "z2": 1})
     assert "回包不完整" in r, r
 
     # 切面: 3 宽 2 高, 侧视, 含空气与未加载
-    _responders["slice"] = lambda cmd, rid: _frames("VIKTOR-SLICE", rid, {
+    _responders["slice"] = lambda cmd, rid: _frames("AGENT-SLICE", rid, {
         "ok": True, "dim": "minecraft:overworld", "axis": "y", "level": 64,
         "a0": 0, "a1": 2, "b0": 0, "b1": 1, "w": 3, "h": 2,
         "palette": ["stone", "air"], "rows": ["001", "1?1"], "counts": [3, 2], "unloaded": 1,
@@ -887,7 +829,7 @@ def self_test():
     print(r)
 
     # 区域检查 + filter: 直接给不符合项坐标(复检主力)
-    _responders["inspect"] = lambda cmd, rid: _frames("VIKTOR-INSPECT", rid, {
+    _responders["inspect"] = lambda cmd, rid: _frames("AGENT-INSPECT", rid, {
         "ok": True, "dim": "minecraft:overworld", "from": [0, 60, 0], "to": [3, 60, 0],
         "volume": 4, "unloaded": 0, "air": 1, "palette": ["stone_bricks", "air"],
         "types": {"stone_bricks": 3, "air": 1}, "otherTypes": 0,
@@ -901,7 +843,7 @@ def self_test():
     print(r)
 
     # 区域检查 detail=cells: 单元清单带类型名
-    _responders["inspect"] = lambda cmd, rid: _frames("VIKTOR-INSPECT", rid, {
+    _responders["inspect"] = lambda cmd, rid: _frames("AGENT-INSPECT", rid, {
         "ok": True, "dim": "minecraft:overworld", "from": [0, 60, 0], "to": [1, 60, 0],
         "volume": 2, "unloaded": 0, "air": 0,
         "palette": ["stone", "dirt"], "types": {"stone": 1, "dirt": 1}, "otherTypes": 0,
@@ -914,7 +856,7 @@ def self_test():
     print(r)
 
     # 找方块
-    _responders["find"] = lambda cmd, rid: _frames("VIKTOR-FIND", rid, {
+    _responders["find"] = lambda cmd, rid: _frames("AGENT-FIND", rid, {
         "ok": True, "dim": "minecraft:overworld", "block": "water",
         "from": [0, 55, 0], "to": [3, 70, 3], "volume": 1024, "unloaded": 4,
         "match": 9, "positions": [[1, 60, 2], [2, 60, 2]], "truncated": True,
@@ -927,7 +869,7 @@ def self_test():
     print(r)
 
     # 脚本报错 -> 直接转述, 不伪造结果
-    _responders["inspect"] = lambda cmd, rid: _frames("VIKTOR-INSPECT", rid,
+    _responders["inspect"] = lambda cmd, rid: _frames("AGENT-INSPECT", rid,
                                                      {"ok": False, "error": "体积超过上限"})
     r = bot2._tool_inspect_region({"x1": 0, "y1": 0, "z1": 0, "x2": 1, "y2": 1, "z2": 1})
     assert "体积超过上限" in r, r
@@ -949,15 +891,15 @@ def self_test():
     # 切面命令只取 level 那一层, 另两轴从两角点投影
     assert bot2._slice_cmd("r1", {"axis": "x", "level": 100, "x1": 0, "y1": 60, "z1": 5,
                                   "x2": 0, "y2": 70, "z2": 8}) == \
-        "scriptevent viktor:slice r1 x 100 5 60 8 70 overworld"
+        "scriptevent agent:slice r1 x 100 5 60 8 70 overworld"
     assert bot2._heightmap_cmd("r2", {"x1": 0, "z1": 0, "x2": 1, "z2": 1, "y_max": 61}) == \
-        "scriptevent viktor:heightmap r2 0 0 1 1 overworld 61 -64"
+        "scriptevent agent:heightmap r2 0 0 1 1 overworld 61 -64"
 
     # 协议过旧: 明确提示重载, 不要静默失败
     bot2.pack_proto = 2
     r = bot2._tool_get_heightmap({"x1": 0, "z1": 0, "x2": 1, "z2": 1})
     assert "协议过旧" in r and "重载" in r, r
-    bot2.pack_proto = 3
+    bot2.pack_proto = 5
 
     # 并发批测: ptc 里连续的多个 scan 只触发 1 次 send_commands(整批一次下发)
     capabilities.set_bus_batch_runner(bot2._run_bus_batch)
@@ -969,7 +911,7 @@ def self_test():
 
     bot2.bridge.send_commands = _counting_send
     capabilities.set_ptc_limit(10)
-    _responders["inspect"] = lambda cmd, rid: _frames("VIKTOR-INSPECT", rid, {
+    _responders["inspect"] = lambda cmd, rid: _frames("AGENT-INSPECT", rid, {
         "ok": True, "dim": "minecraft:overworld", "from": [0, 60, 0], "to": [3, 60, 0],
         "volume": 4, "unloaded": 0, "air": 0, "palette": ["stone"],
         "types": {"stone": 4}, "otherTypes": 0,
@@ -991,17 +933,11 @@ def self_test():
     sample = ('[2026-10-10 22:11:52:487 ERROR] Syntax error: Unexpected "20"\n'
               '[2026-10-10 22:11:53:000 INFO] Block placed\n'
               '[2026-10-10 22:11:54:000 WARN] something odd\n'
-              '[2026-10-10 22:11:55:000 INFO] [Scripting] [VIKTOR-CHAT] X: hi\n')
+              '[2026-10-10 22:11:55:000 INFO] [Scripting] [AGENT-CHAT] X: hi\n')
     got = bot2._extract_command_output(sample, "fill")
     assert got == ['[错误] Syntax error: Unexpected "20"', "Block placed",
                    "[警告] something odd"], got
     print("ERROR 行捕获自测 OK", got)
-
-    # 能力测试: 备份能力的前置校验(只查世界目录, 不真的打包)
-    srv = Path(bot2.cfg["mc_server_dir"])
-    wd = srv / "worlds" / bot2._world_name(srv)
-    assert wd.is_dir(), wd
-    print("备份能力前置校验 OK:", wd)
 
     # 能力测试: PTC 批量工具调用
     capabilities.set_ptc_limit(3)
@@ -1094,8 +1030,8 @@ def self_test():
     # 能力测试: 创造模式(权限/等待提醒/参数切换/payload/思维链剥离/会话复位)
     assert "set_mode" in [s["function"]["name"] for s in capabilities.tool_schemas()]
     csaid = []
-    orig_say3 = bot2.bridge.say_as_viktor
-    bot2.bridge.say_as_viktor = lambda text, *a, **k: csaid.append(text)
+    orig_say3 = bot2.bridge.say_as_agent
+    bot2.bridge.say_as_agent = lambda text, *a, **k: csaid.append(text)
     r = bot2._tool_set_mode({"mode": MODE_CREATIVE, "reason": "测试"})
     assert "已进入创造模式" in r and bot2.creative_mode, r
     # 创造模式第一轮是长思考, 必须由程序立刻提醒玩家等待(不依赖模型自觉)
@@ -1137,7 +1073,7 @@ def self_test():
     csaid.clear()
     bot2._tool_set_mode({"mode": MODE_NORMAL, "reason": "测试"})
     assert csaid == [], "退出创造模式不需要播报"
-    bot2.bridge.say_as_viktor = orig_say3
+    bot2.bridge.say_as_agent = orig_say3
     np_ = bot2._mode_params()
     assert np_["effort"] == "low", np_
     payload2 = json.loads(bot2._build_payload([], np_))
@@ -1164,8 +1100,8 @@ def self_test():
 
     # 兜底播报: 模型把回复写在正文(玩家看不到)时必须自动补发
     said2 = []
-    orig_say2 = bot2.bridge.say_as_viktor
-    bot2.bridge.say_as_viktor = lambda text, *a, **k: said2.append(text)
+    orig_say2 = bot2.bridge.say_as_agent
+    bot2.bridge.say_as_agent = lambda text, *a, **k: said2.append(text)
     if not bot2.session:
         bot2.players.add("T")
         bot2._start_session()
@@ -1175,7 +1111,7 @@ def self_test():
     said2.clear()
     bot2._finish_turn("", True)  # 已通过工具发过言, 不该重复播报
     assert said2 == [], said2
-    bot2.bridge.say_as_viktor = orig_say2
+    bot2.bridge.say_as_agent = orig_say2
     print("兜底播报自测 OK")
 
     # 任务进行中插话: 安全点注入当前请求并写入上下文, 不另起一轮
@@ -1225,8 +1161,8 @@ def self_test():
     bot2.pending.clear()
     pair_calls = {"n": 0}
     payloads: list[list[dict]] = []
-    orig_say_pair = bot2.bridge.say_as_viktor
-    bot2.bridge.say_as_viktor = lambda text, *a, **k: None  # 测试期间不要真发言
+    orig_say_pair = bot2.bridge.say_as_agent
+    bot2.bridge.say_as_agent = lambda text, *a, **k: None  # 测试期间不要真发言
 
     def fake_post_pair(messages, params):
         payloads.append([dict(m) for m in messages])
@@ -1262,13 +1198,13 @@ def self_test():
     assert any(m.get("role") == "system" and "模式" in (m.get("content") or "")
                for m in bot2.session.messages), "切模式应留下系统注记"
     bot2._tool_set_mode({"mode": MODE_NORMAL, "reason": "自测复位"})
-    bot2.bridge.say_as_viktor = orig_say_pair
+    bot2.bridge.say_as_agent = orig_say_pair
     print("状态注记排在 tool 响应之后自测 OK")
 
     # 保持安静: 调用 stay_silent 后立即收尾, 既不追发一轮, 也不兜底播报
     said_s = []
-    orig_say_s = bot2.bridge.say_as_viktor
-    bot2.bridge.say_as_viktor = lambda text, *a, **k: said_s.append(text)
+    orig_say_s = bot2.bridge.say_as_agent
+    bot2.bridge.say_as_agent = lambda text, *a, **k: said_s.append(text)
     if not bot2.session:
         bot2.players.add("T")
         bot2._start_session()
@@ -1286,7 +1222,7 @@ def self_test():
     assert (reply_s, spoke_s) == ("", False), (reply_s, spoke_s)
     assert bot2._finish_turn(reply_s, spoke_s) is False
     assert said_s == [], said_s
-    bot2.bridge.say_as_viktor = orig_say_s
+    bot2.bridge.say_as_agent = orig_say_s
     print("保持安静不兜底自测 OK")
 
     # 被 max_tokens 截断时要抬高额度重试(只抬高不降低), 而不是沉默
@@ -1314,8 +1250,8 @@ def self_test():
     # 绝不能把等价的请求再发一次白烧一整轮生成。
     budgets_nc = []
     said_nc = []
-    orig_say_nc = bot2.bridge.say_as_viktor
-    bot2.bridge.say_as_viktor = lambda text, *a, **k: said_nc.append(text)
+    orig_say_nc = bot2.bridge.say_as_agent
+    bot2.bridge.say_as_agent = lambda text, *a, **k: said_nc.append(text)
 
     def fake_post_noheadroom(messages, params):
         budgets_nc.append(params["max_tokens"])
@@ -1326,7 +1262,7 @@ def self_test():
     bot2.abort.clear()
     reply_nc, spoke_nc = bot2.call_api()
     bot2._post = orig_post
-    bot2.bridge.say_as_viktor = orig_say_nc
+    bot2.bridge.say_as_agent = orig_say_nc
     cap = bot2.cfg["retry_max_reply_tokens"]
     assert budgets_nc == [2 * bot2.cfg["creative_max_reply_tokens"]], budgets_nc
     assert budgets_nc[0] >= cap, budgets_nc
@@ -1553,16 +1489,16 @@ def self_test():
     unp = []
     orig_send_pin = bot2.bridge.send_command
     bot2.bridge.send_command = lambda cmd: unp.append(cmd)
-    bot2._pinned = ["viktor_pin_test"]
+    bot2._pinned = ["agent_pin_test"]
     bot2.mode = MODE_CREATIVE_MAX
     r = bot2._tool_set_mode({"mode": MODE_NORMAL, "reason": "测试"})
     bot2.bridge.send_command = orig_send_pin
-    assert not bot2._pinned and any("tickingarea remove viktor_pin_test" in c for c in unp), unp
+    assert not bot2._pinned and any("tickingarea remove agent_pin_test" in c for c in unp), unp
     assert bot2.mode == MODE_NORMAL, bot2.mode
     print("常加载生命周期自测 OK")
 
     # 恢复: 灌回落盘会话; 旧 tool_calls 缺 reasoning_content 应补空串; 模式从注记推断
-    rp = Path("/tmp/viktor-resume-test.jsonl")
+    rp = Path(str(TEST_DIR / "agent-resume-test.jsonl"))
     rp.write_text("\n".join(json.dumps(m, ensure_ascii=False) for m in [
         {"role": "system", "content": memory_note()},
         {"role": "system", "content": bot2._mode_note(MODE_CREATIVE)},
@@ -1601,7 +1537,7 @@ def self_test():
     import shutil as _shutil
     _shutil.rmtree(paths.ONESHOT_DIR, ignore_errors=True)
     osaid = []
-    bot2.bridge.say_as_viktor = lambda text, *a, **k: osaid.append(text)
+    bot2.bridge.say_as_agent = lambda text, *a, **k: osaid.append(text)
     if not bot2.session:
         bot2.players.add("T")
         bot2._start_session()
@@ -1611,23 +1547,23 @@ def self_test():
     spawned = []
     orig_spawn = bot2._spawn_oneshot
     bot2._spawn_oneshot = lambda name, body: spawned.append((name, body))
-    bot2.process_line("[2026-10-10 18:50:00:000 INFO] [Scripting] [VIKTOR-CHAT] Tester: 1 记住我现在的位置")
+    bot2.process_line("[2026-10-10 18:50:00:000 INFO] [Scripting] [AGENT-CHAT] Tester: 1 记住我现在的位置")
     assert spawned == [("Tester", "记住我现在的位置")], spawned
     assert bot2.pending == [], "一次性触发不应进入主对话队列"
     assert bot2.session.messages == before_msgs, "一次性触发不应写主上下文"
     # "1 强制停止" 走控制面, 不再 spawn
     osaid.clear()
-    bot2.process_line("[2026-10-10 18:50:01:000 INFO] [Scripting] [VIKTOR-CHAT] Tester: 1 强制停止")
+    bot2.process_line("[2026-10-10 18:50:01:000 INFO] [Scripting] [AGENT-CHAT] Tester: 1 强制停止")
     assert spawned == [("Tester", "记住我现在的位置")], "强制停止不应再 spawn"
     assert osaid and "没有正在进行" in osaid[-1], osaid
     # 空正文提示
     osaid.clear()
-    bot2.process_line("[2026-10-10 18:50:02:000 INFO] [Scripting] [VIKTOR-CHAT] Tester: 1")
+    bot2.process_line("[2026-10-10 18:50:02:000 INFO] [Scripting] [AGENT-CHAT] Tester: 1")
     assert len(spawned) == 1 and osaid and "写清" in osaid[-1], (spawned, osaid)
     # "1x" 不是一次性(必须 1 + 空格, 或单一个 1)
     osaid.clear()
     bot2.pending.clear()
-    bot2.process_line("[2026-10-10 18:50:03:000 INFO] [Scripting] [VIKTOR-CHAT] Tester: 1x 你好")
+    bot2.process_line("[2026-10-10 18:50:03:000 INFO] [Scripting] [AGENT-CHAT] Tester: 1x 你好")
     assert len(spawned) == 1 and bot2.pending == [("Tester", "1x 你好")], (spawned, bot2.pending)
     bot2.pending.clear()
     bot2._spawn_oneshot = orig_spawn
@@ -1727,7 +1663,7 @@ def self_test():
     _mute_before = list(bot2.session.messages)
     for _line in ("0 我先去挖矿, 别跟来", "0", "0\u3000全角空格也算"):
         bot2.process_line(
-            f"[2026-10-10 18:55:00:000 INFO] [Scripting] [VIKTOR-CHAT] Tester: {_line}")
+            f"[2026-10-10 18:55:00:000 INFO] [Scripting] [AGENT-CHAT] Tester: {_line}")
     assert bot2.pending == [] and not bot2.agent_busy, (bot2.pending, bot2.agent_busy)
     assert bot2.session.messages == _mute_before, "静默消息不应写主上下文"
     assert osaid == [], osaid
@@ -1736,7 +1672,7 @@ def self_test():
     _saved_sess = bot2.session
     bot2.session = None
     bot2.players.clear()
-    bot2.process_line("[2026-10-10 18:55:01:000 INFO] [Scripting] [VIKTOR-CHAT] Tester: 0 只是聊天")
+    bot2.process_line("[2026-10-10 18:55:01:000 INFO] [Scripting] [AGENT-CHAT] Tester: 0 只是聊天")
     assert bot2.session is None, "静默消息不应开启主会话"
     bot2.session = _saved_sess
     bot2.players.add("Tester")
@@ -1744,7 +1680,7 @@ def self_test():
     bot2.pending.clear()
     for _line in ("0x 你好", "0号矿洞在哪"):
         bot2.process_line(
-            f"[2026-10-10 18:55:02:000 INFO] [Scripting] [VIKTOR-CHAT] Tester: {_line}")
+            f"[2026-10-10 18:55:02:000 INFO] [Scripting] [AGENT-CHAT] Tester: {_line}")
     assert bot2.pending == [("Tester", "0x 你好"), ("Tester", "0号矿洞在哪")], bot2.pending
     bot2.pending.clear()
     print("静默消息自测 OK")
@@ -1795,7 +1731,7 @@ def self_test():
     assert "Tester" not in bot2._dialog, bot2._dialog
     # 沉默消息(0 前缀)不走模型, 不应改变对话状态
     bot2._dialog["Tester"] = (time.time(), True)
-    bot2.process_line("[2026-10-10 18:56:00:000 INFO] [Scripting] [VIKTOR-CHAT] Tester: 0 别理我")
+    bot2.process_line("[2026-10-10 18:56:00:000 INFO] [Scripting] [AGENT-CHAT] Tester: 0 别理我")
     assert bot2._dialog["Tester"][1] is True, bot2._dialog
     # 重启恢复: 从历史找回最近一次发言对象与“提过问”, 不把正在聊的玩家当冷启动
     bot2._dialog.clear()
@@ -1811,15 +1747,15 @@ def self_test():
     bot2.players = _saved_players
     print("对话状态自测 OK")
 
-    # [系统] 前缀: 程序生成的提示带 [系统] 且不带 <维克托>; 模型发言带 <维克托> 不带 [系统]
+    # [系统] 前缀: 程序生成的提示带 [系统] 且不带 <agent>; 模型发言带 <agent> 不带 [系统]
     sys_out = []
     orig_send_cmd = bot2.bridge.send_command
     bot2.bridge.send_command = lambda cmd: sys_out.append(cmd)
-    ScreenBridge.say_as_viktor(bot2.bridge, "已清空", 120, 3, system=True)
-    ScreenBridge.say_as_viktor(bot2.bridge, "模型的话", 120, 3)
+    ScreenBridge.say_as_agent(bot2.bridge, "已清空", 120, 3, system=True)
+    ScreenBridge.say_as_agent(bot2.bridge, "模型的话", 120, 3)
     bot2.bridge.send_command = orig_send_cmd
-    assert any("[系统]" in c and "已清空" in c and "<维克托>" not in c for c in sys_out), sys_out
-    assert any("模型的话" in c and "<维克托>" in c and "[系统]" not in c for c in sys_out), sys_out
+    assert any("[系统]" in c and "已清空" in c and "<agent>" not in c for c in sys_out), sys_out
+    assert any("模型的话" in c and "<agent>" in c and "[系统]" not in c for c in sys_out), sys_out
     print("系统前缀自测 OK")
 
     # 恢复会话: 从最近落盘的 dump 灌回, 并回一条 [系统] 提示
@@ -1831,8 +1767,8 @@ def self_test():
         {"role": "assistant", "content": "好的"},
     ]) + "\n", encoding="utf-8")
     rs = []
-    orig_say_rs = bot2.bridge.say_as_viktor
-    bot2.bridge.say_as_viktor = lambda text, *a, **k: rs.append(text)
+    orig_say_rs = bot2.bridge.say_as_agent
+    bot2.bridge.say_as_agent = lambda text, *a, **k: rs.append(text)
     bot2.agent_busy = False
     bot2.pending.clear()
     bot2._on_restore_session("Tester")
@@ -1843,7 +1779,7 @@ def self_test():
         and bot2.session.messages[-1]["content"].startswith("# 会话已恢复"), bot2.session.messages[-1]
     assert any((m.get("content") or "").startswith("# 可用技能书")
                for m in bot2.session.messages), "技能清单注记应仍在"
-    bot2.bridge.say_as_viktor = orig_say_rs
+    bot2.bridge.say_as_agent = orig_say_rs
     rdump.unlink(missing_ok=True)
     print("恢复会话自测 OK")
 
@@ -1918,104 +1854,35 @@ def self_test():
     assert "没有名为" in r, r
     print("技能书自测 OK")
 
-    # 联网: 搜索/抓取走 DeepSeek 的 Search & Fetch 接口(离线自测: 打桩 _post, 不联网)
-    _results = [
-        {"rerank_score": 2.4, "title": "钻石镐", "url": "https://minecraft.wiki/w/Diamond_Pickaxe",
-         "snippet": "短摘要", "summary": "长摘要" * 50, "site_name": "Minecraft Wiki",
-         "date": "2026-06-01T00:00:00+00:00", "authority": 4},
-        {"rerank_score": 0.8, "title": "无站点", "url": "https://example.com/a",
-         "snippet": "", "summary": "", "site_name": None, "date": None, "authority": -1},
-    ]
-    assert websearch.normalize_url("example.com/a.png。") == "https://example.com/a.png"
-    _txt = websearch.format_results("钻石镐 合成", _results, max_chars=4000)
-    assert "2 条结果" in _txt and "Minecraft Wiki" in _txt and "权威 4" in _txt, _txt
-    assert "相关度 2.4" in _txt and "URL: https://example.com/a" in _txt, _txt
-    assert "权威 -1" not in _txt, "未知权威不该显示"
-    # 结果超长要截断, 不能把上下文撑爆
-    _long = websearch.format_results("q", _results * 20, max_chars=600)
-    assert len(_long) < 900 and "已截断" in _long, len(_long)
-
-    _calls = []
-
-    def _fake_post(cfg, path, payload, timeout=None):
-        _calls.append((path, payload))
-        if path.endswith("/search"):
-            return {"results": _results}
-        return {"title": "Diamond", "content": "# Diamond\n\n钻石是稀有物品。"}
-
-    _orig_ws_post = websearch._post
-    websearch._post = _fake_post
-    try:
-        r = capabilities.execute("deepseek_web_search",
-                                 json.dumps({"query": "钻石", "count": 5}, ensure_ascii=False))
-        assert "2 条结果" in r and _calls[-1][0] == "/v1/tools/search", (r, _calls)
-        assert _calls[-1][1]["query"] == "钻石" and _calls[-1][1]["count"] == 5, _calls[-1]
-        # ori_question 缺省时自动带玩家原话(帮助搜索接口理解意图)
-        assert _calls[-1][1].get("ori_question"), _calls[-1]
-        r = capabilities.execute("deepseek_read_url",
-                                 json.dumps({"url": "minecraft.wiki/w/Diamond"}))
-        assert "Diamond" in r and "钻石是稀有物品" in r, r
-        assert _calls[-1][0] == "/v1/tools/fetch", _calls[-1]
-        assert _calls[-1][1]["url"] == "https://minecraft.wiki/w/Diamond", _calls[-1]
-    finally:
-        websearch._post = _orig_ws_post
-
-    # 失败路径: 接口报错要变成「错误: ...」并带上状态码与原因(模型据此如实转述)
-    def _fail_post(cfg, path, payload, timeout=None):
-        raise websearch.SearchError(
-            websearch._error_message(402, '{"error":{"message":"Insufficient Balance"}}'))
-
-    websearch._post = _fail_post
-    try:
-        r = capabilities.execute("deepseek_web_search", json.dumps({"query": "x"}))
-        assert r.startswith("错误:") and "402" in r and "余额不足" in r, r
-        r = capabilities.execute("deepseek_read_url", json.dumps({"url": "https://a/b"}))
-        assert r.startswith("错误:") and "余额不足" in r, r
-    finally:
-        websearch._post = _orig_ws_post
-    assert capabilities.execute("deepseek_web_search", json.dumps({"query": "  "})).startswith("错误:")
-    assert capabilities.execute("deepseek_read_url",
-                                json.dumps({"url": "file:///etc/passwd"})).startswith("错误:")
-    assert "请求过于频繁" in websearch._error_message(429, "")
-    print("联网搜索/抓取(DeepSeek 接口)自测 OK")
-
-    # 联网工具按模型分路: DeepSeek 用服务端工具, 别家模型退回同名函数工具
+    # 原生服务端工具在各模式下各声明一次，不能通过本地 ptc 执行。
+    assert not (WEB_TOOL_NAMES & capabilities.registered_names())
+    for _mode in (MODE_NORMAL, MODE_CREATIVE, MODE_CREATIVE_MAX, MODE_ONESHOT):
+        bot2.mode = _mode
+        _payload = json.loads(bot2._build_payload([], bot2._mode_params()))
+        _types = [t["type"] for t in _payload["tools"]]
+        assert _types.count("deepseek_web_search") == 1
+        assert _types.count("deepseek_read_url") == 1
+        assert not any(t.get("function", {}).get("name") in WEB_TOOL_NAMES
+                       for t in _payload["tools"])
+        assert _payload["model"] == bot2.cfg["model"]
+        _params = {**bot2._mode_params(), "no_tools": True}
+        _no_tools = json.loads(bot2._build_payload([], _params))
+        assert "tools" not in _no_tools and "parallel_tool_calls" not in _no_tools
     bot2.mode = MODE_NORMAL
-    assert WEB_TOOL_NAMES <= capabilities.registered_names()
-    assert not (WEB_TOOL_NAMES & bot2._allowed_tools()), "flash 原生联网, 不应再暴露同名函数工具"
-    _fp = json.loads(bot2._build_payload([], bot2._mode_params()))
-    _types = [t.get("type") for t in _fp["tools"]]
-    assert _types.count("deepseek_web_search") == 1 and _types.count("deepseek_read_url") == 1, _types
-    assert not any(t.get("function", {}).get("name") in WEB_TOOL_NAMES
-                   for t in _fp["tools"] if t.get("type") == "function"), "不应重复声明"
-    # kimi 没有服务端联网工具: 改用同名函数工具(仍由 DeepSeek 的接口提供能力)
-    bot2.model_alias = "kimi"
-    try:
-        assert WEB_TOOL_NAMES <= bot2._allowed_tools()
-        _kp = json.loads(bot2._build_payload([], bot2._mode_params()))
-        assert not any(t.get("type") == "deepseek_web_search" for t in _kp["tools"]), _kp["tools"]
-        _names = [t["function"]["name"] for t in _kp["tools"] if t.get("type") == "function"]
-        assert WEB_TOOL_NAMES <= set(_names), _names
-        # 一次性对话固定用 flash(原生联网), 所以按函数工具口径要出现在它自己的白名单里
-        assert WEB_TOOL_NAMES <= TOOLS["oneshot"]["only"], "一次性白名单里也要有"
-    finally:
-        bot2.model_alias = "flash"
-    print("联网工具按模型分路自测 OK")
+    assert images.normalize_url("example.com/a.png。") == "https://example.com/a.png"
+    print("DeepSeek 原生联网声明自测 OK")
 
     # 玩家发图片直链: 不靠工具, 直接把 URL 作为 image_url 附在那条用户消息里(服务端下载)
-    assert websearch.image_urls("看 https://a.com/x.png 和 https://b.com/y.JPG?w=2") == \
+    assert images.image_urls("看 https://a.com/x.png 和 https://b.com/y.JPG?w=2") == \
         ["https://a.com/x.png", "https://b.com/y.JPG?w=2"]
-    assert websearch.image_urls("https://a.com/page.html") == [], "普通网页不算图片直链"
-    assert websearch.image_urls("https://a.com/x.png https://b.com/y.png https://c.com/z.png") == \
+    assert images.image_urls("https://a.com/page.html") == [], "普通网页不算图片直链"
+    assert images.image_urls("https://a.com/x.png https://b.com/y.png https://c.com/z.png") == \
         ["https://a.com/x.png", "https://b.com/y.png"], "默认最多 2 张"
-    assert websearch.image_urls("看这个 https://a.com/x.png。") == ["https://a.com/x.png"], \
+    assert images.image_urls("看这个 https://a.com/x.png。") == ["https://a.com/x.png"], \
         "聊天里的尾部标点要去掉"
     assert "view_image" in capabilities.registered_names(), "兜底看图工具应在"
     assert "view_image" in bot2._allowed_tools(MODE_ONESHOT), "兜底看图全模式可用"
-    assert models.remote_image_url(bot2._model_spec()) is True, "DeepSeek 支持 http 图片地址"
-    assert models.remote_image_url({"api_base": "https://api.kimi.com/coding/v1"}) is False, \
-        "Kimi 只认 data: URL"
-    # 进上下文: flash 附图; kimi 不附(否则必然 400)
+    # 图片内容附在玩家原消息中。
     if not bot2.session:
         bot2.players.add("T")
         bot2._start_session()
@@ -2027,17 +1894,7 @@ def self_test():
     assert _content[1] == {"type": "image_url",
                            "image_url": {"url": "https://example.com/logo.png"}}, _content
     assert bot2.session.messages[-1] is _msgs[0], "附图的用户消息要原样进会话"
-    _orig_fi = websearch.fetch_image
-    websearch.fetch_image = lambda url, **kw: (_ for _ in ()).throw(
-        websearch.SearchError("取图失败(自测打桩)"))
-    bot2.model_alias = "kimi"
-    try:
-        _km = bot2._commit_to_context([("P", "看看 https://example.com/logo.png")])
-        assert isinstance(_km[0]["content"], str), "取不到图就不附图, 别把请求打成 400"
-    finally:
-        bot2.model_alias = "flash"
-        websearch.fetch_image = _orig_fi
-    assert len(bot2.session.messages) == _before + 2
+    assert len(bot2.session.messages) == _before + 1
     # 图片不把上下文估算顶爆(base64 不算文本 token)
     _est = Session._est_tokens([{"role": "tool", "tool_call_id": "x", "content": [
         {"type": "text", "text": "hi"},
@@ -2059,83 +1916,14 @@ def self_test():
     assert _bad[1]["content"][1]["type"] == "image_url", "user 消息里的 data: 图片不应被移除"
     assert _bad[2]["content"][0]["type"] == "text", "tool 消息里的图片要移除"
     assert bot2._drop_bad_images(_bad) == 0, "已修过的不再重复计数"
-    # 本地取图(只给不认 http 图片地址的模型): 文件头认格式 + SSRF 闸 + 体积上限
-    _png_path = Path("/tmp/viktor-img-test.png")
-    render.write_png(_png_path, [[(200, 60, 60, 255)] * 8 for _ in range(4)])
-    _png_bytes = _png_path.read_bytes()
-    assert websearch.sniff_image_mime(_png_bytes) == "image/png"
-    assert websearch.sniff_image_mime(b"<html>no</html>") == ""
-    for _u, _hint in (("file:///etc/passwd", "http"), ("http://127.0.0.1/a.png", "内网")):
-        try:
-            websearch.fetch_image(_u)
-            assert False, f"{_u} 应被拒"
-        except websearch.SearchError as _e:
-            assert _hint in str(_e), _e
-
-    class _ImgHandler(http.server.BaseHTTPRequestHandler):
-        def do_GET(self):
-            if self.path == "/ok.png":
-                body, ctype = _png_bytes, "image/png"
-            elif self.path == "/page.html":
-                body, ctype = b"<html>not an image</html>", "text/html"
-            else:
-                body, ctype = _png_bytes * 200, "image/png"
-            self.send_response(200)
-            self.send_header("Content-Type", ctype)
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
-
-        def log_message(self, *a):
-            pass
-
-    _srv2 = http.server.HTTPServer(("127.0.0.1", 0), _ImgHandler)
-    threading.Thread(target=_srv2.serve_forever, daemon=True).start()
-    _base2 = f"http://127.0.0.1:{_srv2.server_address[1]}"
-    try:
-        _mime, _b64 = websearch.fetch_image(_base2 + "/ok.png", allow_private=True)
-        assert _mime == "image/png" and base64.b64decode(_b64) == _png_bytes, _mime
-        try:
-            websearch.fetch_image(_base2 + "/page.html", allow_private=True)
-            assert False, "非图片应报错"
-        except websearch.SearchError as _e:
-            assert "不是有效图片" in str(_e), _e
-        try:
-            websearch.fetch_image(_base2 + "/big.png", allow_private=True, max_bytes=1024)
-            assert False, "超限应报错"
-        except websearch.SearchError as _e:
-            assert "上限" in str(_e), _e
-        # view_image 兜底: flash 只附 URL(服务端下载); kimi 本地取字节 -> data: URL
-        capabilities.take_images()
-        _r = capabilities.execute("view_image", json.dumps({"url": "https://example.com/logo.png"}))
-        _im = capabilities.take_images()
-        assert "已附在上下文里" in _r and _im[0]["image_url"]["url"] == \
-            "https://example.com/logo.png", (_r, _im)
-        assert capabilities.execute("view_image",
-                                    json.dumps({"url": "file:///etc/passwd"})).startswith("错误:")
-        websearch.fetch_image = lambda url, **kw: (_ for _ in ()).throw(
-            websearch.SearchError("取不到"))
-        bot2.model_alias = "kimi"
-        try:
-            _r = capabilities.execute("view_image", json.dumps({"url": "https://e.com/a.png"}))
-            assert _r.startswith("错误:") and "读不到" in _r, _r
-        finally:
-            bot2.model_alias = "flash"
-            websearch.fetch_image = _orig_fi
-        assert capabilities.take_images() == [], "取走后应清空"
-        # kimi: 本地取字节 -> data: URL 附进用户消息(DeepSeek 接口不回图片字节)
-        websearch.fetch_image = lambda url, **kw: ("image/png", "AAAA")
-        bot2.model_alias = "kimi"
-        try:
-            _km = bot2._commit_to_context([("P", "看看 https://example.com/a.png")])
-            assert _km[0]["content"][1]["image_url"]["url"] == "data:image/png;base64,AAAA", _km
-        finally:
-            bot2.model_alias = "flash"
-            websearch.fetch_image = _orig_fi
-    finally:
-        _srv2.shutdown()
-        _srv2.server_close()
-    print("本地取图(SSRF/格式/上限)/kimi 读图自测 OK")
+    # 兜底看图只附远程 URL，拒绝非 HTTP 地址。
+    capabilities.take_images()
+    _r = capabilities.execute("view_image", json.dumps({"url": "https://example.com/logo.png"}))
+    _im = capabilities.take_images()
+    assert "已附在上下文里" in _r and _im[0]["image_url"]["url"] == "https://example.com/logo.png"
+    assert capabilities.execute("view_image", json.dumps({"url": "file:///etc/passwd"})).startswith("错误:")
+    assert capabilities.take_images() == []
+    print("远程图片与兜底看图自测 OK")
 
     # 服务端联网工具的记录要原样回传: 搜索/读页的 server_tool_calls 进上下文
     _stc = [{"index": 0, "reasoning_content": "", "calls": [
@@ -2257,11 +2045,11 @@ def self_test():
     ] + [{"role": "user", "content": "Tester: " + "填充" * 200} for _ in range(3)]
     _sess_path.write_text("".join(json.dumps(r, ensure_ascii=False) + "\n" for r in _rows),
                           encoding="utf-8")
-    _stats = ledger.backfill(bot_log=Path("/tmp/no-such-bot.log"))
+    _stats = ledger.backfill(bot_log=Path(str(TEST_DIR / "no-such-bot.log")))
     assert _stats["episodes"] == 1 and _stats["ops"] == 1, _stats
     assert _stats["programs"] == 1, _stats
     _n = len(ledger.load())
-    _again = ledger.backfill(bot_log=Path("/tmp/no-such-bot.log"))
+    _again = ledger.backfill(bot_log=Path(str(TEST_DIR / "no-such-bot.log")))
     assert _again["episodes"] == 0 and _again["ops"] == 0 and len(ledger.load()) == _n, _again
     _eps = [e for e in ledger.episodes() if "埃菲尔" in (e.get("reason") or "")]
     assert len(_eps) == 1 and _eps[0]["ops"] and _eps[0]["ops"][0]["jid"] == "b777001-9", _eps
@@ -2279,7 +2067,7 @@ def self_test():
     _list = history.list_sessions(5)
     assert _sess_name in _list and "Tester: 帮我看看上次的桥" in _list, _list
     _hist = history.read_session(_sess_name)
-    assert "Tester: 帮我看看上次的桥" in _hist and "维克托: 好的, 我调记录看看" in _hist, _hist
+    assert "Tester: 帮我看看上次的桥" in _hist and "agent: 好的, 我调记录看看" in _hist, _hist
     assert "get_block" not in _hist and "minecraft:stone" not in _hist, "只保留压缩后的对话"
     assert "内部正文不该出现" not in _hist and "长期记忆" not in _hist, _hist
     assert "Tester: 谢谢" in _hist
@@ -2362,7 +2150,7 @@ def self_test():
 
         def _fwd_chat(t):
             bot2.process_line(
-                f"[2026-10-12 21:00:00:000 INFO] [Scripting] [VIKTOR-CHAT] T: {t}")
+                f"[2026-10-12 21:00:00:000 INFO] [Scripting] [AGENT-CHAT] T: {t}")
 
         _fwd_chat("正文开")
         assert bot2.body_forward
@@ -2412,24 +2200,24 @@ def self_test():
         bot2._sys = orig_sys_fwd
     print("转发开关自测 OK")
 
-    # 启动清理僵尸常加载区: 只清 viktor_pin* 前缀
+    # 启动清理僵尸常加载区: 只清 agent_pin* 前缀
     _seen = []
     _oc, _sc = bot2._console_output, bot2.bridge.send_command
     bot2._console_output = lambda cmd: ("List of all ticking areas in current dimension\n"
-                                        "- viktor_pin: 1 0 1 to 2 0 2\n"
-                                        "- viktorpark: 3 0 3 to 4 0 4")
+                                        "- agent_pin: 1 0 1 to 2 0 2\n"
+                                        "- agentpark: 3 0 3 to 4 0 4")
     bot2.bridge.send_command = lambda c: _seen.append(c)
     try:
         bot2._cleanup_stale_pins()
     finally:
         bot2._console_output, bot2.bridge.send_command = _oc, _sc
-    assert any("tickingarea remove viktor_pin" in c for c in _seen), _seen
-    assert not any("viktorpark" in c for c in _seen), _seen
+    assert any("tickingarea remove agent_pin" in c for c in _seen), _seen
+    assert not any("agentpark" in c for c in _seen), _seen
     print("常加载残留清理自测 OK")
 
     # pin_region 撞名自愈: 先清残留再重试
     _calls = []
-    _outs = iter(["[错误] A ticking area with the name viktor_pin already exists.",
+    _outs = iter(["[错误] A ticking area with the name agent_pin already exists.",
                   "Removed ticking area(s)",
                   ("Added ticking area")])
     _oc2, _sc2 = bot2._console_output, bot2.bridge.send_command
@@ -2442,7 +2230,7 @@ def self_test():
         bot2._console_output, bot2.bridge.send_command = _oc2, _sc2
         bot2._pinned.clear()
     assert "已设置" in r, r
-    assert any("tickingarea remove viktor_pin" in c for c in _calls), _calls
+    assert any("tickingarea remove agent_pin" in c for c in _calls), _calls
     print("pin_region 撞名自愈自测 OK")
 
     # ---------- 建造引擎(P2.1) ----------
@@ -2667,14 +2455,14 @@ api.set(6, 0, 0, "tall_grass")
     assert top.count("=") >= 3, top                            # 俯视看到顶层木板
     iso = R.ascii_view(pal3, cel3, bnd3, "iso")
     assert "等距视图" in iso and "=" in iso, iso
-    png = R.write_png("/tmp/viktor-render-test.png", R._pixels(pal3, cel3, bnd3, "front"), 2)
+    png = R.write_png(str(TEST_DIR / "agent-render-test.png"), R._pixels(pal3, cel3, bnd3, "front"), 2)
     raw = png.read_bytes()
     assert raw[:8] == b"\x89PNG\r\n\x1a\n" and raw[12:16] == b"IHDR", raw[:16]
     assert int.from_bytes(raw[16:20], "big") == 6, raw[16:20]      # 3 列 × scale 2
     png.unlink(missing_ok=True)
     print("视觉反馈(渲染/PNG)自测 OK")
 
-    # 渲染图直接附给模型: 开关 / 张数上限 / kimi 按像素计费所以要小图 / 关掉就不附
+    # 渲染图直接附给模型: 开关 / 张数上限 / 附图尺寸受控 / 关掉就不附
     assert R.model_scale([[0] * 20 for _ in range(10)]) == 2      # 小件 2 像素/格
     assert R.model_scale([[0] * 400 for _ in range(10)]) == 1     # 大件 1 像素/格
     assert R.png_bytes([[ (1,2,3,255) ]], 1)[:8] == b"\x89PNG\r\n\x1a\n"
@@ -2700,20 +2488,6 @@ api.set(6, 0, 0, "tall_grass")
         bot2.cfg["render_attach_png"] = False
         _out2 = bot2._tool_render_build({"operation_id": "t1", "views": ["front"]})
         assert capabilities.take_images() == [] and "已附" not in _out2, _out2
-        # 模型档案声明不支持看图 -> 同样不附(避免 400)
-        bot2.cfg["render_attach_png"] = True
-        _specs = bot2.cfg.setdefault("models", {})
-        _flash = _specs.setdefault("flash", {})
-        _old_vision = _flash.get("vision", None)
-        _flash["vision"] = False
-        try:
-            bot2._tool_render_build({"operation_id": "t1", "views": ["front"]})
-            assert capabilities.take_images() == [], "vision=false 时不应附图"
-        finally:
-            if _old_vision is None:
-                _flash.pop("vision", None)
-            else:
-                _flash["vision"] = _old_vision
     finally:
         for k, v in _keep.items():
             if v is None:
@@ -2732,7 +2506,7 @@ api.set(6, 0, 0, "tall_grass")
 
     # 限额报错要"可行动": 给等价尺寸与超出倍数
     _be, _bp = bot2.bus_enabled, bot2.pack_proto
-    bot2.bus_enabled, bot2.pack_proto = True, 4
+    bot2.bus_enabled, bot2.pack_proto = True, 5
     try:
         msg = bot2._tool_get_heightmap({"x1": 0, "z1": 0, "x2": 80, "z2": 80})
         assert "64×64" in msg and "约" in msg, msg
@@ -2805,137 +2579,23 @@ api.set(6, 0, 0, "tall_grass")
     assert "108 格本来就对" in idem, idem
     print("建造渲染自测 OK")
 
-    # ===== 模型切换自测(会话级模型: 清空 / 清空k / 清空g) =====
-    from . import models as _models
-    # 触发词精确匹配: 认不出来的(清空x / 清空 k)当普通聊天, 不清上下文
-    assert _models.resolve_trigger(bot2.cfg, "清空") == "flash"
-    assert _models.resolve_trigger(bot2.cfg, "清空k") == "kimi"
-    assert _models.resolve_trigger(bot2.cfg, "清空g") == "gpt"
-    assert _models.resolve_trigger(bot2.cfg, "清空x") is None
-    assert _models.resolve_trigger(bot2.cfg, "清空 k") is None, "必须精确匹配, 不认空格"
-    assert _models.resolve_trigger(bot2.cfg, "清空一下") is None
-    said = []
-    orig_say4 = bot2.bridge.say_as_viktor
-    bot2.bridge.say_as_viktor = lambda text, *a, **k: said.append(text)
-    if not bot2.session:
-        bot2.players.add("T")
-        bot2._start_session()
-    bot2.agent_busy = False
-    bot2.pending.clear()
-    # gpt 预留未接通: 不清空、不换模型, 只提示
-    bot2.model_alias = "flash"
-    before = len(bot2.session.messages)
-    bot2._on_clear("Tester", "gpt")
-    assert bot2.model_alias == "flash" and said and "还没有接通" in said[0], said
-    assert len(bot2.session.messages) >= before, "未接通的模型不应清空上下文"
-    # 有任务在跑: 清空k 无效(和普通清空同一并发规则), 模型不变
-    said.clear()
-    bot2.agent_busy = True
-    bot2._on_clear("Tester", "kimi")
-    assert bot2.model_alias == "flash" and "清空无效" in said[-1], said
-    bot2.agent_busy = False
-    # 清空k: 开新会话 + 换模型 + [系统]提示里点名模型
-    said.clear()
-    bot2._on_clear("Tester", "kimi")
-    assert bot2.model_alias == "kimi" and bot2.session.model == "kimi", bot2.model_alias
-    assert "Kimi" in said[-1], said
-    # 模型档案: 模型名/窗口/输出上限都按 kimi 来(窗口故意设 262144 控成本)
-    kspec = bot2._model_spec()
-    assert kspec["model"] == "k3.1-pro" and kspec["context_window_tokens"] == 262144
-    assert kspec["api_base"] == "https://api.kimi.com/coding/v1"
-    assert kspec["reasoning_content"] is False
-    # 请求体差异: 模型名 / reasoning_effort / 温度固定 1 / 不发 deepseek 的 effort
-    bot2.mode = MODE_NORMAL
-    kp = bot2._mode_params()
-    kpayload = json.loads(bot2._build_payload([], kp))
-    assert kpayload["model"] == "k3.1-pro" and kpayload["reasoning_effort"] == "low", kpayload
-    assert "effort" not in kpayload and kpayload["temperature"] == 1, kpayload
-    bot2.mode = MODE_CREATIVE
-    assert json.loads(bot2._build_payload([], bot2._mode_params()))["reasoning_effort"] == "high"
-    bot2.mode = MODE_CREATIVE_MAX
-    assert json.loads(bot2._build_payload([], bot2._mode_params()))["reasoning_effort"] == "max"
-    bot2.mode = MODE_NORMAL
-    assert kp["max_tokens"] <= kspec["max_output_tokens"] == 32768
-    assert bot2._input_token_budget() < 262144, "输入预算应按 kimi 的窗口算"
-    # 一次性对话固定用默认模型(flash), 不受主会话当前模型影响
-    bot2.model_alias = "kimi"
-    bot2._tls.oneshot = True
-    assert bot2._model_spec()["alias"] == "flash", "一次性对话应固定 flash"
-    del bot2._tls.oneshot
-    bot2.model_alias = "flash"
-    # 不需要回传思考链的模型: 压缩时不补 reasoning_content(省输入 token)
-    cmsgs = [{"role": "user", "content": "T: 好"},
-             {"role": "assistant", "content": None, "reasoning_content": "想想",
-              "tool_calls": [{"id": "c1", "type": "function",
-                              "function": {"name": "send_chat_message",
-                                           "arguments": json.dumps({"text": "嗯"},
-                                                                   ensure_ascii=False)}}]},
-             {"role": "tool", "tool_call_id": "c1", "content": "ok"}]
-    kept_k, _ = Session.compact(cmsgs, keep_reasoning=False)
-    kept_d, _ = Session.compact(cmsgs, keep_reasoning=True)
-    assert "reasoning_content" not in kept_k[1], kept_k
-    assert kept_d[1].get("reasoning_content") == "", kept_d
-    # 落盘记录会话模型; 恢复会话按落盘的模型切过去(跨模型恢复不会灌错口径)
-    msess = Session(4242, model="kimi")
-    msess.add_user("T: 你好")
-    msess.messages.append({"role": "assistant", "content": None, "tool_calls": [
-        {"id": "m1", "type": "function",
-         "function": {"name": "stay_silent", "arguments": "{}"}}]})
-    msess.messages.append({"role": "tool", "tool_call_id": "m1", "content": "ok"})
-    mp = msess.dump()
-    assert mp is not None, "有对话应落盘"
-    assert json.loads(mp.read_text(encoding="utf-8").splitlines()[0])["_meta"]["model"] == "kimi"
-    saved_alias, saved_session = bot2.model_alias, bot2.session
-    bot2.model_alias = "flash"
-    bot2.resume_session(str(mp))
-    assert bot2.model_alias == "kimi" and bot2.session.model == "kimi", bot2.model_alias
-    assert all("reasoning_content" not in m for m in bot2.session.messages
-               if m["role"] == "assistant"), "kimi 会话恢复不该补思考链"
-    # 「恢复会话d」: 强制用默认模型灌回同一段 kimi 对话(模型不可用/想省钱时用),
-    # 并且要给 assistant 补 reasoning_content(DeepSeek 思考模式 + tools 的要求)
-    bot2.agent_busy = False
-    bot2.pending.clear()
-    said.clear()
-    bot2._on_restore_session("Tester", force_default=True)
-    assert bot2.model_alias == "flash" and bot2.session.model == "flash", bot2.model_alias
-    assert all(m.get("reasoning_content") == "" for m in bot2.session.messages
-               if m["role"] == "assistant"), "强制默认模型恢复时应补思考链字段"
-    assert said and "原会话是 kimi" in said[-1], said
-    bot2.model_alias, bot2.session = saved_alias, saved_session
-    mp.unlink(missing_ok=True)
-    # 控制词分发: 「恢复会话d」走程序分支, 不进待处理队列(不进上下文)
-    bot2.agent_busy = False
-    bot2.pending.clear()
-    said.clear()
-    bot2.process_line("[2026-10-26 21:00:00:000 INFO] <Tester> 恢复会话d")
-    assert not bot2.pending, "控制词不该进队列"
-    assert bot2.model_alias == "flash", bot2.model_alias
-    assert said and "已恢复上一段会话" in said[-1], said
-    bot2.model_alias, bot2.session = saved_alias, saved_session
-    bot2.bridge.say_as_viktor = orig_say4
-    print("模型切换自测 OK(清空 / 清空k / 清空g 预留)")
-
     # ===== 模型报错提示自测(400/429/其他 -> 原样转发一句 [系统]) =====
-    bot2.model_alias = "kimi"
     _n429 = bot2._api_failure_note(Exception(
         'HTTP 429: {"error":{"message":"Rate limit reached for requests"}}'))
-    assert "429" in _n429 and "Kimi" in _n429 and "Rate limit reached" in _n429, _n429
-    assert "清空" not in _n429 and "恢复会话d" not in _n429, "只转发模型返回的内容, 不罗列建议"
+    assert "429" in _n429 and bot2.cfg["model"] in _n429 and "Rate limit reached" in _n429, _n429
+    assert "清空" not in _n429, "只转发模型返回的内容, 不罗列建议"
     # 原因按 [:40] 截断(不把整段 JSON 刷进聊天)
     _n400 = bot2._api_failure_note(Exception(
         'HTTP 400: {"error":{"message":"' + "X" * 120 + '"}}'))
     assert "400" in _n400 and "X" * 40 in _n400 and "X" * 41 not in _n400, _n400
     # 非 HTTP 异常(超时/DNS/解析)也必须说话, 不能只在日志里
     _nnet = bot2._api_failure_note(RuntimeError("URLError: <urlopen error timed out>"))
-    assert "urlopen error timed out" in _nnet and "kimi" in _nnet, _nnet
+    assert "urlopen error timed out" in _nnet and bot2.cfg["model"] in _nnet, _nnet
     assert "RuntimeError:" not in _nnet and "URLError:" not in _nnet, "嵌套异常前缀应去掉"
     # 纯超时(没有 HTTP 状态码): 只报那句话, 不留半截词
     _nto = bot2._api_failure_note(RuntimeError("TimeoutError: The read operation timed out"))
     assert _nto.endswith("The read operation timed out。这条消息没处理。"), _nto
     assert "TimeoutError" not in _nto, _nto
-    # 读超时按模型可覆盖: kimi 慢, 给得比全局(60s)长
-    assert bot2._api_timeout() == bot2.cfg["models"]["kimi"]["api_timeout_sec"], bot2._api_timeout()
-    bot2.model_alias = "flash"
     assert bot2._api_timeout() == bot2.cfg["api_timeout_sec"], bot2._api_timeout()
     # 错误正文解析: JSON 里抠 error.message; 非 JSON 压成一行
     assert bot2._error_detail('{"error":{"message":"Insufficient Balance"}}') \
@@ -3039,3 +2699,116 @@ api.set(6, 0, 0, "tall_grass")
     print(r)
     print("capabilities self-test OK")
 
+
+
+def _test_restart_and_protocol():
+    from . import runtime
+    from .constants import PACK_PROTOCOL, PACK_PROTO_BUILD, PACK_PROTO_SPATIAL
+    from unittest import TestCase
+
+    check = TestCase()
+    repo = TEST_DIR / "repo with spaces"
+    other = TEST_DIR / "other"
+    repo.mkdir()
+    other.mkdir()
+    proc = TEST_DIR / "proc"
+    proc.mkdir()
+    for pid, cwd, args in (
+        (101, repo, ["python3", "-u", "bot.py"]),
+        (102, other, ["python3", "bot.py"]),
+        (103, repo, ["python3", "other.py", "bot.py"]),
+        (104, repo, ["python3", str(repo / "bot.py")]),
+        (105, repo, ["python3", "-c", "print('bot.py')"]),
+    ):
+        item = proc / str(pid)
+        item.mkdir()
+        (item / "cwd").symlink_to(cwd, target_is_directory=True)
+        (item / "cmdline").write_bytes("\0".join(args).encode())
+    assert runtime.instance_pids(repo, proc) == [101, 104]
+    state_file = TEST_DIR / "state.json"
+    state = {"pid": 101, "repo": str(repo.resolve()), "updated": 100,
+             "busy": False, "pending": 0, "compact": False, "oneshot_active": 0}
+    state_file.write_text(json.dumps(state))
+    runtime.require_idle(101, state_file, repo, now=102)
+    for changes in ({"busy": True}, {"pending": 1}, {"compact": True},
+                    {"oneshot_active": 1}, {"updated": 90}, {"pid": 102},
+                    {"repo": str(other)}, {"busy": None}):
+        state_file.write_text(json.dumps({**state, **changes}))
+        with check.assertRaises(ValueError):
+            runtime.require_idle(101, state_file, repo, now=102)
+    state_file.write_text("invalid json")
+    with check.assertRaises(ValueError):
+        runtime.require_idle(101, state_file, repo, now=102)
+    state_file.unlink()
+    with check.assertRaises(OSError):
+        runtime.require_idle(101, state_file, repo, now=102)
+    sessions = TEST_DIR / "resolve-sessions"
+    sessions.mkdir()
+    first = sessions / "session-alpha.jsonl"
+    first.touch()
+    assert runtime.resolve_session("alpha", sessions) == first.resolve()
+    assert runtime.resolve_session(str(first), sessions) == first.resolve()
+    (sessions / "session-beta.jsonl").touch()
+    with check.assertRaises(ValueError):
+        runtime.resolve_session("session", sessions)
+    with check.assertRaises(ValueError):
+        runtime.resolve_session("missing", sessions)
+
+    cfg = load_config()
+    bot = Bot(cfg)
+    paths.LOG_PATH.touch()
+    for running in (False, True):
+        bot._oneshot_active = int(running)
+        bot._write_state()
+        snapshot = json.loads(paths.STATE_PATH.read_text())
+        assert snapshot["busy"] is running and snapshot["oneshot_active"] == int(running)
+        assert snapshot["repo"] == str(paths.BASE_DIR)
+    assert PACK_PROTOCOL == PACK_PROTO_BUILD == PACK_PROTO_SPATIAL == 5
+    for version in (5, 6):
+        def respond(cmd):
+            nonce = cmd.split()[-1]
+            with paths.SERVER_LOG_PATH.open("a") as f:
+                f.write(f"[AGENT-HELLO] unrelated v99\n[AGENT-HELLO] {nonce} v{version}\n")
+        bot.bridge.send_command = respond
+        assert bot._probe_bridge() is (version == 5)
+    bot.cfg["bus_protocol"] = "off"
+    bot.bridge.send_command = lambda cmd: (_ for _ in ()).throw(AssertionError("bus disabled"))
+    assert not bot._probe_bridge()
+    pack = paths.BASE_DIR / "behavior_pack" / "agent_bridge"
+    source = (pack / "scripts" / "main.js").read_text()
+    assert f'const PROTOCOL = "v{PACK_PROTOCOL}";' in source
+    manifest = json.loads((pack / "manifest.json").read_text())
+    assert [d["module_name"] for d in manifest["dependencies"]] == ["@minecraft/server"]
+    print("重启守卫/实例隔离/协议握手自测 OK")
+
+
+def self_test():
+    """使用独立临时目录、假凭据和桥接桩运行完整离线自测。"""
+    global TEST_DIR
+    with TemporaryDirectory(prefix="mc-agent-test-") as directory, ExitStack() as stack:
+        TEST_DIR = Path(directory)
+        test_logs = TEST_DIR / "logs"
+        test_logs.mkdir()
+        cfg = json.loads((paths.BASE_DIR / "config.example.json").read_text(encoding="utf-8"))
+        cfg["api_key"] = "offline-test-key"
+        config_path = TEST_DIR / "config.json"
+        config_path.write_text(json.dumps(cfg), encoding="utf-8")
+        values = {
+            "CONFIG_PATH": config_path, "LOG_DIR": test_logs,
+            "LOG_PATH": test_logs / "bot.log", "SERVER_LOG_PATH": test_logs / "server.log",
+            "SESSION_DIR": test_logs / "sessions", "ONESHOT_DIR": test_logs / "oneshot",
+            "STATE_PATH": test_logs / "agent.state", "LEDGER_PATH": test_logs / "ledger.jsonl",
+            "PROGRAM_DIR": test_logs / "programs",
+        }
+        for name, value in values.items():
+            stack.enter_context(patch.object(paths, name, value))
+        stack.enter_context(patch.object(capabilities, "MEMORY_PATH", TEST_DIR / "memory.md"))
+        stack.enter_context(patch.object(capabilities, "SERVER_LOG", values["SERVER_LOG_PATH"]))
+        stack.enter_context(patch.object(ScreenBridge, "send_command", lambda self, cmd: None))
+        stack.enter_context(patch.object(ScreenBridge, "send_commands",
+                                        lambda self, cmds: [self.send_command(cmd) for cmd in cmds]))
+        stack.enter_context(patch.object(Bot, "_say_later", lambda *a, **k: None))
+        stack.enter_context(patch("urllib.request.urlopen",
+                                 side_effect=AssertionError("offline self-test attempted network I/O")))
+        _test_restart_and_protocol()
+        _self_test()

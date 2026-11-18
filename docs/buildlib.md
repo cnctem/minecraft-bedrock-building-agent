@@ -1,6 +1,6 @@
-# 建筑函数库（`api.lib` / `viktor/buildlib/`）
+# 建筑函数库（`api.lib` / `agent/buildlib/`）
 
-把 Java 建筑模组里的几何库**按算法移植**到 bot 的建造引擎上：模型不再手写几百行循环去逼近
+建筑函数库为建造引擎提供可复用的 Python 几何构件：模型不再手写几百行循环去逼近
 一个中式屋顶或十字拱，而是写 `api.lib.chinese_roof(...)`。底层沙箱、preview/commit/verify/undo、
 坐标和渲染见[建造引擎](build-engine.md)。
 
@@ -17,9 +17,9 @@
 | `decor` | 门窗、线脚、阳台、壁炉、吊灯与成套室内家具 | [`functions-interior.md`](../skills/mc-interior/references/functions-interior.md) |
 | `create` | 确定性地形/植被/遗迹/道路生成器与整栋模板 | [`functions-generators.md`](../skills/mc-terrain/references/functions-generators.md) |
 
-- 实现：`viktor/buildlib/{core,shapes,chinese,structures,regional,gardens,decor,creations}.py`
-- 元数据（唯一来源）：`viktor/buildlib/registry.py` → `CATEGORIES` / `SPEC`
-- 注入：`viktor/build.py` 把 `LIB_SOURCE` 随 payload 经 stdin 送进沙箱子进程，在用户程序 `exec`
+- 实现：`agent/buildlib/{core,shapes,chinese,structures,regional,gardens,decor,creations}.py`
+- 元数据（唯一来源）：`agent/buildlib/registry.py` → `CATEGORIES` / `SPEC`
+- 注入：`agent/build.py` 把 `LIB_SOURCE` 随 payload 经 stdin 送进沙箱子进程，在用户程序 `exec`
   之前构造 `api.lib`
 - 文档：`python3 tools/gen_buildlib_docs.py` → `skills/*/references/functions-*.md`
 - 自测：`python3 bot.py --test` 内的「建筑函数库分类自测 / 函数库 help/别名自测」
@@ -27,27 +27,14 @@
 `print(api.lib.help(...))` 等程序输出不会直接写 stdout，而会作为 `[程序输出]` 附在 build_preview 结果里。
 参数错误会带出 `registry.SPEC` 中的接口签名，便于模型自行纠正。
 
-## 1. 为什么不做成“第二套 DSL”
+## 1. 与建造引擎协作
 
-原模组里有一套 `BuildCodeInterpreter`（自研 DSL + 函数注册表）。本项目的建造引擎已经是
-**受限 Python**，能力更强且已有沙箱、限额、preview/commit/undo、渲染与校验。所以只移植
-**几何算法**，把 `BuildCodeInterpreter` 当作“哪些函数、参数怎么排、默认值是什么”的参考：
+函数经 api.lib 生成普通 ops，再由统一的受限 Python 编译、预览、提交、校验和撤销流程执行。
+支持 snake_case 和 camelCase，不引入第二套解释器。
 
-| 原实现 | 这里 |
-|---|---|
-| `BuildCodeInterpreter` DSL + 内置函数（sphere/cylinder/polygon…） | `api.*` 基础原语（已有）+ `api.lib` 高层函数 |
-| `ShapeFunctions` / `SurfaceShapes` / `StructureShapes` | `shapes.py` + `structures.py` |
-| `AncientShapes` / `VaultShapes` | `chinese.py` + `structures.py` |
-| `RegionalShapes` | `regional.py` |
-| `GardenShapes` / `MonumentFunctions` | `gardens.py` + `creations.py`（纪念性） |
-| `HouseDecor` / `DecorationFunctions` | `decor.py` |
-| `DomainGenerators` / `GenNoise` | `creations.py`（确定性 hash 噪声，不用 Python `random`） |
-| `MegaStyles` | `creations.py` 的整栋模板（参数化，可分段提交） |
-| `ShapeGuide`（35KB 提示词） | 拆成 `skills/*/references/functions-*.md`，按技能按需载入 |
+## 2. 统一语义
 
-## 2. 移植时统一改写的语义
-
-1. **坐标**：Java 的绝对 `x/y/z` → 局部 `(u, v, w)`，世界坐标由 `origin` + `facing` 变换，
+1. **坐标**：使用局部 `(u, v, w)`，世界坐标由 `origin` + `facing` 变换，
    四朝向自动旋转（`facing="front"` 跟着建造朝向走）。
 2. **方块 ID**：Java 名 → 服务器真实 ID。注意 BDS **1.21.132 起 ID 已统一成 Java 叫法**
    （`stone_bricks`、`quartz_pillar`、`iron_chain`、`dandelion`、`sugar_cane` 都是真 ID，
@@ -55,13 +42,13 @@
    是“旧名 → 新 ID”的反查（`stonebrick`→`stone_bricks`、`chain`→`iron_chain`…），
    旧教程/旧技能书里的写法仍然可用。表在 `core._LibBase._ALIAS`，**一次维护，两处生效**
    （沙箱预置代码 + 宿主侧），`api.fill` 这类原语也同样受益。服务器再升级后用
-   `scriptevent viktor:ids` + `tools/build_items.py` 重导 ID 表，并核对别名表的目标 ID 是否还在。
+   `scriptevent agent:ids` + `tools/build_items.py` 重导 ID 表，并核对别名表的目标 ID 是否还在。
 3. **状态**：仍需要状态的变体（`coarse_dirt`→`dirt{dirt_type}`、`red_sand`→`sand{sand_type}`、
    门/楼梯的 `direction` 等）由别名表带出 states；而 `cracked/mossy/chiseled` 石砖、
    `smooth_quartz`/`quartz_pillar` 在新版已是独立 ID，不再用 `stone_brick_type`/`chisel_type` 状态。
-4. **随机**：不用 `random`，全部走 `hash_mix/hash2/hash3/fbm2`（与原模组同一套整数散列），
+4. **随机**：不用 `random`，全部走 `hash_mix/hash2/hash3/fbm2`（确定性整数散列），
    同坐标同 `seed` 永远同结果，可分块施工、可重跑。
-5. **错误**：原实现里“参数不合法就返回 0、方块凭空消失”的做法**一律改成抛错**，并附接口签名：
+5. **错误**：非法参数直接抛错，并附接口签名：
 
    ```
    baroque_portico: 面宽至少为 columns*2；当前 8，需要 10
@@ -96,21 +83,8 @@
 4. `python3 bot.py --test`。
 5. 需要视觉确认时用 `build_preview` + `render_build(views=["front","top","iso"])` 看字符图/PNG。
 
-## 5. 已知取舍
+## 5. 维护约定
 
-- 只移植“有明确几何价值”的函数；原模组的任务调度、NPC 行为、图片体素化（`ImageDepthExtruder`、
-  `ReferenceImageVoxelizer`）等与建造几何无关的部分不在范围内。
-- `MegaStyles` 的整栋模板改成**参数化 + 可分段**：整栋一次性提交容易顶到体积上限，
-  文档里建议按「地基/墙身/屋顶/内饰」分四次 preview/commit。
-- 原 `ShapeGuide` 里个别组合建议彼此矛盾（例如屋顶后是否还要叠飞檐/瓦垄）。本库以**实际实现 +
-  渲染验证**为准，文档由 `registry.SPEC` 生成，避免“说明书和代码两套说法”。
-
-## 6. 来源与授权注意
-
-- 算法参考自反编译得到的 Java 类（`ShapeFunctions`、`AncientShapes`、`GardenShapes`、
-  `RegionalShapes`、`VaultShapes`、`StructureShapes`、`SurfaceShapes`、`MonumentFunctions`、
-  `HouseDecor`、`DecorationFunctions`、`DomainGenerators`、`MegaStyles`、`BuildCodeInterpreter`、
-  `ShapeGuide`）。反编译产物本身**没有进仓库**，这里只有按基岩版语义重写的 Python 实现。
-- 若要对外分发本仓库，先确认原模组的许可证是否允许衍生/再分发；只在私人服务器自用则不受影响。
-- 原模组的数值、比例建议（屋顶高度系数、柱高比、开窗节奏等）被整理进技能书，属于“经验参数”，
-  实际以渲染/实机效果为准。
+- 库函数只负责几何，不执行任务调度或世界操作。
+- 整栋模板支持参数化，仍建议按地基、墙身、屋顶、内饰分批预览和提交。
+- 设计比例以实现和渲染验证为准；签名由 registry 生成，教学资料直接维护在技能目录。

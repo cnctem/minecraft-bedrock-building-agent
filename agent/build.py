@@ -1,10 +1,10 @@
 """建造程序: AST 白名单 + 子进程沙箱 + 体素化 + KEEP/RLE 编码。
 
 模型写的是**函数体**, 作用域里有 `api`(纯几何, 不碰世界) 和 `api.lib`
-(建筑函数库, 见 viktor/buildlib/)。本模块把它变成「期望体素体积」:
+(建筑函数库, 见 agent/buildlib/)。本模块把它变成「期望体素体积」:
 palette(索引 0 固定 = KEEP 不写) + 分层 RLE, 交给行为包执行。
 
-依赖方向: 叶子模块, 只 import 标准库 + `viktor.buildlib`(同样零项目内依赖,
+依赖方向: 叶子模块, 只 import 标准库 + `agent.buildlib`(同样零项目内依赖,
 仅把自身源码拼成沙箱预置代码); 不 import 其它 bot_* 模块。
 """
 from __future__ import annotations

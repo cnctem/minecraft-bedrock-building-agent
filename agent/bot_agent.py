@@ -12,7 +12,7 @@ from datetime import datetime
 
 import capabilities
 
-from . import ledger, models
+from . import ledger
 from .constants import (Aborted, CONTEXT_WARN_START_PCT, CONTEXT_WARN_STEP_PCT, CREATIVE_MODES,
                         IMAGE_NOTE, RETRYABLE_HTTP, SMART_COMPACT_AUTO_PCT)
 from .paths import log
@@ -20,8 +20,7 @@ from .profiles import EFFORT_KEYS, LIMIT_DEFAULTS, LIMIT_KEYS, MODES, PROMPTS, T
 from .prompts import SMART_COMPACT_PROMPT
 from .session import Session
 
-# 联网工具的名字: DeepSeek 原生联网时它们在请求里以服务端工具声明(模型自己调, 服务端执行),
-# 本地不再作为函数工具暴露; 切到别家模型时才退回同名函数工具(实现见 websearch.py)。
+# DeepSeek 原生服务端工具不进入本地能力注册表或 ptc。
 WEB_TOOL_NAMES = {"deepseek_web_search", "deepseek_read_url"}
 
 
@@ -189,8 +188,8 @@ class BotAgentMixin:
         s = m.scale
         def val(key: str):
             return self.cfg.get(key, LIMIT_DEFAULTS.get(key))
-        # 输出上限同时受模型本身约束(如 kimi 32768); 抬高额度也不能越过它
-        cap = int(self._model_spec().get("max_output_tokens") or s * val(k["tokens"]))
+        # 所有模式的输出受配置的重试输出上限约束。
+        cap = int(self.cfg.get("retry_max_reply_tokens", 32768) or s * val(k["tokens"]))
         return {
             "effort": self.cfg.get(EFFORT_KEYS[m.effort], "low"),
             "max_tokens": min(s * val(k["tokens"]), cap),
@@ -224,7 +223,7 @@ class BotAgentMixin:
         """本模式暴露给模型的工具白名单。未列出的工具根本不会出现在工具表里。
         工具 profile 支持 None(全部)/{"only": 白名单}/{"except": 黑名单}。
         不可切换的模式(如一次性)连 set_mode 都不暴露。
-        联网工具按模型分路: DeepSeek 原生联网时它们以服务端工具声明, 不再作为函数工具暴露。"""
+        原生联网工具在请求层声明，不属于本地函数白名单。"""
         m = self._mode_info(mode)
         spec = TOOLS[m.tools]
         names = set(capabilities.registered_names())
@@ -239,8 +238,6 @@ class BotAgentMixin:
         # 常加载仅创造模式支持
         if (mode or self._mode()) not in CREATIVE_MODES:
             allow.discard("pin_region")
-        if models.native_web_tools(self._model_spec()):
-            allow -= WEB_TOOL_NAMES
         return allow
 
     def _apply_mode_limits(self, params: dict):
@@ -266,7 +263,7 @@ class BotAgentMixin:
         self._maybe_warn_context_size(used)
         if used <= budget:
             if not self._smart_compact_auto_failed and self._smart_compact_due(used):
-                window = int(self._model_spec().get("context_window_tokens") or 0)
+                window = int(self.cfg.get("context_window_tokens") or 0)
                 pct = int(used * 100 / budget) if budget else 0
                 wpct = used * 100 / window if window else 0
                 stats = self._smart_compact_session()
@@ -303,20 +300,13 @@ class BotAgentMixin:
         return True
 
     def _smart_compact_due(self, used: int) -> bool:
-        """上下文占用是否到了「自动智能压缩」的档位(默认 95%)。
-
-        分母是**输入预算**(窗口 − 本轮输出上限 − 余量), 而不是裸窗口: 输出额度占比大的模型
-        (kimi 262144 窗口配 32768 输出 ≈ 12.5%)按裸窗口算 95% 时, 早就被强制普通压缩接管了。
-        按预算算, 无论什么模型都是“距离强制压缩只剩 5% 预算”时动手: 既不会白压也不会来不及。"""
+        """按输入预算判断是否达到自动智能压缩阈值。"""
         pct = int(self.cfg.get("smart_compact_auto_pct", SMART_COMPACT_AUTO_PCT))
         return used * 100 >= self._input_token_budget() * pct
 
     def _maybe_warn_context_size(self, used: int) -> None:
-        """上下文占用每跨过一档(70% 起、步长 10%)就用 [系统] 提醒玩家一次, 同一档只提一次。
-        分母是本会话模型的窗口(models.py 的 context_window_tokens, 故意设得比模型真实窗口小
-        以控制成本; 默认模型 1M, kimi 262144); 压缩/清空/新会话后档位复位,
-        之后会重新从 70% 起提醒。提醒里告知玩家可以手动发「压缩」, 只提醒、不改行为。"""
-        window = int(self._model_spec().get("context_window_tokens") or 0)
+        """上下文占用跨过新档位时提醒；压缩和新会话后复位。"""
+        window = int(self.cfg.get("context_window_tokens") or 0)
         if window <= 0:
             return
         pct = int(used * 100 / window)
@@ -336,16 +326,14 @@ class BotAgentMixin:
     def _input_token_budget(self) -> int:
         """输入能占多少 token: 本会话模型的窗口 − 本轮最大输出 − 安全余量。
         API 要求 prompt_tokens + max_tokens 不超过窗口, 所以输出额度必须从输入里扣掉。
-        窗口按模型走(见 models.py): 换模型就是换一整套预算。"""
-        window = int(self._model_spec().get("context_window_tokens") or 1048576)
+        窗口由 context_window_tokens 配置。"""
+        window = int(self.cfg.get("context_window_tokens") or 1048576)
         reserve = self.cfg.get("context_safety_tokens", 4096)
         return max(4096, window - self._mode_params()["max_tokens"] - reserve)
 
     def _retry_output_cap(self) -> int:
-        """输出被 max_tokens 截断后能抬高到多少: 全局重试上限与本模型输出上限取小。"""
-        global_cap = int(self.cfg.get("retry_max_reply_tokens", 32768))
-        model_cap = int(self._model_spec().get("max_output_tokens") or global_cap)
-        return min(global_cap, model_cap)
+        """输出被截断后可使用的最大输出额度。"""
+        return int(self.cfg.get("retry_max_reply_tokens", 32768))
 
     def _reply_max_chunks(self) -> int:
         if self.creative_mode:
@@ -354,32 +342,20 @@ class BotAgentMixin:
         return self.cfg["reply_max_chunks"]
 
     def _build_payload(self, messages: list[dict], params: dict) -> bytes:
-        """拼请求体: 模型名/思考强度字段/采样参数都按本会话的模型档案决定。
-        effort 只是模式产出的三档 low/high/max; 发哪个字段、映射成什么由
-        模型的 effort_param/effort_map 决定(deepseek 用 effort, kimi 用 reasoning_effort)。"""
-        spec = self._model_spec()
+        """构造 DeepSeek 请求，联网由服务端工具执行。"""
+        spec = self.cfg
         payload = {
             "model": spec["model"],
             "messages": messages,
             "max_tokens": params["max_tokens"],
         }
-        field, value = models.effort_of(spec, params["effort"])
-        if field:
-            payload[field] = value
+        payload["effort"] = params["effort"]
         if not params.get("no_tools"):  # 收尾发言用 no_tools 逼模型用正文总结
             tools = capabilities.tool_schemas(
                 allow=self._allowed_tools(), mode_choices=list(self._mode_next()))
-            # DeepSeek 原生联网: 服务端工具, 模型自己决定是否联网, 搜索/开页/抓取都在服务端跑,
-            # 客户端不执行任何工具(结果在 message.server_tool_calls 与 citations 里)。
-            # 这两项是 DeepSeek 扩展, 别家模型会在 tools 里直接 400, 所以按模型分路。
-            if models.native_web_tools(spec):
-                tools = tools + [{"type": "deepseek_web_search"},
-                                 {"type": "deepseek_read_url"}]
+            tools += [{"type": name} for name in sorted(WEB_TOOL_NAMES)]
             payload["tools"] = tools
-        # 采样温度: 模型档案显式写了就用它(kimi 只接受 1), 否则用模式默认值
         temp = params.get("temperature")
-        if spec.get("temperature") is not models.UNSET:
-            temp = spec.get("temperature")
         if temp is not None:
             payload["temperature"] = temp
         if self.cfg.get("parallel_tool_calls") and not params.get("no_tools"):
@@ -449,14 +425,14 @@ class BotAgentMixin:
         # 而且之后每次请求都会 400; 先按同口径修好配对再发。
         messages = Session._sanitize(messages)
         cfg = self.cfg
-        spec = self._model_spec()
+        spec = self.cfg
         payload = self._build_payload(messages, params)
         url = str(spec["api_base"]).rstrip("/") + "/chat/completions"
         headers = {"Content-Type": "application/json",
                    "Authorization": f"Bearer {spec['api_key']}"}
         attempts = max(1, int(cfg.get("api_max_attempts", 3)))
         base = float(cfg.get("api_retry_backoff_sec", 1.0))
-        timeout = self._api_timeout()   # 读超时按模型可覆盖(kimi 慢但思考长, 60s 不够)
+        timeout = self._api_timeout()
         data = None
         took = 0.0
         attempt = 0
@@ -589,9 +565,8 @@ class BotAgentMixin:
         return dropped
 
     def _api_timeout(self) -> float:
-        """读超时(秒): 模型档案可覆盖(慢模型给更长), 否则用全局 api_timeout_sec。"""
-        spec = self._model_spec()
-        return float(spec.get("api_timeout_sec") or self.cfg.get("api_timeout_sec", 60))
+        """DeepSeek 请求读超时，单位秒。"""
+        return float(self.cfg.get("api_timeout_sec", 60))
 
     @staticmethod
     def _clip(text: str, limit: int = 40) -> str:
@@ -602,7 +577,7 @@ class BotAgentMixin:
     def _api_failure_note(self, err: Exception) -> str:
         """把一次 API 失败原样转述成一句 [系统]: 模型 + HTTP 状态码 + 模型返回的那句话(截 40 字)。
         不加工、不建议——玩家要的就是“到底报了什么错”; 重试过程只进日志。"""
-        label = models.describe(self.cfg, self._model_alias())
+        label = self._model_label()
         text = str(err or "")
         m = re.match(r"HTTP (\d{3})\s*[:：]?\s*(.*)", text, re.S)
         if m:
@@ -734,10 +709,8 @@ class BotAgentMixin:
             if thinking:
                 log(f"[思考] {str(thinking)[:300].replace(chr(10), ' ')}")
             calls = msg.get("tool_calls") or []
-            # 思考链: 只有声明需要回传的模型(DeepSeek 思考模式)在带 tool_calls 时保留,
-            # 否则 API 会 400 "reasoning_content must be passed back"; kimi 等不需要回传的
-            # 模型一律丢掉——既不加输入 token, 也不影响后续轮次(实测)。
-            if not calls or not self._model_spec().get("reasoning_content", True):
+            # 带工具调用的 assistant 必须原样回传思考字段；普通正文不保留。
+            if not calls:
                 msg.pop("reasoning_content", None)
             if not calls:
                 # 服务端联网工具(deepseek_web_search/read_url)的调用记录: 接口要求原样回传,
@@ -871,7 +844,7 @@ class BotAgentMixin:
         原样回传, 否则读过的页面在下轮就不在上下文里了)。"""
         if reply.strip() and not spoke:
             log(f"[注意] AI 未调用工具却在正文输出, 已兜底播报: {reply[:80]}")
-            self.bridge.say_as_viktor(reply, self.cfg["reply_chunk_len"],
+            self.bridge.say_as_agent(reply, self.cfg["reply_chunk_len"],
                                       self._reply_max_chunks())
             spoke = True
         self.session.add_assistant(reply or ("(已通过工具发言)" if spoke else "(保持沉默)"),
@@ -883,9 +856,8 @@ class BotAgentMixin:
     def _worker(self):
         while self.running:
             with self.cv:
-                # 「备份」与「智能压缩」期间不开新任务: 消息继续入队, 备份结束
-                # (_run_backup 会 notify) / 摘要写完(_run_smart_compact 会 notify)再处理
-                while self.running and (self._backup_running or self._smart_compact_running
+                # 智能压缩期间消息继续排队，摘要完成后唤醒 worker。
+                while self.running and (self._smart_compact_running
                                         or not self.pending):
                     self.cv.wait(timeout=1)
                 # 积压多条时合并成一次请求(所有消息已在上下文中, 一次回复即可)

@@ -1,9 +1,7 @@
-<!-- 由 tools/gen_skill_guides.py 抽取自 Java 模组 MegaBuildGuide.class 的内嵌指导文本。内容为原模组的设计标准, 已按本项目函数库对齐函数名; 不要手改, 改脚本或原类。 -->
-
 > 函数名两种写法都能用: `api.lib.chineseRoof(...)` 与 `api.lib.chinese_roof(...)`;
 > 参数里的 `{...}` 是选项名清单, 在本项目里写成关键字参数(见 `api.lib.help("名字")`)。
 
-# MegaBuildGuide · mega-build-guide
+# 大规模建造指导
 
 大规模建造的函数库全景与硬规则: 选项写法、纪念性结构、装饰函数(含 **y 在最后一位**
 的 7 个例外)、普通民居整套、预制风格库与**占地契约**、超大规模分区策略、

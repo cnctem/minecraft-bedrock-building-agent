@@ -10,7 +10,7 @@ import time
 
 import capabilities
 
-from . import ledger, models, paths, websearch
+from . import images, ledger, paths
 from .bridge import ScreenBridge
 from .bus import ServerBus
 from .constants import CREATIVE_MODES, MODE_NORMAL
@@ -32,7 +32,6 @@ from .schemas import (
     GET_SLICE_SCHEMA,
     INSPECT_REGION_SCHEMA,
     PIN_REGION_SCHEMA,
-    READ_URL_SCHEMA,
     FIND_BUILDS_SCHEMA,
     READ_BUILD_SCHEMA,
     SEARCH_HISTORY_SCHEMA,
@@ -41,7 +40,6 @@ from .schemas import (
     SEND_CHAT_SCHEMA,
     SET_MODE_SCHEMA,
     VIEW_IMAGE_SCHEMA,
-    WEB_SEARCH_SCHEMA,
 )
 from .session import OneShotContext, Session, memory_note
 
@@ -56,7 +54,7 @@ class BotCoreMixin:
                              cfg.get("bus_reader_poll_sec", 0.05))
         self.ledger = ledger.Ledger()  # 施工台账(写失败只记日志, 不影响工具)
         self.bus_enabled = False  # 启动握手(应对行为包未升级)后才置位
-        self.pack_proto = 0       # 行为包协议版本(握手回包解析); v3 才有空间感知原语
+        self.pack_proto = 0       # 行为包协议版本(握手回包解析); v5 支持空间感知与建造
         # bus 批量执行器: 同一批 ptc 查询一次性下发、按 id 收齐
         capabilities.set_bus_batch_runner(self._run_bus_batch)
         capabilities.set_bus_batch_max(cfg.get("bus_batch_max", 8))
@@ -98,12 +96,6 @@ class BotCoreMixin:
                              self._tool_render_region, concurrency="bus")
         capabilities.register("pin_region", PIN_REGION_SCHEMA, self._tool_pin_region,
                              concurrency="serial")
-        # 联网: DeepSeek 原生联网时这两个名字以服务端工具声明(见 _build_payload),
-        # 本地不注册 handler; 切到别家模型时才作为函数工具暴露, 走 DeepSeek 的搜索/抓取接口。
-        capabilities.register("deepseek_web_search", WEB_SEARCH_SCHEMA,
-                             self._tool_web_search, concurrency="parallel")
-        capabilities.register("deepseek_read_url", READ_URL_SCHEMA,
-                             self._tool_read_url, concurrency="parallel")
         # 兜底: 图片直链通常由 _commit_to_context 自动附上; 这个工具只给"没自动附上"的场合用。
         capabilities.register("view_image", VIEW_IMAGE_SCHEMA,
                              self._tool_view_image, concurrency="parallel")
@@ -127,7 +119,7 @@ class BotCoreMixin:
         self.running = True
         self.last_api_call = 0.0
         self.rate_lock = threading.Lock()   # 仅用于 api_min_interval 限速(不再包住整轮)
-        self.console_gate = threading.RLock()  # 串行化“读任意控制台输出”的工具(指令/常加载/备份)
+        self.console_gate = threading.RLock()  # 串行化“读任意控制台输出”的工具(指令/常加载)
         self._tls = threading.local()       # 每个一次性线程一份请求上下文
         # 一次性对话(可并发)
         self.oneshot_max_concurrent = cfg.get("oneshot_max_concurrent", 4)
@@ -141,14 +133,10 @@ class BotCoreMixin:
         self.soft_abort = threading.Event()  # 置位 = 到安全点停止(不打断工具内部等待)
         self.agent_busy = False          # 当前是否有任务在跑(供停止词判断)
         self.mode = MODE_NORMAL          # 主对话当前模式(见 MODES); 一次性线程各自用 MODE_ONESHOT
-        # 主对话当前模型别名(见 models.py): 只在「清空」/「清空k」开新会话时选定,
-        # 会话内不可切换; 一次性对话固定用默认模型, 不受这里影响。
-        self.model_alias = models.DEFAULT_MODEL
         self._pinned: list[str] = []     # 本轮任务设置的常加载区域名(轮次结束自动移除)
         self._context_warn_level = 0     # 上下文占用提醒已报到哪一档(70 起; 压缩/新会话后复位)
         self.body_forward = False        # 正文转发开关(玩家用「正文开/关」切换; 仅显示, 不进上下文)
         self.tool_forward = True         # 工具转发开关(默认开; 玩家用「工具开/关」切换; 仅显示, 不进上下文)
-        self._backup_running = False     # 「备份」控制词的后台热备份是否在跑(期间不开新任务)
         # 「智能压缩」(摘要式压缩)的后台线程是否在跑: 期间 worker 不开新任务(消息只排队),
         # 其它需要空闲的控制词也一并拒绝(见 _busy)。
         self._smart_compact_running = False
@@ -160,7 +148,7 @@ class BotCoreMixin:
         self.dialog_window_sec = float(cfg.get("chat_dialog_window_sec", 180))
 
     def _busy(self) -> bool:
-        """「停止状态」判定, 与「清空」/「压缩」/「备份」/「恢复会话」的可执行条件一致:
+        """「停止状态」判定, 与「清空」/「压缩」/「恢复会话」的可执行条件一致:
         有任务在跑 / 队列有待处理消息 / 智能压缩的摘要还在生成。"""
         with self.cv:
             return (self.agent_busy or bool(self.pending)
@@ -172,9 +160,10 @@ class BotCoreMixin:
         busy = self._busy()
         state = {
             "pid": os.getpid(),
-            "busy": busy,
+            "busy": busy or self._oneshot_active > 0,
             "pending": len(self.pending),
-            "backup": self._backup_running,
+            "repo": str(paths.BASE_DIR),
+            "oneshot_active": self._oneshot_active,
             "compact": self._smart_compact_running,
             "mode": self.mode,
             "updated": time.time(),
@@ -205,18 +194,11 @@ class BotCoreMixin:
     def _oneshot(self) -> bool:
         return getattr(self._tls, "oneshot", False)
 
-    # ---------- 模型(会话级) ----------
+    # ---------- DeepSeek ----------
 
-    def _model_alias(self) -> str:
-        """当前请求用的模型别名。一次性对话固定用默认模型(flash), 与主会话当前模型无关。"""
-        return models.DEFAULT_MODEL if self._oneshot() else self.model_alias
-
-    def _model_spec(self) -> dict:
-        """当前请求的模型档案(模型名/Base URL/key/窗口/输出上限/思考强度映射等)。"""
-        return models.spec(self.cfg, self._model_alias())
 
     def _model_label(self) -> str:
-        return models.describe(self.cfg, self._model_alias())
+        return self.cfg["model"]
 
     @property
     def creative_mode(self) -> bool:
@@ -228,7 +210,7 @@ class BotCoreMixin:
 
     def _start_session(self):
         self.session_counter += 1
-        self.session = Session(self.session_counter, model=self.model_alias)
+        self.session = Session(self.session_counter)
         # 长期记忆作为第一条系统注记追加进日志(而不是写进固定的 system 前缀),
         # 之后每次 update_memory 再追加新注记, 前缀始终稳定。
         self.session.add_system(memory_note())
@@ -256,7 +238,7 @@ class BotCoreMixin:
             self.session.dump()
             log(f"=== 会话 #{self.session.id} 结束 "
                 f"(消息 {len(self.session.messages)} 条, AI 回复 {self.session.replied_count} 次, "
-                f"模型: {models.describe(self.cfg, self.session.model)}) ===")
+                f"模型: {self._model_label()}) ===")
             self.session = None
 
     def _on_join(self, name: str, xuid: str | None = None):
@@ -270,10 +252,9 @@ class BotCoreMixin:
         """玩家数 0→1: 完整初始化会话(与“清空”同一套 _reset_session)。
         若此时有任务在跑: 不初始化也不挂起初始化, 只发一条提示告知任务在进行,
         并介绍可用的控制词(停止/强制停止/压缩/清空)。玩家全部离开期间会话不结束,
-        任务可以跨离线期继续做。模型跟普通「清空」一样回到默认(flash);
-        只有在真的重开会话时才复位——有任务在跑(沿用旧会话)时不能改, 否则新旧对不上。"""
+        任务可以跨离线期继续做。
+        只有空闲时才重开会话。"""
         if not self.session:
-            self.model_alias = models.DEFAULT_MODEL
             self._start_session()
             self._say_later("新会话已开始。发送「恢复会话」可找回上一段对话。", system=True)
             return
@@ -287,7 +268,6 @@ class BotCoreMixin:
                 "要我停就发「停止」(做完当前这一步再停)或「强制停止」(立即中止); "
                 "想压缩或清空上下文, 请先停下再发「压缩」或「清空」。", system=True)
             return
-        self.model_alias = models.DEFAULT_MODEL
         n = self._reset_session()
         log(f"[清空] {name} 进服(0→1), 已完整初始化新会话(丢弃 {n} 条消息)")
         self._say_later("新会话已开始。发送「恢复会话」可找回上一段对话。", system=True)
@@ -306,16 +286,12 @@ class BotCoreMixin:
     def _commit_to_context(self, msgs: list[tuple[str, str]]) -> list[dict]:
         """把一批玩家消息按顺序写入会话上下文, 返回对应的 user 消息(供当前请求追加)。
 
-        玩家贴的**图片直链**(.png/.jpg/.jpeg/.gif/.webp)直接作为 image_url 内容块附在那条
-        用户消息里, 分两条路:
-        - DeepSeek(models.remote_image_url 为真): 只附 URL, 由模型服务端自己下载(原生视觉);
-        - 别家模型(Kimi 只认 data: URL): 本地取一次字节转 base64 —— DeepSeek 的接口不回图片
-          字节, 这是唯一能把它给 Kimi 看的办法; 取不到就不附图, 模型会如实说看不到。
-        服务端拉不到图会让整个请求 400, bot_agent._drop_bad_images() 会就地移除并告知模型。"""
+        图片直链作为 image_url 附在原用户消息中，由 DeepSeek 服务端读取。
+        图片加载失败时由请求层移除无效图片并重试。"""
         out = []
         for player, content in msgs:
             text = f"{player}: {content}"
-            parts = [p for p in (self._image_part(u) for u in websearch.image_urls(content)) if p]
+            parts = [p for p in (self._image_part(u) for u in images.image_urls(content)) if p]
             if parts:
                 msg = {"role": "user",
                        "content": [{"type": "text", "text": text}] + parts}
@@ -327,23 +303,11 @@ class BotCoreMixin:
         return out
 
     def _image_part(self, url: str) -> dict | None:
-        """把一个图片地址变成 image_url 内容块; 取不到返回 None。
-
-        - DeepSeek(models.remote_image_url 为真): 只附 URL, 由模型服务端自己下载(原生视觉);
-        - 别家模型(Kimi 只认 data: URL): 本地取一次字节转 base64 —— DeepSeek 的接口不回
-          图片字节, 这是唯一能把它给 Kimi 看的办法。本地取图带 SSRF 闸与体积上限。"""
-        if models.remote_image_url(self._model_spec()):
-            return {"type": "image_url", "image_url": {"url": url}}
-        try:
-            mime, b64 = websearch.fetch_image(
-                url,
-                timeout=float(self.cfg.get("image_fetch_timeout_sec", 15)),
-                max_bytes=int(self.cfg.get("image_fetch_max_bytes", 4 * 1024 * 1024)),
-                allow_private=bool(self.cfg.get("image_fetch_allow_private", False)))
-        except websearch.SearchError as e:
-            log(f"[图片] {url} 本地取图失败, 不附图: {e}")
+        """构造远程图片内容块，不在本地下载玩家提供的 URL。"""
+        url = images.normalize_url(url)
+        if not url.lower().startswith(("http://", "https://")):
             return None
-        return {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{b64}"}}
+        return {"type": "image_url", "image_url": {"url": url}}
 
     def _take_pending_mid_task(self) -> list[tuple[str, str]]:
         """安全点: 取走任务进行中到达的新消息, 交给当前 Agent 循环即时纳入。"""

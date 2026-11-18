@@ -8,20 +8,21 @@ import re
 RE_LINE = re.compile(
     r"^\[\d{4}-\d{2}-\d{2} (\d{2}:\d{2}:\d{2}):\d+ (INFO|WARN|ERROR|DEBUG)\] (.*)$")
 RE_CHAT = re.compile(r"^<([^>]+)> (.*)$")
-# 行为包脚本桥: [Scripting] [VIKTOR-CHAT] 玩家名: 消息 (名字限定 ASCII, 避免误吃脚本报错行)
-RE_BRIDGE = re.compile(r"^\[Scripting\] \[VIKTOR-CHAT\] (.{1,32}?): (.*)$")
+# 行为包脚本桥: [Scripting] [AGENT-CHAT] 玩家名: 消息 (名字限定 ASCII, 避免误吃脚本报错行)
+RE_BRIDGE = re.compile(r"^\[Scripting\] \[AGENT-CHAT\] (.{1,32}?): (.*)$")
 RE_JOIN = re.compile(r"^Player connected: ([^,]+), xuid: (\d+)")
 RE_LEAVE = re.compile(r"^Player disconnected: ([^,]+), xuid:")
 RE_LIST = re.compile(r"^There are (\d+)/(\d+) players online")
-# 协议 v3: 行为包把请求 id 原样回显在每一行里, 供 ServerBus 按 id 路由;
+# 协议 v5: 行为包把请求 id 原样回显在每一行里, 供 ServerBus 按 id 路由;
 # 查询回包是「一个 JSON payload 分多帧」(`#i/n <片段>` 行 + DONE), 由 bus 重组。
 BUS_ROUTE_RE = re.compile(
-    r"\[VIKTOR-(POS|INV|BLOCK|MAP|SLICE|INSPECT|FIND|CAPS|BUILD|SNAP)\] (r\d+)(?:[ \t](.*))?$")
+    r"\[AGENT-(POS|INV|BLOCK|MAP|SLICE|INSPECT|FIND|CAPS|BUILD|SNAP)\] (r\d+)(?:[ \t](.*))?$")
 BUS_FRAME_RE = re.compile(r"^#(\d+)/(\d+) (.*)$", re.S)
-RE_BPROG = re.compile(r"\[VIKTOR-BPROG\] (\S+) ([dwv]) (\d+)/(\d+)")
-RE_HELLO = re.compile(r"\[VIKTOR-HELLO\] \S+ v(\d+)")
-PACK_PROTO_SPATIAL = 3  # 感知原语(heightmap/slice/inspect/find)所需的行为包协议
-PACK_PROTO_BUILD = 4    # 建造引擎(preview/commit/undo)所需的行为包协议
+RE_BPROG = re.compile(r"\[AGENT-BPROG\] (\S+) ([dwv]) (\d+)/(\d+)")
+RE_HELLO = re.compile(r"\[AGENT-HELLO\] (\S+) v(\d+)\b")
+PACK_PROTOCOL = 5
+PACK_PROTO_SPATIAL = PACK_PROTOCOL  # 感知原语(heightmap/slice/inspect/find)所需的行为包协议
+PACK_PROTO_BUILD = PACK_PROTOCOL    # 建造引擎(preview/commit/undo)所需的行为包协议
 BUILD_FRAME_CHARS = 560 # 建造 payload 每帧字符数(整条命令 <~700, 见 [实测])
 BUILD_TIMEOUT_SEC = 120 # 预览/提交/撤销的等待上限(大体积要跑好几秒)
 
@@ -35,16 +36,12 @@ IMAGE_NOTE_TAG = "# 工具刚取到的图片"   # 首行前缀, 压缩/摘要据
 IMAGE_NOTE = (IMAGE_NOTE_TAG + "(系统附上, 不是玩家发言)\n"
               "下面是刚才工具调用取到的图片, 直接看图; 游戏聊天栏显示不了图片, "
               "用一两句话把主体/颜色/文字转述给玩家。")
-PIN_NAME = "viktor_pin"  # 常加载区域命名前缀(仅创造模式; 离开即清理)
-CLEAR_WORD = "清空"  # 控制面: 默认模型的清空触发词(其余触发词见 models.py 的模型档案;
-                     # 实际分发用 models.resolve_trigger, 这里只作默认值/文档)
+PIN_NAME = "agent_pin"  # 常加载区域命名前缀(仅创造模式; 离开即清理)
+CLEAR_WORD = "清空"  # 空闲时完整初始化会话
 COMPACT_WORD = "压缩"  # 控制面: 压缩会话上下文(只留玩家消息与发言, 不进上下文)
 SMART_COMPACT_WORD = "智能压缩"  # 控制面: 用模型把上下文压成工作摘要(保留进度/坐标/建造状态)
 SMART_COMPACT_AUTO_PCT = 95  # 上下文占用到输入预算的这个百分比就自动智能压缩(配置可覆盖)
-STATUS_WORD = "状态"  # 控制面: 播报服务器进程/负载/在线玩家(任何玩家可触发, 不进上下文)
-BACKUP_WORD = "备份"  # 控制面: 触发存档热备份(需空闲; 不可中止, 结果回执走 [系统])
 RESTORE_WORD = "恢复会话"  # 控制面: 把最近一次落盘的会话灌回(任何玩家可触发)
-RESTORE_DEFAULT_WORD = "恢复会话d"  # 控制面: 同上, 但强制用默认模型(flash)灌回
 BODY_ON_WORD, BODY_OFF_WORD = "正文开", "正文关"  # 控制面: 正文转发开关(不进上下文)
 TOOL_ON_WORD, TOOL_OFF_WORD = "工具开", "工具关"  # 控制面: 工具转发开关(不进上下文)
 

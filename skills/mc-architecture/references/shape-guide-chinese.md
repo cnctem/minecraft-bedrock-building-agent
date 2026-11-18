@@ -1,9 +1,7 @@
-<!-- 由 tools/gen_skill_guides.py 抽取自 Java 模组 ShapeGuide.class 的内嵌指导文本。内容为原模组的设计标准, 已按本项目函数库对齐函数名; 不要手改, 改脚本或原类。 -->
-
 > 函数名两种写法都能用: `api.lib.chineseRoof(...)` 与 `api.lib.chinese_roof(...)`;
 > 参数里的 `{...}` 是选项名清单, 在本项目里写成关键字参数(见 `api.lib.help("名字")`)。
 
-# ShapeGuide · shape-guide-chinese
+# 中式建筑造型指导
 
 中式（官式 + 八个地域流派）的构件选择、比例与组合套路。**先读「流派路由」**，
 再按玩家说的地域/等级取用构件；不要默认故宫。

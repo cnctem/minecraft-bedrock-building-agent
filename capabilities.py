@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""维克托的能力注册表。
+"""agent的能力注册表。
 
 新增能力的方法:
   1. 写一个 handler: 接收 dict 参数, 返回给 AI 看的执行结果字符串
@@ -10,6 +10,8 @@ bot 会把所有注册的 schema 通过 function calling 告诉 DeepSeek,
 AI 决定调用时由 bot 执行 handler 并把结果回传, 然后 AI 再生成最终回复。
 """
 import json
+import os
+import tempfile
 import re
 import threading
 from concurrent.futures import ThreadPoolExecutor
@@ -19,7 +21,6 @@ from pathlib import Path
 BASE_DIR = Path(__file__).resolve().parent
 SERVER_LOG = BASE_DIR / "logs" / "server.log"
 MEMORY_PATH = BASE_DIR / "memory.md"
-MEMORY_BACKUP_DIR = BASE_DIR / "logs" / "memory-backup"
 MEMORY_SOFT_LIMIT = 4000  # 字符; 超出时提醒 AI 下次精简
 
 
@@ -34,13 +35,20 @@ def read_memory() -> str:
 
 
 def update_memory(content: str) -> str:
-    """整篇重写记忆, 重写前自动备份旧版本。"""
-    old = read_memory()
-    if old:
-        MEMORY_BACKUP_DIR.mkdir(parents=True, exist_ok=True)
-        backup = MEMORY_BACKUP_DIR / datetime.now().strftime("memory-%Y%m%d-%H%M%S.md")
-        backup.write_text(old + "\n", encoding="utf-8")
-    MEMORY_PATH.write_text(content.strip() + "\n", encoding="utf-8")
+    """以原子替换更新长期记忆，只保存当前版本。"""
+    tmp = None
+    try:
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8",
+                                         dir=MEMORY_PATH.parent, prefix=".memory-",
+                                         delete=False) as f:
+            tmp = Path(f.name)
+            f.write(content.strip() + "\n")
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, MEMORY_PATH)
+    finally:
+        if tmp is not None:
+            tmp.unlink(missing_ok=True)
     msg = "记忆已更新。"
     if len(content) > MEMORY_SOFT_LIMIT:
         msg += (f"注意: 当前 {len(content)} 字符, 已超过 {MEMORY_SOFT_LIMIT} 软上限, "
@@ -427,7 +435,7 @@ PTC_SCHEMA = {
 
 
 # ---------- 物品/方块 ID 速查 ----------
-# 数据由 tools/build_items.py 从服务器本体导出(行为包 scriptevent viktor:ids + 官方 lang),
+# 数据由 tools/build_items.py 从服务器本体导出(行为包 scriptevent agent:ids + 官方 lang),
 # 版本精确、无需手工维护。这里只做按需检索, 绝不把整表塞进提示词, 省 token。
 
 ITEMS_PATH = BASE_DIR / "data" / "items.json"

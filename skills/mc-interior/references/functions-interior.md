@@ -1,4 +1,4 @@
-<!-- 由 tools/gen_buildlib_docs.py 从 viktor/buildlib/registry.py 生成, 不要手改。 -->
+<!-- 由 tools/gen_buildlib_docs.py 从 agent/buildlib/registry.py 生成, 不要手改。 -->
 <!-- 改函数签名请改 registry.SPEC, 再重跑该脚本。 -->
 
 # 室内与装饰函数(家具 / 房间成套 / 门窗细节)

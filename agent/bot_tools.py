@@ -1,18 +1,14 @@
-"""能力工具 handler 与服务端操作: 聊天/技能/查询(bus)/控制台指令/常加载/备份执行。
+"""能力工具 handler 与服务端操作: 聊天/技能/查询(bus)/控制台指令/常加载。
 
 依赖方向: bot_tools → bus/constants/profiles/paths/capabilities; 不 import 其它 bot_* 模块。
 """
 import json
 import re
-import shutil
-import subprocess
 import time
-from datetime import datetime
-from pathlib import Path
 
 import capabilities
 
-from . import build, history, paths, websearch
+from . import build, history, images, paths
 from .bus import BusArgError, Req
 from .constants import (
     BUS_TIMEOUT_TEXT,
@@ -35,7 +31,7 @@ class BotToolsMixin:
     """全部 _tool_* handler 与服务端查询渲染。"""
 
     def _tool_send_message(self, args: dict) -> str:
-        self.bridge.say_as_viktor(args["text"], self.cfg["reply_chunk_len"],
+        self.bridge.say_as_agent(args["text"], self.cfg["reply_chunk_len"],
                                   self._reply_max_chunks())
         return "已发送到游戏内聊天。"
 
@@ -58,23 +54,23 @@ class BotToolsMixin:
         return bool(s) and bool(re.fullmatch(
             r"[A-Za-z0-9 _\-\.]{1,20}(, *[A-Za-z0-9 _\-\.]{1,20})*", s))
 
-    # ---------- 服务端查询: 走请求总线(协议 v2) ----------
+    # ---------- 服务端查询: 走请求总线(协议 v5) ----------
     # 同一批 bus 查询先全部登记、再一次性下发, 只付一次 stdin 轮询延迟, 回包按 id 路由。
-    # 行为包需支持 viktor:hello 握手与 r<id> 回显(见 main.js); 未握手成功时 bus_enabled=False。
+    # 行为包需支持 agent:hello 握手与 r<id> 回显(见 main.js); 未握手成功时 bus_enabled=False。
 
     def _bus_cmd(self, name: str, rid: str, args: dict) -> str:
         """构造带请求 id 的 scriptevent 命令; 参数非法抛 BusArgError(消息回给模型)。"""
         if name == "get_player_position":
-            return f"scriptevent viktor:pos {rid}"
+            return f"scriptevent agent:pos {rid}"
         if name == "get_player_hand":
-            return f"scriptevent viktor:inv {rid}"
+            return f"scriptevent agent:inv {rid}"
         if name == "get_block":
             try:
                 x, y, z = (int(args[k]) for k in ("x", "y", "z"))
             except (KeyError, TypeError, ValueError):
                 raise BusArgError("需要整数坐标 x y z。")
             dim = (args.get("dimension") or "overworld").strip().lower()
-            return f"scriptevent viktor:block {rid} {x} {y} {z} {dim}"
+            return f"scriptevent agent:block {rid} {x} {y} {z} {dim}"
         if name == "get_heightmap":
             return self._heightmap_cmd(rid, args)
         if name == "get_slice":
@@ -85,7 +81,7 @@ class BotToolsMixin:
             return self._find_cmd(rid, args)
         raise BusArgError(f"错误: 未知的查询工具 {name}")
 
-    # ---------- 空间感知原语(协议 v3): 由粗到细 ----------
+    # ---------- 空间感知原语(协议 v5): 由粗到细 ----------
     # 一次调用看清一片, 而不是切几十张薄片、每格一行:
     #   get_heightmap  地形高度(选址/落差/地基)
     #   get_slice      一张平面字符图(看形状/立面/剖面)
@@ -111,7 +107,7 @@ class BotToolsMixin:
                 "高度图列数", cols, HM_MAX_COLUMNS, "64×64", "列")
                 + f" 当前范围 {abs(x2 - x1) + 1}×{abs(z2 - z1) + 1}。")
         dim = (args.get("dimension") or "overworld").strip().lower()
-        cmd = f"scriptevent viktor:heightmap {rid} {x1} {z1} {x2} {z2} {dim}"
+        cmd = f"scriptevent agent:heightmap {rid} {x1} {z1} {x2} {z2} {dim}"
         extra = []
         for key in ("y_max", "y_min"):
             if args.get(key) is not None:
@@ -142,7 +138,7 @@ class BotToolsMixin:
         if cells > SLICE_MAX_CELLS:
             raise BusArgError(build.limit_hint("切面", cells, SLICE_MAX_CELLS, "64×64"))
         dim = (args.get("dimension") or "overworld").strip().lower()
-        return f"scriptevent viktor:slice {rid} {axis} {level} {a1} {b1} {a2} {b2} {dim}"
+        return f"scriptevent agent:slice {rid} {axis} {level} {a1} {b1} {a2} {b2} {dim}"
 
     def _inspect_cmd(self, rid: str, args: dict) -> str:
         x1, y1, z1, x2, y2, z2 = self._box(args)
@@ -156,7 +152,7 @@ class BotToolsMixin:
             raise BusArgError('detail 只能是 "summary" 或 "cells"。')
         limit = max(1, min(int(args.get("limit") or 64), CELLS_HARD))
         filt = re.sub(r"\s+", "", str(args.get("filter") or "")).lower().replace("minecraft:", "")
-        return (f"scriptevent viktor:inspect {rid} {x1} {y1} {z1} {x2} {y2} {z2}"
+        return (f"scriptevent agent:inspect {rid} {x1} {y1} {z1} {x2} {y2} {z2}"
                 f" {dim} {filt or '-'} {detail} {limit}")
 
     def _find_cmd(self, rid: str, args: dict) -> str:
@@ -169,7 +165,7 @@ class BotToolsMixin:
             raise BusArgError(build.limit_hint("搜索范围", volume, FIND_MAX_VOLUME, "32×32×32"))
         dim = (args.get("dimension") or "overworld").strip().lower()
         limit = max(1, min(int(args.get("limit") or 128), CELLS_HARD))
-        return (f"scriptevent viktor:find {rid} {block} {x1} {y1} {z1} {x2} {y2} {z2}"
+        return (f"scriptevent agent:find {rid} {block} {x1} {y1} {z1} {x2} {y2} {z2}"
                 f" {dim} {limit}")
 
     def _bus_spec(self, name: str, args: dict):
@@ -309,7 +305,7 @@ class BotToolsMixin:
             return f"坐标 ({x}, {y}, {z}) [{bdim}] 的方块是: {block}"
         return BUS_TIMEOUT_TEXT["get_block"]
 
-    # ---------- v3 渲染: JSON payload -> 紧凑可读文本 ----------
+    # ---------- 查询渲染: JSON payload -> 紧凑可读文本 ----------
 
     # 字符图符号: 空气固定 "."(最好认), 其余方块按调色板顺序取下面的符号;
     # "?" 专门表示未加载/未知, "-" 表示高度缺失, 都不参与分配, 避免混淆。
@@ -556,8 +552,8 @@ class BotToolsMixin:
     def _require_bus(self) -> str:
         if self.bus_enabled:
             return ""
-        return ("行为包脚本未响应协议握手(viktor:hello)。"
-                "请确认已更新并重载 viktor_bridge 行为包(需支持 r<id> 回显)。")
+        return ("行为包脚本未响应协议握手(agent:hello)。"
+                "请确认已更新并重载 agent_bridge 行为包(需支持 r<id> 回显)。")
 
     def _tool_get_position(self, args: dict) -> str:
         if err := self._require_bus():
@@ -587,12 +583,12 @@ class BotToolsMixin:
         return self._bus_call("get_block", args or {})
 
     def _require_spatial(self) -> str:
-        """空间感知原语需要协议 v3; 协议过旧时明确报错, 不要让它拿到空数据。"""
+        """空间感知原语需要协议 v5; 协议过旧时明确报错, 不要让它拿到空数据。"""
         if err := self._require_bus():
             return err
         if getattr(self, "pack_proto", 0) < PACK_PROTO_SPATIAL:
             return (f"行为包协议过旧(v{getattr(self, 'pack_proto', 0)}), "
-                    "不支持 heightmap/slice/inspect/find; 请重载更新后的 viktor_bridge 行为包。")
+                    "不支持 heightmap/slice/inspect/find; 请重载更新后的 agent_bridge 行为包。")
         return ""
 
     def _tool_get_heightmap(self, args: dict) -> str:
@@ -615,43 +611,11 @@ class BotToolsMixin:
             return err
         return self._bus_call("find_blocks", args or {})
 
-    # ---------- 联网: 搜索 / 读网页 / 看图 ----------
-    # DeepSeek 的接口原生提供联网工具(服务端搜索 + 服务端抓取): 默认模型的请求直接声明
-    # deepseek_web_search / deepseek_read_url, 搜索、开页、抓取全在服务端跑, 本地一行代码都不执行
-    # (见 bot_agent._build_payload)。切到别家模型(kimi 等)时, 同名工具退化成这里的调用 ——
-    # 仍由 DeepSeek 的 Search & Fetch 接口提供能力(websearch.py), 只是改由本地发起。
-    # 玩家发的图片直链由 bot_core._commit_to_context 直接附在用户消息里(服务端下载, 本地不取字节),
-    # 所以这里没有"看图"工具。
-
-    def _tool_web_search(self, args: dict) -> str:
-        return websearch.search(
-            self.cfg,
-            str(args.get("query") or ""),
-            count=args.get("count", self.cfg.get("web_search_count", websearch.DEFAULT_COUNT)),
-            ori_question=str(args.get("ori_question") or self._search_context()),
-            max_chars=int(self.cfg.get("web_search_max_chars", websearch.DEFAULT_MAX_CHARS)),
-        )
-
-    def _search_context(self) -> str:
-        """玩家最近一句话(截 128 字)作为 ori_question, 帮助搜索接口理解意图。"""
-        for m in reversed(getattr(self._session(), "messages", None) or []):
-            content = m.get("content")
-            if m.get("role") != "user" or not isinstance(content, str):
-                continue  # 内容块数组是系统附的图片消息, 不是玩家原话
-            return content.split(":", 1)[-1].strip()[:128]
-        return ""
-
-    def _tool_read_url(self, args: dict) -> str:
-        return websearch.fetch(
-            self.cfg,
-            str(args.get("url") or ""),
-            max_chars=int(args.get("max_chars")
-                          or self.cfg.get("web_search_max_chars", websearch.DEFAULT_MAX_CHARS)),
-        )
+    # ---------- 图片兜底 ----------
 
     def _tool_view_image(self, args: dict) -> str:
         """兜底: 把指定图片附进上下文。直链通常已自动附上, 这里只处理"没自动附上"的场合。"""
-        url = websearch.normalize_url(str(args.get("url") or ""))
+        url = images.normalize_url(str(args.get("url") or ""))
         if not url:
             return "错误: 需要图片地址。"
         if not url.lower().startswith(("http://", "https://")):
@@ -702,7 +666,7 @@ class BotToolsMixin:
                           or self.cfg.get("session_read_max_chars", history.DEFAULT_MAX_CHARS)),
         )
 
-    # ---------- 台账写入上下文(给 viktor/ledger.py 用) ----------
+    # ---------- 台账写入上下文(给 agent/ledger.py 用) ----------
 
     def _ledger_ctx(self) -> dict:
         """当前会话在哪落盘 + 本回合谁在说话: 台账要能回到会话文件与玩家。"""
@@ -735,9 +699,9 @@ class BotToolsMixin:
             m = RE_LINE.match(line)
             if m:
                 level, body = m.group(2), m.group(3)
-                if any(t in body for t in ("[VIKTOR-CHAT]", "[VIKTOR-POS]",
-                                          "[VIKTOR-INV]", "[VIKTOR-BLOCK]",
-                                          "[VIKTOR-SCAN]")):
+                if any(t in body for t in ("[AGENT-CHAT]", "[AGENT-POS]",
+                                          "[AGENT-INV]", "[AGENT-BLOCK]",
+                                          "[AGENT-SCAN]")):
                     continue  # 桥接上报行不是指令输出
                 if level == "ERROR":
                     body = "[错误] " + body
@@ -859,7 +823,7 @@ class BotToolsMixin:
         log(f"[常加载] 已移除 {len(names)} 个区域: {', '.join(names)}")
 
     def _cleanup_stale_pins(self):
-        """启动时清理世界里残留的 viktor_pin* 常加载区(上次进程被强杀留下的)。
+        """启动时清理世界里残留的 agent_pin* 常加载区(上次进程被强杀留下的)。
         启动时没有任务在跑, 删掉绝对安全; 只碰自己的名字前缀。"""
         out = self._console_output("tickingarea list")
         names = sorted(set(re.findall(rf"- ({re.escape(PIN_NAME)}[A-Za-z0-9_]*):", out)))
@@ -867,119 +831,6 @@ class BotToolsMixin:
             self.bridge.send_command(f"tickingarea remove {name}")
             log(f"[常加载] 启动清理残留区域: {name}")
 
-    # ---------- 存档备份 ----------
-
-    @staticmethod
-    def _world_name(server_dir: Path) -> str:
-        try:
-            for line in (server_dir / "server.properties").read_text(encoding="utf-8").splitlines():
-                if line.startswith("level-name="):
-                    return line.split("=", 1)[1].strip()
-        except FileNotFoundError:
-            pass
-        return "Bedrock level"
-
-    def _await_log(self, pattern: str, timeout: float, offset: int) -> tuple[bool, int]:
-        """从 offset 开始轮询 server.log 等某个正则出现。返回 (是否命中, 新 offset)。"""
-        rx = re.compile(pattern)
-        deadline = time.time() + timeout
-        log_file = paths.SERVER_LOG_PATH
-        while time.time() < deadline:
-            if self._abort().is_set():
-                return False, offset
-            try:
-                with open(log_file, encoding="utf-8", errors="replace") as f:
-                    f.seek(offset)
-                    new = f.read()
-                    offset = f.tell()
-            except FileNotFoundError:
-                new = ""
-            if rx.search(new):
-                return True, offset
-            time.sleep(0.3)
-        return False, offset
-
-    def _backup_world_locked(self, args: dict) -> str:
-        """按 BDS 官方热备份流程打包存档: save hold -> 7z -> save resume。
-        由「备份」控制词在后台线程调用(持有 console_gate); 无论如何都保证 save resume,
-        否则服务器会一直不再存盘。"""
-        seven = shutil.which("7z") or shutil.which("7zz")
-        if not seven:
-            return "系统里找不到 7z 命令, 无法备份(需要先 sudo apt install 7zip)。"
-        server_dir = Path(self.cfg.get("mc_server_dir", "/home/jrj/minecraft-bedrock"))
-        world = self._world_name(server_dir)
-        world_parent = server_dir / "worlds"
-        if not (world_parent / world).is_dir():
-            return f"找不到世界目录: {world_parent / world}"
-        backup_dir = Path(self.cfg.get("backup_dir", "~/mc_backup")).expanduser()
-        backup_dir.mkdir(parents=True, exist_ok=True)
-        out = backup_dir / f"{world}-{datetime.now():%Y%m%d-%H%M%S}.7z"
-        level = self.cfg.get("backup_compression_level", 5)
-        log_file = paths.SERVER_LOG_PATH
-        try:
-            offset = log_file.stat().st_size
-        except FileNotFoundError:
-            offset = 0
-        started = time.time()
-        held = False
-        try:
-            self.bridge.send_command("save hold")
-            # BDS 的流程: save hold 只开始异步写盘(回 "Saving..."), 必须周期性地
-            # 发 save query 才能问到状态; 直到回 "Data saved. Files are now ready to be copied."
-            # 才真正冻结完毕, 此时才能安全拷贝。
-            deadline = time.time() + self.cfg.get("backup_hold_timeout_sec", 60)
-            while True:
-                self.bridge.send_command("save query")
-                held, offset = self._await_log(
-                    r"Data saved\. Files are now ready", 3, offset)
-                if held or self._abort().is_set() or time.time() >= deadline:
-                    break
-                time.sleep(0.7)
-            if not held:
-                if self._abort().is_set():
-                    return "已中止。"
-                return "存档写盘超时, 未开始打包(已恢复世界写入)。"
-            log(f"[备份] 世界已冻结, 开始打包 {out.name}")
-            pack_started = time.time()
-            proc = subprocess.Popen(
-                [seven, "a", "-t7z", f"-mx={level}", "-bso0", "-bsp0", str(out), world],
-                cwd=str(world_parent), stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
-            timeout = self.cfg.get("backup_timeout_sec", 600)
-            timed_out = False
-            while proc.poll() is None:
-                if self._abort().is_set():
-                    proc.terminate()
-                    try:
-                        proc.wait(timeout=15)
-                    except subprocess.TimeoutExpired:
-                        proc.kill()
-                    out.unlink(missing_ok=True)
-                    return "已中止(半成品压缩包已删除)。"
-                if time.time() - pack_started > timeout:
-                    proc.kill()
-                    timed_out = True
-                    break
-                time.sleep(0.5)
-            if timed_out:
-                try:
-                    proc.wait(timeout=15)
-                except subprocess.TimeoutExpired:
-                    pass
-                out.unlink(missing_ok=True)
-                return f"打包超过 {timeout}s, 已终止并丢弃半成品。"
-            tail = (proc.stdout.read() or "").strip()[-200:] if proc.stdout else ""
-            if proc.returncode != 0:
-                out.unlink(missing_ok=True)
-                return f"7z 打包失败(退出码 {proc.returncode}): {tail}"
-            size_mb = out.stat().st_size / 1024 / 1024
-            log(f"[备份] 完成 {out} ({size_mb:.0f}MB, 用时 {time.time() - pack_started:.0f}s)")
-            return (f"备份完成: {out} ({size_mb:.0f}MB, 打包用时 {time.time() - pack_started:.0f} 秒, "
-                    f"总耗时 {time.time() - started:.0f} 秒)。世界写入已恢复。")
-        finally:
-            # 无论成败都必须恢复存盘, 否则服务器会一直不再保存世界
-            self.bridge.send_command("save resume")
-            if held:
-                self._await_log(r"Changes to the world are resumed", 15, offset)
 
     # ---------- 创造模式 ----------
 

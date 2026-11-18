@@ -74,7 +74,7 @@ TOOLS = {
     "all": None,
     "oneshot": {"only": {
         "send_chat_message", "update_memory", "get_player_activity",
-        "get_player_position", "get_player_hand", "deepseek_web_search", "deepseek_read_url",
+        "get_player_position", "get_player_hand",
         "view_image",
         "run_server_command", "get_block", "get_heightmap", "get_slice",
         "inspect_region", "find_blocks", "ptc",
@@ -97,4 +97,3 @@ MODES = {
     MODE_ONESHOT:      Mode("oneshot",  "oneshot", "oneshot",  "oneshot",      label="一次性",
                             reveal_rounds=True),
 }
-

@@ -1,16 +1,13 @@
-"""建筑函数库(buildlib): 由 Java 模组(ShapeFunctions / AncientShapes / GardenShapes /
-RegionalShapes / VaultShapes / StructureShapes / SurfaceShapes / MonumentFunctions /
-HouseDecor / DecorationFunctions / DomainGenerators / MegaStyles) 的算法移植而来,
-统一改写为**局部坐标 + 基岩版方块 ID + 整数确定性**, 并通过 `api.lib.<函数>` 暴露给建造程序。
+"""建筑函数库：采用**局部坐标 + 基岩版方块 ID + 整数确定性**, 并通过 `api.lib.<函数>` 暴露给建造程序。
 
-设计约束(与 viktor/build.py 一致):
+设计约束(与 agent/build.py 一致):
 - 只产出普通 api ops(set/fill/box/line), 不碰世界、不读文件、不用随机数生成器;
 - 坐标一律局部 (u, v, w), 由 origin + facing 负责世界坐标与四朝向;
 - 非法参数抛 ValueError(明确说清要求), 不允许“静默返回 0、方块凭空消失”;
 - 需要覆盖/挖空的函数在文档里显式声明(moon_gate 写 air, water_basin 写水 …)。
 
 用法(模块级):
-    from viktor.buildlib import LIB_SOURCE, index_text, CATEGORIES, BuildLib
+    from agent.buildlib import LIB_SOURCE, index_text, CATEGORIES, BuildLib
 建造沙箱通过 LIB_SOURCE 注入(随 payload 经 stdin 传入), 模型侧写 `api.lib.chinese_roof(...)`。
 """
 from __future__ import annotations
@@ -63,7 +60,7 @@ def _wrap_lib(name, fn):
     sig = _LIB_SIGNATURES.get(name, name + "(...)")
     accepted = list(fn.__code__.co_varnames[:fn.__code__.co_argcount])[1:]  # 去掉 self
     def wrapper(*args, **kwargs):
-        # 兼容原模组的 camelCase 选项名(towerH/towerBlock/…)与 Python 的 snake_case
+        # 同时接受 camelCase 选项名(towerH/towerBlock/…)与 Python 的 snake_case
         if kwargs:
             fixed = {}
             for key, value in kwargs.items():
@@ -90,7 +87,7 @@ for _name in list(_LIB_SIGNATURES):
     if hasattr(_BuildLib, _name):
         _wrapped = _wrap_lib(_name, getattr(_BuildLib, _name))
         setattr(_BuildLib, _name, _wrapped)
-        # 原模组文档用的是 camelCase, 两种写法都能调
+        # 同时支持 camelCase 与 snake_case
         setattr(_BuildLib, _camel(_name), _wrapped)
 del _name, _wrapped
 '''

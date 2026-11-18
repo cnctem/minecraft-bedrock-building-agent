@@ -54,33 +54,24 @@ description: 说明这本技能是什么，以及什么时候应该使用。
 | `mc-details` | 做旧、生活细节、绿化、园林水景与园林函数 | `aging.md`、`details.md`、`plants.md`、`landscape.md`、`functions-garden.md` 等 |
 
 函数库的“怎么用”和“有哪些签名”分开维护：建造运行时见[建造引擎](build-engine.md)与
-[建筑函数库](buildlib.md)，实际签名以 `viktor/buildlib/registry.py` 和生成的 functions 文档为准。
+[建筑函数库](buildlib.md)，实际签名以 `agent/buildlib/registry.py` 和生成的 functions 文档为准。
 
-## 4. 生成文档与来源
+## 4. 维护
 
-部分理论文本和函数索引导出/整理自原 Java 建筑模组。完整“原类 → 技能文档”对照、未移植函数的替代做法见
-[`skills/README.md`](../skills/README.md)。
+技能正文和理论资料直接维护在仓库内，目录见 [技能清单](../skills/README.md)。
+函数索引由 Python registry 生成：
 
-```bash
-# 从原模组的内嵌指导文本重抽（需要本机 ~/repo/tasks）
-python3 tools/gen_skill_guides.py
-python3 tools/gen_skill_guides.py --check
-
-# 从 registry.py 重生成函数签名索引
+~~~bash
 python3 tools/gen_buildlib_docs.py
 python3 tools/gen_buildlib_docs.py --check
-```
+~~~
 
-维护规则：
-
-- 修改函数实现或签名：同步修改 `viktor/buildlib/registry.py`，再运行 `gen_buildlib_docs.py`。
-- 修改由原类生成的教学文本：修改来源后重跑 `gen_skill_guides.py`，不要手改生成物。
-- 手工整理的 `category-guide`、`audit-rules` 和 `mc-plan` 资料需要人工同步来源变化。
-- 修改技能路由、正文或附件名称后，运行 `python3 bot.py --test`，并检查技能加载结果。
+修改函数实现或签名同步 registry；修改路由或附件名后运行自测并检查路径。
+不需要外部类文件。
 
 ## 5. 编写建议
 
 - 主文件保留工作流、硬约束和路由；大表格、专题手册放 `references/`。
-- 写清本项目真实工具名和限制，不照搬 Java 版命令或旧建造设计。
+- 写清本项目真实工具名和限制，以基岩版命令和当前建造引擎为准。
 - 对生成文件标明来源与生成方式，避免双向手工维护。
 - 不把密钥、服务器私密路径、玩家私人信息或运行时记忆写进技能书。

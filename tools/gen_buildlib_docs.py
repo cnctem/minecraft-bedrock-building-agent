@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""从 viktor/buildlib/registry.py 生成技能书里的函数目录文档。
+"""从 agent/buildlib/registry.py 生成技能书里的函数目录文档。
 
 函数签名只有一个来源(SPEC), 所以文档不会和实现漂移:
   python3 tools/gen_buildlib_docs.py          # 重写 skills/*/references/functions-*.md
@@ -15,9 +15,9 @@ from pathlib import Path
 BASE = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(BASE))
 
-from viktor import buildlib as L  # noqa: E402
+from agent import buildlib as L  # noqa: E402
 
-HEADER = ("<!-- 由 tools/gen_buildlib_docs.py 从 viktor/buildlib/registry.py 生成, 不要手改。 -->\n"
+HEADER = ("<!-- 由 tools/gen_buildlib_docs.py 从 agent/buildlib/registry.py 生成, 不要手改。 -->\n"
           "<!-- 改函数签名请改 registry.SPEC, 再重跑该脚本。 -->\n\n")
 
 # (目标文件, 标题, 类别, 导语)

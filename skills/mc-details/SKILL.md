@@ -105,7 +105,7 @@ description: 做旧与绿化细节手册——A. 做旧:风化预算、材质风
 
 # B. 绿化与景观
 
-> **园林/景观的主依据是原模组的 ShapeGuide 圆明园与园林组团章节**：
+> **园林/景观的主依据是建筑设计指导的 圆明园与园林组团章节**：
 > 见技能 `mc-architecture` 的 `references/shape-guide-garden-western.md`
 > （两种语汇并存、水法/石舫/九曲桥/叠石/游廊的做法与“圆明园不要做的事”），
 > 以及技能 `mc-build` 的 `references/mega-build-guide.md`【三】装饰守则。

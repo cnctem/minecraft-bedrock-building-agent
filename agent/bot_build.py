@@ -5,7 +5,7 @@
 
 仅创造模式可见(profiles.TOOLS 的白名单 + 执行层黑名单双重保证)。
 
-依赖方向: bot_build → build/render/models/bus/constants/capabilities; 不 import 其它 bot_* 模块。
+依赖方向: bot_build → build/render/bus/constants/capabilities; 不 import 其它 bot_* 模块。
 """
 import base64
 import json
@@ -13,7 +13,7 @@ import time
 
 import capabilities
 
-from . import build, models, render
+from . import build, render
 from .bus import Req
 from .constants import (
     BUILD_FRAME_CHARS,
@@ -34,7 +34,7 @@ class BotBuildMixin:
             return err
         if getattr(self, "pack_proto", 0) < PACK_PROTO_BUILD:
             return (f"行为包协议过旧(v{getattr(self, 'pack_proto', 0)}), 不支持建造引擎; "
-                    "请重载更新后的 viktor_bridge 行为包。")
+                    "请重载更新后的 agent_bridge 行为包。")
         return ""
 
     def _build_name(self, jid: str, name: str = "") -> str:
@@ -64,7 +64,7 @@ class BotBuildMixin:
                   for i in range(0, len(text), BUILD_FRAME_CHARS)]
         for i, frag in enumerate(frames):
             self.bridge.send_command(
-                f"scriptevent viktor:build put {jid} {i + 1}/{len(frames)} {frag}")
+                f"scriptevent agent:build put {jid} {i + 1}/{len(frames)} {frag}")
         return len(frames)
 
     def _build_await(self, rid: str, cmd: str, jid: str = "") -> Req | None:
@@ -72,7 +72,7 @@ class BotBuildMixin:
         if not self.bus.wait(req, self._abort()):
             if self._abort().is_set() and jid:
                 # 让行为包也停下来: 否则它会把剩下的批次写完
-                self.bridge.send_command(f"scriptevent viktor:build abort {jid}")
+                self.bridge.send_command(f"scriptevent agent:build abort {jid}")
             return None
         return req
 
@@ -97,7 +97,7 @@ class BotBuildMixin:
         if volume > build.MAX_VOLUME:
             return f"scan 范围 {volume} 格超过上限 {build.MAX_VOLUME}, 请缩小"
         rid = self.bus.next_id()
-        cmd = (f"scriptevent viktor:snapshot {rid} {wb[0]} {wb[1]} {wb[2]}"
+        cmd = (f"scriptevent agent:snapshot {rid} {wb[0]} {wb[1]} {wb[2]}"
                f" {wb[3]} {wb[4]} {wb[5]} overworld")
         req = self._build_await(rid, cmd)
         data = self._build_result("snapshot", req)
@@ -137,7 +137,7 @@ class BotBuildMixin:
         except build.BuildError as e:
             return str(e)
         rid = self.bus.next_id()
-        req = self._build_await(rid, f"scriptevent viktor:build preview {rid} {jid}", jid)
+        req = self._build_await(rid, f"scriptevent agent:build preview {rid} {jid}", jid)
         data = self._build_result("build_preview", req)
         if isinstance(data, str):
             return data
@@ -219,15 +219,10 @@ class BotBuildMixin:
         """把渲染图作为图片内容块附给模型, 返回实际附上的张数。
 
         字符图给的是“哪一格是什么方块”(有图例、有坐标), 图片给的是“一眼看出的形状/比例”;
-        两者互补, 不互相替代。实测(2026-11, flash/kimi 都能读图): 同一道“左右是否对称”的判断,
-        只给字符图时 flash 的思考 token 波动 632~4982、单次 6~35 秒; 加一张正面图后稳定在
-        300~380 token、约 3 秒, 结论一致。flash 按张计费(189 token/张, 与分辨率无关),
-        kimi 按像素计费, 所以这里用 1~2 像素/格的小图。
+        两者互补；渲染图采用每格 1~2 像素，控制请求体积。
         """
         if not self.cfg.get("render_attach_png", True):
             return 0
-        if not models.spec(self.cfg, getattr(self, "model_alias", None)).get("vision", True):
-            return 0  # 模型档案标明不支持看图: 只留字符图, 别把请求打成 400
         limit = max(0, int(self.cfg.get("render_attach_max", 2)))
         attached = 0
         for view in views[:limit]:
@@ -303,7 +298,7 @@ class BotBuildMixin:
         if vol > build.MAX_VOLUME:
             return build.limit_hint("渲染区域", vol, build.MAX_VOLUME, "40×40×40")
         rid = self.bus.next_id()
-        cmd = (f"scriptevent viktor:snapshot {rid} {xs[0]} {ys[0]} {zs[0]}"
+        cmd = (f"scriptevent agent:snapshot {rid} {xs[0]} {ys[0]} {zs[0]}"
                f" {xs[1]} {ys[1]} {zs[1]} overworld")
         data = self._build_result("snapshot", self._build_await(rid, cmd))
         if isinstance(data, str):
@@ -365,7 +360,7 @@ class BotBuildMixin:
             return str(e)
         rid = self.bus.next_id()
         data = self._build_result("build_preview",
-                                  self._build_await(rid, f"scriptevent viktor:build preview {rid} {jid}"))
+                                  self._build_await(rid, f"scriptevent agent:build preview {rid} {jid}"))
         if isinstance(data, str):
             return data
         nm = f"蓝图-{self._build_name(jid_src) or jid_src}-{view}"
@@ -388,7 +383,7 @@ class BotBuildMixin:
         rid = self.bus.next_id()
         self._build_active = jid          # 让进度行知道该转发哪个操作
         try:
-            req = self._build_await(rid, f"scriptevent viktor:build commit {rid} {jid}", jid)
+            req = self._build_await(rid, f"scriptevent agent:build commit {rid} {jid}", jid)
             data = self._build_result("build_commit", req)
         finally:
             self._build_active = None
@@ -439,7 +434,7 @@ class BotBuildMixin:
         rid = self.bus.next_id()
         self._build_active = jid
         try:
-            req = self._build_await(rid, f"scriptevent viktor:build undo {rid} {jid}", jid)
+            req = self._build_await(rid, f"scriptevent agent:build undo {rid} {jid}", jid)
             data = self._build_result("build_undo", req)
         finally:
             self._build_active = None
@@ -455,7 +450,7 @@ class BotBuildMixin:
         if err := self._build_ready():
             return err
         rid = self.bus.next_id()
-        req = self._build_await(rid, f"scriptevent viktor:build list {rid}")
+        req = self._build_await(rid, f"scriptevent agent:build list {rid}")
         data = self._build_result("build_status", req)
         if isinstance(data, str):
             return data

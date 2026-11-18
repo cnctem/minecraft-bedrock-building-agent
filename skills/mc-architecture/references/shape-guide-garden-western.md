@@ -1,9 +1,7 @@
-<!-- 由 tools/gen_skill_guides.py 抽取自 Java 模组 ShapeGuide.class 的内嵌指导文本。内容为原模组的设计标准, 已按本项目函数库对齐函数名; 不要手改, 改脚本或原类。 -->
-
 > 函数名两种写法都能用: `api.lib.chineseRoof(...)` 与 `api.lib.chinese_roof(...)`;
 > 参数里的 `{...}` 是选项名清单, 在本项目里写成关键字参数(见 `api.lib.help("名字")`)。
 
-# ShapeGuide · shape-guide-garden-western
+# 园林与西洋建筑造型指导
 
 圆明园式「中式园林 + 西洋石构」双语汇: 西洋楼石构、水景(大水法)、园林构筑
 (石舫/九曲桥/叠石假山/游廊/花池), 以及西洋楼立面、水景、园林组团三套套路。

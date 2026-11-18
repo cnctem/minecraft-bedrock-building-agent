@@ -38,10 +38,10 @@ class ScreenBridge:
     def sync_player_count(self) -> None:
         self.send_command("list")
 
-    def say_as_viktor(self, text: str, max_len: int, max_chunks: int, system: bool = False):
-        # 系统回执不带 <维克托> 前缀(与 [正文]/[工具] 对齐), 让玩家一眼区分“系统”与“AI 发言”
+    def say_as_agent(self, text: str, max_len: int, max_chunks: int, system: bool = False):
+        # 系统回执不带 <agent> 前缀(与 [正文]/[工具] 对齐), 让玩家一眼区分“系统”与“AI 发言”
         text = self._clean_chat(text)
-        prefix = "§7[系统]§f " if system else "§e<维克托>§f "
+        prefix = "§7[系统]§f " if system else "§e<agent>§f "
         # 日志标签与游戏内前缀保持一致: 系统消息记 [系统], 而不是笼统混作 [发言]
         self._emit(text, max_len, max_chunks, prefix, "系统" if system else "发言")
 
@@ -74,4 +74,3 @@ class ScreenBridge:
             self.send_command(f'tellraw @a {{"rawtext":[{{"text":{payload}}}]}}')
             log(f"[{tag}] {chunk}")  # 记下真实发言, 便于事后排查
             time.sleep(0.4)
-

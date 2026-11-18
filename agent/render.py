@@ -316,7 +316,7 @@ def model_scale(pixels: list, max_dim: int = 256) -> int:
     """给模型看的放大倍数: 1~2 像素/格。
 
     视觉编码器本来就会把图重采样到自己的分块尺寸, 超过 1 像素/格不增加信息,
-    只会让按像素计费的模型(kimi 按分块算)多花钱。大件统一用 1。
+    会增大请求体积。大件统一用 1。
     """
     h = len(pixels)
     w = len(pixels[0]) if h else 0

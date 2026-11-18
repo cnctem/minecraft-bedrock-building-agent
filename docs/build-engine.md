@@ -11,13 +11,13 @@
 LLM：受限 Python 建造程序 + origin + facing
   │
   ▼
-Bot（viktor/build.py）
+Bot（agent/build.py）
   │ AST 白名单 + 隔离子进程
   │ api.* / api.lib.* → 形状 ops → 期望体素
   │ 局部坐标变换、方块 ID 校验、多格方块处理
   │ palette（0 = KEEP）+ 分层 RLE
   ▼
-行为包（behavior_pack/viktor_bridge/scripts/main.js）
+行为包（behavior_pack/agent_bridge/scripts/main.js）
   │ preview：逐格读取世界并计算 diff
   │ commit：重新 diff → 贪心合并 → fillBlocks
   │ verify：复读期望体积，报告 holes / wrong / unloaded
@@ -33,11 +33,11 @@ Minecraft 世界
 
 | 文件 | 职责 |
 |---|---|
-| `viktor/build.py` | AST 校验、沙箱、基础 API、体素化、坐标变换、KEEP/RLE 编码、对称与悬空检查 |
-| `viktor/bot_build.py` | 工具编排、上行分帧、总线等待、结果格式化 |
-| `viktor/render.py` | 字符图、PNG、游戏内蓝图墙 |
-| `behavior_pack/viktor_bridge/scripts/main.js` | 世界快照、preview/commit/verify/undo、操作缓存、进度事件 |
-| `viktor/buildlib/` | 可选的高层建筑函数库，最终仍只产生普通形状 ops |
+| `agent/build.py` | AST 校验、沙箱、基础 API、体素化、坐标变换、KEEP/RLE 编码、对称与悬空检查 |
+| `agent/bot_build.py` | 工具编排、上行分帧、总线等待、结果格式化 |
+| `agent/render.py` | 字符图、PNG、游戏内蓝图墙 |
+| `behavior_pack/agent_bridge/scripts/main.js` | 世界快照、preview/commit/verify/undo、操作缓存、进度事件 |
+| `agent/buildlib/` | 可选的高层建筑函数库，最终仍只产生普通形状 ops |
 
 ## 2. 工具与模式门禁
 
@@ -48,10 +48,10 @@ Minecraft 世界
 | `build_undo(operation_id?)` | 撤销指定操作；不传 id 时撤销最近一个可撤销操作 |
 | `build_status()` | 列出上传中、待提交、已提交操作及撤销栈 |
 | `render_build(operation_id, views?, scale?)` | 渲染 Bot 本地保存的编译结果；不读世界、不写世界 |
-| `render_region(x1..z2, views?, scale?)` | 通过 `viktor:snapshot` 读取世界区域并渲染；只读 |
+| `render_region(x1..z2, views?, scale?)` | 通过 `agent:snapshot` 读取世界区域并渲染；只读 |
 | `build_blueprint(operation_id, view, at, direction, step?)` | 把已有计划转成混凝土马赛克墙的**新预览**；仍须 `build_commit` 才写世界，可 `build_undo` |
 
-权限以 `viktor/profiles.py` 为准：
+权限以 `agent/profiles.py` 为准：
 
 - `creative`、`creative_max` 暴露完整的预览、提交、撤销、状态、渲染与蓝图工具。
 - `normal` 的建造相关只读能力仅有 `render_region`；`render_region` 通过世界快照工作，不属于写入门禁。
@@ -140,7 +140,7 @@ ID 再按 `data/raw_ids.txt`（优先）或物品表校验。
 ### 6.1 `scan` 快照
 
 `build_preview(..., scan=[u1,v1,w1,u2,v2,w2])` 会先按 origin/facing 换算世界范围，再调用
-`scriptevent viktor:snapshot` 获取稠密 palette+RLE 快照。程序随后可用：
+`scriptevent agent:snapshot` 获取稠密 palette+RLE 快照。程序随后可用：
 
 | API | 说明 |
 |---|---|
@@ -181,10 +181,10 @@ ID 再按 `data/raw_ids.txt`（优先）或物品表校验。
 
 - 期望体积编码为 `o`（原点）、`s`（尺寸）、`p`（palette）、`rle`。
 - RLE 顺序为 **y 层 → z 行 → x**，索引和计数使用 base36；索引 0 固定为 KEEP。
-- 上行：`scriptevent viktor:build put <jid> <i>/<n> <片段>`，Bot 每帧 **560 字符**，
+- 上行：`scriptevent agent:build put <jid> <i>/<n> <片段>`，Bot 每帧 **560 字符**，
   并且**一帧一次 `screen stuff`**，规避控制台整包长度限制。
-- 下行：`[VIKTOR-BUILD] r<id> #i/n ...` + `DONE`，由 `ServerBus` 重组；缺帧报错。
-- 快照使用 `[VIKTOR-SNAP]`，进度使用独立的 `[VIKTOR-BPROG]`，不与查询回包混帧。
+- 下行：`[AGENT-BUILD] r<id> #i/n ...` + `DONE`，由 `ServerBus` 重组；缺帧报错。
+- 快照使用 `[AGENT-SNAP]`，进度使用独立的 `[AGENT-BPROG]`，不与查询回包混帧。
 
 ### 8.2 preview
 
@@ -229,10 +229,7 @@ ID 再按 `data/raw_ids.txt`（优先）或物品表校验。
   `image_url` 内容块附在 tool 响应之后的一条用户消息里（tool 消息只能放 text：声明 DeepSeek
   服务端联网工具时接口有此限制），模型能真的看到图。给模型的那份按 `render.model_scale`
   用 1~2 像素/格重编码（视觉编码器本来就会重采样，再大只多花钱）。
-  实测（flash/kimi 均可读图）：同一道「左右是否对称」判断，只给字符图时 flash 思考 token 632~4982、
-  耗时 6~35 秒；加一张正面图后稳定 300~380 token、约 3 秒，结论一致。字符图与图片互补：
-  图片给形状/比例/对称的整体印象，方块名与坐标仍看字符图（PNG 颜色是按方块族近似的）。
-- 模型档案可写 `vision: false`（见 `models.py`）；此时只回字符图，避免把请求打成 400。
+  图像用于判断比例、对称和形状，字符图用于定位方块、材质与坐标。
 - 等距视图按远近顺序覆盖，展示体块关系；精确逐格验收仍用 `get_slice` / `inspect_region` / verify。
 - 蓝图墙把渲染像素映射为彩色混凝土，最大约 96×96；`step` 控制降采样。
   它复用同一 preview/commit/undo 路径，不是额外的直接写世界接口。
@@ -241,8 +238,8 @@ ID 再按 `data/raw_ids.txt`（优先）或物品表校验。
 
 ```bash
 python3 bot.py --test
-node --check behavior_pack/viktor_bridge/scripts/main.js
+node --check behavior_pack/agent_bridge/scripts/main.js
 ```
 
 修改编译器、payload 或行为包协议时，必须同步检查两端限额、编解码顺序、错误回包与自测。
-修改工具签名时，同时更新 `viktor/schemas.py`、相关技能书和本文；不要恢复历史设计文档中已经删除的限制或权限描述。
+修改工具签名时，同时更新 `agent/schemas.py`、相关技能书和本文；不要恢复历史设计文档中已经删除的限制或权限描述。

@@ -1,6 +1,6 @@
 """主循环: tail 服务器日志并解析事件, 启动握手/信号收尾。
 
-依赖方向: bot_app → constants/models/paths; 不 import 其它 bot_* 模块。
+依赖方向: bot_app → constants/paths; 不 import 其它 bot_* 模块。
 """
 import os
 import re
@@ -8,9 +8,8 @@ import signal
 import threading
 import time
 
-from . import models, paths
+from . import paths
 from .constants import (
-    BACKUP_WORD,
     BODY_OFF_WORD,
     BODY_ON_WORD,
     COMPACT_WORD,
@@ -23,15 +22,15 @@ from .constants import (
     RE_CHAT,
     RE_BPROG,
     RE_HELLO,
+    PACK_PROTOCOL,
+    CLEAR_WORD,
     RE_JOIN,
     RE_LEAVE,
     RE_LINE,
     RE_LIST,
-    RESTORE_DEFAULT_WORD,
     RESTORE_WORD,
     SMART_COMPACT_WORD,
     SOFT_STOP_WORD,
-    STATUS_WORD,
     TOOL_OFF_WORD,
     TOOL_ON_WORD,
 )
@@ -109,11 +108,8 @@ class BotAppMixin:
             if stripped == NO_STOP_WORD:
                 self._on_no_stop(name)
                 return
-            # 「清空」/「清空k」/「清空g」...: 触发词 -> 模型(见 models.py)。精确匹配,
-            # 认不出来的(「清空x」等)不当作控制词, 照常交给模型当普通聊天。
-            clear_alias = models.resolve_trigger(self.cfg, stripped)
-            if clear_alias:
-                self._on_clear(name, clear_alias)
+            if stripped == CLEAR_WORD:
+                self._on_clear(name)
                 return
             if stripped == COMPACT_WORD:
                 self._on_compact(name)
@@ -122,18 +118,8 @@ class BotAppMixin:
                 # 摘要式压缩: 先让模型把上下文压成工作摘要, 再重建会话(后台线程)
                 self._on_smart_compact(name)
                 return
-            if stripped == STATUS_WORD:
-                self._on_status(name)
-                return
-            if stripped == BACKUP_WORD:
-                self._on_backup(name)
-                return
             if stripped == RESTORE_WORD:
                 self._on_restore_session(name)
-                return
-            if stripped == RESTORE_DEFAULT_WORD:
-                # 带 d 后缀: 同上, 但强制用默认模型恢复(不跟落盘会话的模型走)
-                self._on_restore_session(name, force_default=True)
                 return
             if stripped == BODY_ON_WORD:
                 self._on_body_toggle(name, True)
@@ -170,14 +156,11 @@ class BotAppMixin:
     # ---------- 主循环 ----------
 
     def _probe_bridge(self) -> bool:
-        """协议握手: 发 `viktor:hello <nonce>`, 等行为包回 `[VIKTOR-HELLO] <nonce> v3`。
-        确认行为包支持协议(id 回显 + 分帧 payload)才启用请求总线; 协议版本决定
-        是否暴露空间感知原语。
-        config 的 bus_protocol 可强制: "auto"(默认, 探测) / "v2"/"v3"(跳过探测) / "off"(禁用)。"""
+        """探测 agent_bridge 协议 v5；auto 握手，off 禁用总线。"""
         mode = (self.cfg.get("bus_protocol") or "auto").lower()
-        if mode in ("v2", "v3"):
-            self.pack_proto = int(mode[1:])
-            return True
+        if mode not in ("auto", "off"):
+            log("[协议] bus_protocol 只支持 auto/off")
+            return False
         if mode == "off":
             return False
         log_file = paths.SERVER_LOG_PATH
@@ -187,7 +170,7 @@ class BotAppMixin:
             offset = 0
         nonce = f"p{int(time.time() * 1000) % 100000000}"
         for _ in range(3):
-            self.bridge.send_command(f"scriptevent viktor:hello {nonce}")
+            self.bridge.send_command(f"scriptevent agent:hello {nonce}")
             deadline = time.time() + 2.0
             while time.time() < deadline:
                 try:
@@ -196,10 +179,10 @@ class BotAppMixin:
                         new = f.read()
                 except FileNotFoundError:
                     new = ""
-                m = RE_HELLO.search(new)
-                if m and nonce in new:
-                    self.pack_proto = int(m.group(1))
-                    return True
+                for m in RE_HELLO.finditer(new):
+                    if m.group(1) == nonce:
+                        self.pack_proto = int(m.group(2))
+                        return self.pack_proto == PACK_PROTOCOL
                 time.sleep(0.1)
         return False
 
@@ -212,18 +195,11 @@ class BotAppMixin:
         self.bridge.sync_player_count()
         self.bus_enabled = self._probe_bridge()
         if not self.bus_enabled:
-            log("[协议] 未握手成功, 服务端查询将报错(请重载 viktor_bridge 行为包)")
-        elif self.pack_proto >= 4:
-            log(f"[协议] 行为包交互协议: v{self.pack_proto} "
-                "(id 路由 + 批量下发 + 空间感知原语 + 建造引擎)")
-        elif self.pack_proto >= 3:
-            log(f"[协议] 行为包交互协议: v{self.pack_proto} "
-                "(id 路由 + 批量下发 + 空间感知原语; 缺建造引擎, 请重载行为包)")
+            log("[协议] 未握手成功, 服务端查询将报错(请重载 agent_bridge 行为包)")
         else:
-            log(f"[协议] 行为包交互协议: v{self.pack_proto} "
-                "(id 路由 + 批量下发; 缺 heightmap/slice/inspect/find, 请重载行为包)")
-        # 平滑重启: 若指定 VIKTOR_RESTORE=<落盘会话路径>, 启动时自动灌回(静默, 不发聊天)
-        restore = os.environ.get("VIKTOR_RESTORE")
+            log(f"[协议] agent_bridge v{self.pack_proto}: 空间感知与建造引擎已启用")
+        # 平滑重启: 若指定 AGENT_RESTORE=<落盘会话路径>, 启动时自动灌回(静默, 不发聊天)
+        restore = os.environ.get("AGENT_RESTORE")
         if restore:
             try:
                 self.resume_session(restore)

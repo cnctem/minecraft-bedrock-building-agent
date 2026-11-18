@@ -2,7 +2,7 @@
 
 三件事:
 
-1. `find_builds` / `read_build` —— 查 `viktor/ledger.py` 的施工台账: 谁、为什么、造了什么、
+1. `find_builds` / `read_build` —— 查 `agent/ledger.py` 的施工台账: 谁、为什么、造了什么、
    在哪个包围盒、多少格、什么材料、提交与撤销状态。它回答的是「今天造了什么」「上次那座塔
    在哪」这类问题, 不需要读会话正文(理由/坐标都是切创造与建造那一刻就记下来的结构化事实)。
 2. `search_history` —— 跨会话文件按关键词找「当时聊了什么」, 回文件 + 对话行号。
@@ -12,7 +12,7 @@
 先列文件清单再逐个读是之前低效的根源。
 
 会话落盘是 append-only 的 JSONL(首行 `_meta`, 之后每行一条消息), 对话口径复用
-`Session.compact`: 只留玩家消息与维克托在游戏内说过的话(含 ptc 内嵌发言)。聊天记录本身没有
+`Session.compact`: 只留玩家消息与agent在游戏内说过的话(含 ptc 内嵌发言)。聊天记录本身没有
 逐条时间戳, 所以对话只能按文件开始时间标注; 精确到分钟的时间在台账里。
 
 依赖方向: history → ledger/paths/session(只用其 compact 与文本工具); 不 import bot_*。
@@ -159,8 +159,6 @@ def list_sessions(limit: int = DEFAULT_LIST_LIMIT) -> str:
     for _mtime, kind, path, size in entries[:limit]:
         meta, count, first = _scan(path)
         parts = [path.name, kind]
-        if meta.get("model"):
-            parts.append(str(meta["model"]))
         if meta.get("started"):
             parts.append(str(meta["started"]))
         parts.append(f"{count} 条")
@@ -188,7 +186,7 @@ def _call_args(call: dict) -> dict:
 
 
 def _speech(messages: list[dict]) -> list[str]:
-    """从压缩后的消息里取出维克托真正说出口的话(send_chat_message, 含 ptc 内嵌)。"""
+    """从压缩后的消息里取出agent真正说出口的话(send_chat_message, 含 ptc 内嵌)。"""
     out: list[str] = []
     for m in messages:
         for tc in m.get("tool_calls") or []:
@@ -212,7 +210,7 @@ def _speech(messages: list[dict]) -> list[str]:
 
 
 def _dialogue(messages: list[dict]) -> list[str]:
-    """压缩后的消息 → 逐行对话(玩家消息已带 "玩家名: " 前缀, 维克托发言加 "维克托: ")。"""
+    """压缩后的消息 → 逐行对话(玩家消息已带 "玩家名: " 前缀, agent发言加 "agent: ")。"""
     lines: list[str] = []
     for m in messages:
         role = m.get("role")
@@ -221,7 +219,7 @@ def _dialogue(messages: list[dict]) -> list[str]:
             if text:
                 lines.append(text)
         elif role == "assistant":
-            lines.extend("维克托: " + text for text in _speech([m]))
+            lines.extend("agent: " + text for text in _speech([m]))
     return lines
 
 
@@ -962,11 +960,11 @@ def read_session(name: str, contains: str = "", around=None, window: int = 3,
     kept, stats = Session.compact(messages)
     lines = _dialogue(kept)
     header = [
-        f"[会话] {path.name} · 模型 {meta.get('model') or '?'} · "
+        f"[会话] {path.name} · "
         f"开始 {meta.get('started') or ledger.fmt_ts(_file_start(path, meta))} · "
         f"对话 {len(lines)} 行",
         f"[统计] 文件内 {len(messages)} 条消息 → 保留 {stats['kept_user']} 条玩家消息 / "
-        f"{stats['kept_speech']} 句维克托发言(工具调用与正文已按「压缩」口径丢弃)",
+        f"{stats['kept_speech']} 句agent发言(工具调用与正文已按「压缩」口径丢弃)",
     ]
     needle = (contains or "").strip().casefold()
     idxs: list[int] = []

@@ -1,30 +1,28 @@
-// Viktor Bridge: 把聊天、玩家坐标、物品栏桥接给外部 bot。
+// Agent Bridge: 把聊天、玩家坐标、物品栏桥接给外部 bot。
 // BDS 控制台不回显玩家聊天, 这里用 console.log 输出到控制台/日志。
 //
-// 协议 v2: bot 在事件参数最前面带一个请求 id `r<数字>`, 本脚本把该 id 原样回显到
-// 每一行输出里, 于是 bot 可以一次下发整批请求、再按 id 认领各自回包 (见 [VIKTOR-*] 行)。
-// 旧格式 (无 id) 依旧兼容: takeId 只在首 token 形如 r123 时才认作 id。
+// 协议 v5: bot 在事件参数最前面带一个请求 id `r<数字>`, 本脚本把该 id 原样回显到
+// 每一行输出里, 于是 bot 可以一次下发整批请求、再按 id 认领各自回包 (见 [AGENT-*] 行)。
+// 手工点查可省略 id；总线请求始终携带 r<数字>。
 import { world, system, ItemTypes, BlockTypes } from "@minecraft/server";
 import * as mc from "@minecraft/server";
-import { ActionFormData } from "@minecraft/server-ui";
 
-const CHAT_TAG = "[VIKTOR-CHAT]";
-const POS_TAG = "[VIKTOR-POS]";
-const INV_TAG = "[VIKTOR-INV]";
-const BLOCK_TAG = "[VIKTOR-BLOCK]";
-const IDS_TAG = "[VIKTOR-IDS]";  // 导出全部物品/方块 ID, 供离线生成速查表
-const HELLO_TAG = "[VIKTOR-HELLO]";  // 协议握手: bot 据此判断行为包是否支持 v2
-const MENU_TAG = "[VIKTOR-MENU]";    // 可点击菜单(server-ui 表单)回执
-const MAP_TAG = "[VIKTOR-MAP]";        // 地形高度图
-const SLICE_TAG = "[VIKTOR-SLICE]";    // 二维切面(调色板 + base36 行)
-const INSPECT_TAG = "[VIKTOR-INSPECT]"; // 三维区域摘要 / 单元列表 / 不符合项
-const FIND_TAG = "[VIKTOR-FIND]";      // 区域内搜方块坐标
-const CAPS_TAG = "[VIKTOR-CAPS]";      // 能力广播(协议/可用 API/各项上限)
-const BUILD_TAG = "[VIKTOR-BUILD]";    // 建造引擎回包(分帧 JSON)
-const SNAP_TAG = "[VIKTOR-SNAP]";      // 世界快照(供建造程序读地形)
-const BPROG_TAG = "[VIKTOR-BPROG]";    // 建造进度(独立 tag: 不进总线, 只给 bot 转发)
-// v3: 新增 heightmap/slice/inspect/find/caps; 查询回包改为「一个 JSON payload 分多帧」
-const PROTOCOL = "v4";
+const CHAT_TAG = "[AGENT-CHAT]";
+const POS_TAG = "[AGENT-POS]";
+const INV_TAG = "[AGENT-INV]";
+const BLOCK_TAG = "[AGENT-BLOCK]";
+const IDS_TAG = "[AGENT-IDS]";  // 导出全部物品/方块 ID, 供离线生成速查表
+const HELLO_TAG = "[AGENT-HELLO]";  // 协议握手: bot 据此判断行为包协议版本
+const MAP_TAG = "[AGENT-MAP]";        // 地形高度图
+const SLICE_TAG = "[AGENT-SLICE]";    // 二维切面(调色板 + base36 行)
+const INSPECT_TAG = "[AGENT-INSPECT]"; // 三维区域摘要 / 单元列表 / 不符合项
+const FIND_TAG = "[AGENT-FIND]";      // 区域内搜方块坐标
+const CAPS_TAG = "[AGENT-CAPS]";      // 能力广播(协议/可用 API/各项上限)
+const BUILD_TAG = "[AGENT-BUILD]";    // 建造引擎回包(分帧 JSON)
+const SNAP_TAG = "[AGENT-SNAP]";      // 世界快照(供建造程序读地形)
+const BPROG_TAG = "[AGENT-BPROG]";    // 建造进度(独立 tag: 不进总线, 只给 bot 转发)
+// 空间查询使用「一个 JSON payload 分多帧」
+const PROTOCOL = "v5";
 // 分帧: 每帧 JSON 字符数。console.log 的行长没有官方保证, 700 是实测安全的保守值;
 // 一帧一行, bot 侧按 `#i/n` 重组, 因此单次回包不再受行长限制。
 const FRAME_CHARS = 700;
@@ -52,7 +50,7 @@ try {
 // 屏幕上显示 1670, 而 round 会得到 1671, 与玩家所见不符。
 const blockCoord = (n) => Math.floor(n);
 
-// 协议 v2: 首 token 是请求 id(r<数字>) 时拆出来, 否则视为旧格式。
+// 协议 v5: 首 token 是请求 id(r<数字>) 时拆出来, 手工点查可以省略。
 function takeId(message) {
   const s = String(message || "").trim();
   const m = s.match(/^(r\d+)(?:\s+([\s\S]*))?$/);
@@ -63,7 +61,7 @@ function tagOf(base, id) {
   return id ? `${base} ${id}` : base;
 }
 
-// ---------- v3: JSON payload 分帧 + 调色板 ----------
+// ---------- JSON payload 分帧 + 调色板 ----------
 // 一次查询只回一个 JSON; 超过一帧长度就切成 `#i/n <片段>` 多行, 末行 DONE。
 // bot 侧按 index 重组(不依赖到达顺序), 于是大块数据的传输不受单行长度限制。
 function emitPayload(tagBase, id, payload) {
@@ -146,12 +144,12 @@ function getPlayers() {
   try {
     return world.getAllPlayers();
   } catch (e) {
-    console.error(`[VIKTOR] getAllPlayers 失败: ${e}`);
+    console.error(`[AGENT] getAllPlayers 失败: ${e}`);
     return [];
   }
 }
 
-// 坐标查询: `scriptevent viktor:pos [id]`
+// 坐标查询: `scriptevent agent:pos [id]`
 // 每人一行; 无论有无玩家, 末尾都补一条 `DONE` 让 bot 有明确终止信号。
 function reportPositions(message) {
   const { id } = takeId(message);
@@ -171,7 +169,7 @@ function reportPositions(message) {
   if (id) console.log(`${tag} DONE`);
 }
 
-// 物品栏/手持查询: `scriptevent viktor:inv [id]`
+// 物品栏/手持查询: `scriptevent agent:inv [id]`
 // 每人若干行: `<玩家> <槽位> <物品ID> <数量>`; 每人末行 `<玩家> DONE <手持槽位>`;
 // 全体末尾再补一条 `DONE` 作为整批终止信号。
 function reportInventory(message) {
@@ -209,7 +207,7 @@ function reportInventory(message) {
   if (id) console.log(`${tag} DONE`);
 }
 
-// 方块查询: `scriptevent viktor:block [id] <x> <y> <z> [维度]`
+// 方块查询: `scriptevent agent:block [id] <x> <y> <z> [维度]`
 // 基岩版没有 `data get block`(那是 Java 版), 只能由脚本读取方块类型
 function reportBlock(message) {
   const { id, rest } = takeId(message);
@@ -254,7 +252,7 @@ function reportBlock(message) {
   }
 }
 
-// ---------- v3: 感知原语 ----------
+// ---------- 感知原语 ----------
 // 目标: 让 bot 用「由粗到细」的少数几次调用看清现场, 而不是切几十个薄片、每格一行。
 //   caps      : 能力广播(协议/可用 API/上限)
 //   heightmap : 每列地表高度 + 顶面方块(选址/地形/地基)
@@ -657,7 +655,7 @@ function snapshotRegion(message) {
   runJob(snapshotJob(id, resolveDimension(parts[6]), xs, ys, zs));
 }
 
-// ---------- v4: 建造引擎 ----------
+// ---------- 建造引擎 ----------
 // 分工: bot 负责把「建造程序」编译成期望体素(纯几何), 这里负责
 //   预览(diff) → 提交(贪心合并 + fillBlocks 时间切片) → 校验(复读比对) → 撤销(before 体积)
 // 期望体积编码: palette(索引 0 固定 = KEEP 不写) + 分层 RLE("idx:count" base36, 逗号分隔)。
@@ -1143,7 +1141,7 @@ function handleBuildInner(message) {
   emitPayload(BUILD_TAG, id, { ok: false, error: `未知动作 ${action}` });
 }
 
-// 导出全部物品/方块 ID: `scriptevent viktor:ids`(控制台触发, 供离线重建 data/items.json)。
+// 导出全部物品/方块 ID: `scriptevent agent:ids`(控制台触发, 供离线重建 data/items.json)。
 // 分块输出, 避免单行过长被切断。升级服务器版本后可重跑一次刷新 ID 清单。
 function dumpIds() {
   const CHUNK = 100;
@@ -1166,111 +1164,20 @@ function dumpIds() {
   console.log(`${IDS_TAG} DONE`);
 }
 
-// 可点击菜单(server-ui 表单): `scriptevent viktor:menu ...`
-// 基岩版 tellraw 不支持 clickEvent, 所以“点一下传送/做按钮菜单”只能靠表单。
-// 协议(逐条下发, 避免单条命令超长):
-//   viktor:menu new <玩家> <标题...>        开始一个新菜单
-//   viktor:menu add <玩家> <按钮文字>|<命令>  追加一个按钮(命令可带或不带前导 /)
-//   viktor:menu show <玩家>                  弹出表单; 按钮点击后以该玩家身份执行命令
-const pendingMenus = new Map();  // 玩家名 -> { title, buttons: [{label, command}] }
-
-function playerByName(name) {
-  for (const p of getPlayers()) if (p.name === name) return p;
-  return undefined;
-}
-
-function showMenu(player, title, buttons) {
-  const form = new ActionFormData();
-  form.title(title || "菜单");
-  for (const b of buttons) form.button(b.label);
-  const onResult = (resp) => {
-    if (!resp || resp.canceled) {
-      console.log(`${MENU_TAG} ${player.name} 关闭了菜单`);
-      return;
-    }
-    const b = buttons[resp.selection];
-    if (!b) return;
-    console.log(`${MENU_TAG} ${player.name} 选择: ${b.label}`);
-    try {
-      player.runCommand(String(b.command).replace(/^\//, ""));
-    } catch (e) {
-      console.error(`${MENU_TAG} ${player.name} 执行 [${b.command}] 失败: ${e}`);
-    }
-  };
-  const attempt = (tries) => {
-    form.show(player).then(onResult).catch((e) => {
-      // 玩家正好开着别的界面时会 UserBusy, 稍后重试几次
-      if (String(e).includes("UserBusy") && tries < 20) {
-        system.runTimeout(() => attempt(tries + 1), 10);
-      } else {
-        console.error(`${MENU_TAG} 向 ${player.name} 显示菜单失败: ${e}`);
-      }
-    });
-  };
-  attempt(0);
-}
-
-function handleMenu(message) {
-  const s = String(message || "").trim();
-  const m = s.match(/^(\S+)\s+(\S+)(?:\s+([\s\S]*))?$/);
-  if (!m) {
-    console.error(`${MENU_TAG} 参数不足: ${s}`);
-    return;
-  }
-  const action = m[1].toLowerCase();
-  const playerName = m[2];
-  const rest = m[3] || "";
-  if (action === "new") {
-    pendingMenus.set(playerName, { title: rest, buttons: [] });
-    return;
-  }
-  if (action === "add") {
-    const menu = pendingMenus.get(playerName);
-    if (!menu) {
-      console.error(`${MENU_TAG} ${playerName} 未先 new 菜单`);
-      return;
-    }
-    const i = rest.indexOf("|");
-    if (i <= 0) {
-      console.error(`${MENU_TAG} add 缺少 标签|命令: ${rest}`);
-      return;
-    }
-    menu.buttons.push({ label: rest.slice(0, i), command: rest.slice(i + 1) });
-    return;
-  }
-  if (action === "show") {
-    const menu = pendingMenus.get(playerName) || { title: "", buttons: [] };
-    pendingMenus.delete(playerName);
-    const player = playerByName(playerName);
-    if (!menu.buttons.length) {
-      console.error(`${MENU_TAG} ${playerName} 的菜单没有按钮`);
-      return;
-    }
-    if (!player) {
-      console.error(`${MENU_TAG} 玩家 ${playerName} 不在线, 菜单作废`);
-      return;
-    }
-    showMenu(player, menu.title, menu.buttons);
-    return;
-  }
-  console.error(`${MENU_TAG} 未知动作: ${action}`);
-}
-
 system.afterEvents.scriptEventReceive.subscribe((ev) => {
-  if (ev.id === "viktor:hello") console.log(`${HELLO_TAG} ${String(ev.message || "").trim()} ${PROTOCOL}`);
-  else if (ev.id === "viktor:pos") reportPositions(ev.message);
-  else if (ev.id === "viktor:inv") reportInventory(ev.message);
-  else if (ev.id === "viktor:block") reportBlock(ev.message);
-  else if (ev.id === "viktor:heightmap") heightmap(ev.message);
-  else if (ev.id === "viktor:slice") sliceBlocks(ev.message);
-  else if (ev.id === "viktor:inspect") inspectRegion(ev.message);
-  else if (ev.id === "viktor:find") findBlocks(ev.message);
-  else if (ev.id === "viktor:caps") reportCaps(ev.message);
-  else if (ev.id === "viktor:build") handleBuild(ev.message);
-  else if (ev.id === "viktor:snapshot") snapshotRegion(ev.message);
-  else if (ev.id === "viktor:menu") handleMenu(ev.message);
-  else if (ev.id === "viktor:ids") dumpIds();
-}, { namespaces: ["viktor"] });
+  if (ev.id === "agent:hello") console.log(`${HELLO_TAG} ${String(ev.message || "").trim()} ${PROTOCOL}`);
+  else if (ev.id === "agent:pos") reportPositions(ev.message);
+  else if (ev.id === "agent:inv") reportInventory(ev.message);
+  else if (ev.id === "agent:block") reportBlock(ev.message);
+  else if (ev.id === "agent:heightmap") heightmap(ev.message);
+  else if (ev.id === "agent:slice") sliceBlocks(ev.message);
+  else if (ev.id === "agent:inspect") inspectRegion(ev.message);
+  else if (ev.id === "agent:find") findBlocks(ev.message);
+  else if (ev.id === "agent:caps") reportCaps(ev.message);
+  else if (ev.id === "agent:build") handleBuild(ev.message);
+  else if (ev.id === "agent:snapshot") snapshotRegion(ev.message);
+  else if (ev.id === "agent:ids") dumpIds();
+}, { namespaces: ["agent"] });
 
 system.runTimeout(() => {
   console.log(`${CHAT_TAG} bridge loaded, protocol ${PROTOCOL}, chatSend subscribed = ${subscribed}`);

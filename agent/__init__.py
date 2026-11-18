@@ -1,15 +1,15 @@
-"""维克托: Minecraft 基岩版服务器智能管家。
+"""agent: Minecraft 基岩版服务器智能管家。
 
 分层与依赖方向(严格单向、无环; 上层可以 import 下层, 下层绝不反向 import 上层):
 
-    bot.py (入口)  →  viktor.selftest (--test)
+    bot.py (入口)  →  agent.selftest (--test)
         │
-        viktor.Bot = BotCoreMixin + BotControlMixin + BotToolsMixin + BotBuildMixin
+        agent.Bot = BotCoreMixin + BotControlMixin + BotToolsMixin + BotBuildMixin
                      + BotAgentMixin + BotAppMixin      ← 各职责 mixin(彼此不 import,
         │                                                只用 self.* 经 MRO 协作)
-        session / bus / bridge / config / profiles / models
+        session / bus / bridge / config / profiles
         │
-        paths / constants / prompts / schemas / models ← 叶子层
+        paths / constants / prompts / schemas ← 叶子层
 
 同一层的模块之间也尽量不互相依赖; 需要跨职责协作时, 通过组合后的 Bot 实例(self.*)完成。
 """

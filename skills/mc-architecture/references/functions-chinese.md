@@ -1,4 +1,4 @@
-<!-- 由 tools/gen_buildlib_docs.py 从 viktor/buildlib/registry.py 生成, 不要手改。 -->
+<!-- 由 tools/gen_buildlib_docs.py 从 agent/buildlib/registry.py 生成, 不要手改。 -->
 <!-- 改函数签名请改 registry.SPEC, 再重跑该脚本。 -->
 
 # 中式建筑函数(官式 + 地域)
@@ -55,7 +55,7 @@
 - paifang(cu, cv, cw, axis, spans, height, span_width, column_block, beam_block, roof_block)
     牌坊(间数 3 = 三间四柱)
 - ridge_beasts(u1, w1, u2, w2, v, count, block)
-    屋脊吻兽
+    屋脊吻兽: 范围给**正脊**两端(不是屋檐外框), v 给脊顶所在层; 给成屋檐范围会把吻兽挂到脊外
 - stepped_terrace(u1, w1, u2, w2, base_v, steps, step_height, step_depth, block)
     月台/踏道台阶
 

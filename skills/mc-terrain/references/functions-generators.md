@@ -1,4 +1,4 @@
-<!-- 由 tools/gen_buildlib_docs.py 从 viktor/buildlib/registry.py 生成, 不要手改。 -->
+<!-- 由 tools/gen_buildlib_docs.py 从 agent/buildlib/registry.py 生成, 不要手改。 -->
 <!-- 改函数签名请改 registry.SPEC, 再重跑该脚本。 -->
 
 # 自然生成器与整栋模板

@@ -61,7 +61,7 @@ api.pattern((1, 0, 1), (W - 2, H - 2, 1), ["oak_planks", "spruce_planks"])  # �
 
 ### 1.2 api.lib 建筑函数库
 
-`api.lib` 是 bot 自带的几何库(移植自一个 Java 建筑模组, 已按基岩版方块与局部坐标重写)。
+`api.lib` 是 内置 Python 几何库，使用基岩版方块与局部坐标。
 **凡是“曲线/收分/重复构件”都先找函数**, 手写循环既慢又容易错位:
 
 ```python
@@ -88,10 +88,9 @@ api.lib.diagrid(0, 0, 24, 12, 16, 26, 8, 6, 1, "quartz_block")
 完整分类与签名: `references/functions-geometry.md`(基础几何), 其它类别见技能
 `mc-architecture`(`functions-chinese/vault/western.md`)、`mc-interior`、`mc-details`、`mc-terrain`。
 
-### 1.3 大规模建造必读(原模组的硬规则)
+### 1.3 大规模建造必读(本手册的硬规则)
 
-写大型/成片建造前，先载入 **`references/mega-build-guide.md`**（抽取自原模组的
-MegaBuildGuide）：纪念性结构函数、装饰函数清单、预制风格库、超大规模分区策略，
+写大型/成片建造前，先载入 **`references/mega-build-guide.md`**：纪念性结构函数、装饰函数清单、预制风格库、超大规模分区策略，
 以及**建造正确性红线**。其中与本项目语义直接相关的四条，务必记住：
 
 1. **后写覆盖先写**：同一格多次写以最后一次为准；“先写的生效”是错的。
@@ -99,9 +98,9 @@ MegaBuildGuide）：纪念性结构函数、装饰函数清单、预制风格库
 3. **注意参数的 y 位置**：`gardenPath/carpetArea/arbor/clothesline/flowerGarden/mosaicFloor/
    lanternCeiling` 这 7 个函数的 **y 在最后一个参数位**；写错顺序 → 整片装饰飘到半空或埋进地里。
 4. **方块参数只能是方块名字符串**：写数字/布尔会被当成方块名（本项目会直接报“未知方块”，
-   比原模组“用主体材料补位”更安全，但仍要按签名写）。
+   请按实际函数签名传入字符串）。
 
-原模组的 `mirror / rotate90 / arrayLinear / arrayRadial / clone / replace` 在本项目里的对应做法：
+`mirror / rotate90 / arrayLinear / arrayRadial / clone / replace` 在本项目里的对应做法：
 镜像与阵列用**函数 + 循环**（`def wing(du): ...` 再调两次）；复制就是**重跑同一段程序**
 （KEEP 语义不会破坏已建部分）；替换用先铺满、再覆盖的方式。
 

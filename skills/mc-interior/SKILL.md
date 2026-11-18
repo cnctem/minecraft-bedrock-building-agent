@@ -68,7 +68,7 @@ description: 室内装修/内饰手册——房间功能分区、家具方块能
   `entryway_set` 玄关、`storage_nook` 储物、`shelf_run` 置物架、`clutter_corner` 杂物、
   `room_divider` 隔断、`lantern_ceiling` 吊灯阵; 小户型整套用 `cottage_interior`。
   函数一次性摆好“地毯 + 大件 + 焦点 + 灯”, 之后只做换材质和挪位置, 比逐件手摆快且不乱。
-- **装饰守则与 y 语义（原模组硬规则，见技能 `mc-build` 的
+- **装饰守则与 y 语义（本手册硬规则，见技能 `mc-build` 的
   `references/mega-build-guide.md`【三】/【三·补】）**：
   窗一律用 `windowUnit`/`windowBand`（不要徒手挖洞）；屋顶完成必加 `eavesTrim`；
   墙面按上/中/下三段分别用 `wallTrim`/`crownMolding`；

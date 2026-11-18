@@ -38,9 +38,8 @@ class Session:
     """一次会话: 从有人进服到服务器清零。上下文平时 append-only 以保证缓存命中;
     唯一的重写路径是 compact()(压缩): 只留玩家消息与游戏内发言, 有损、会打破前缀缓存。"""
 
-    def __init__(self, session_id: int, model: str | None = None):
+    def __init__(self, session_id: int):
         self.id = session_id
-        self.model = model  # 本会话用的模型别名(见 models.py); 只有开新会话时能变
         self.started = datetime.now()
         self.messages: list[dict] = []  # 不含 system
         self.replied_count = 0
@@ -158,7 +157,7 @@ class Session:
         return out
 
     # ---------- 压缩(compact) ----------
-    # 只保留"对话记录": 玩家消息 + 维克托的游戏内发言(send_chat_message, 含 ptc 内嵌)。
+    # 只保留"对话记录": 玩家消息 + agent的游戏内发言(send_chat_message, 含 ptc 内嵌)。
     # 工具调用/结果、普通正文、思考内容、旧系统注记全部丢弃; 由调用方负责重新注入
     # 记忆/技能书/模式注记与压缩完成注记, 并开新会话。
 
@@ -203,16 +202,14 @@ class Session:
         return "\n".join(lines)
 
     @staticmethod
-    def compact(messages: list[dict], keep_reasoning: bool = True) -> tuple[list[dict], dict]:
+    def compact(messages: list[dict]) -> tuple[list[dict], dict]:
         """把上下文压缩成对话记录, 返回 (保留的消息, 统计)。
 
         保留: 全部 user 消息; assistant 里 send_chat_message 直接调用(及其 tool 结果)、
         ptc 中夹带的 send_chat_message(参数与结果重写成只含这些子调用)。
         丢弃: 其他工具调用与结果、assistant 普通正文与思考、旧 system 注记、孤儿 tool。
 
-        保留的 assistant(tool_calls) 统一 content=None; keep_reasoning=True 时补
-        reasoning_content=""(DeepSeek 思考模式要求该字段存在, 空串可用),
-        不需要回传思考链的模型(kimi 等)直接不带该字段, 省输入 token。
+        保留的 assistant(tool_calls) 统一 content=None、reasoning_content=""。
         某个该保留的调用缺对应 tool 结果时, 整条 assistant 消息丢弃(与 _sanitize 同口径,
         保证配对严格)。
         """
@@ -276,8 +273,7 @@ class Session:
                     kept_calls, kept_tools, speech = [], [], 0
                 if kept_calls:
                     kept_msg = {"role": "assistant", "content": None, "tool_calls": kept_calls}
-                    if keep_reasoning:
-                        kept_msg["reasoning_content"] = ""
+                    kept_msg["reasoning_content"] = ""
                     out.append(kept_msg)
                     out.extend(kept_tools)
                     kept_speech += speech
@@ -406,9 +402,9 @@ class Session:
         directory.mkdir(parents=True, exist_ok=True)
         name = self.started.strftime(f"{tag}-%Y%m%d-%H%M%S") + f"-s{self.id}.jsonl"
         with open(directory / name, "w", encoding="utf-8") as f:
-            # 首行是元信息(不是消息): 记录本会话用的模型, 供「恢复会话」按原模型灌回。
+            # 首行元信息不属于消息，记录会话编号和开始时间。
             # 读会话时按 "_meta" 键跳过这一行(见 bot_control.resume_session)。
-            f.write(json.dumps({"_meta": {"session": self.id, "model": self.model,
+            f.write(json.dumps({"_meta": {"session": self.id,
                                           "started": self.started.isoformat(timespec="seconds")}},
                                ensure_ascii=False) + "\n")
             for m in self.messages:
@@ -426,4 +422,3 @@ class OneShotContext:
         self.abort = threading.Event()       # 单独中止这一个(目前只有全局 "1 强制停止" 会置位)
         self.soft_abort = threading.Event()
         self.session = Session(oid)          # ephemeral: 结束后落盘到 logs/oneshot/, 不进主会话
-
